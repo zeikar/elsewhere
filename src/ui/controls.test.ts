@@ -134,6 +134,12 @@ describe('auto-hide', () => {
     expect(document.body.style.cursor).not.toBe('none');
   });
 
+  it('exposes the controls as a labelled group', () => {
+    const c = setup(mockEngine());
+    expect(c.element.getAttribute('role')).toBe('group');
+    expect(c.element.getAttribute('aria-label')).toBe('Controls');
+  });
+
   it('dispose removes the UI, its listeners and the cursor override', () => {
     const engine = mockEngine();
     const c = setup(engine);
@@ -202,6 +208,19 @@ describe('keyboard', () => {
     expect(fs.request).toHaveBeenCalledTimes(1);
     expect(fs.exit).not.toHaveBeenCalled();
     key('F', { code: 'KeyF' });
+    expect(fs.exit).toHaveBeenCalledTimes(1);
+  });
+
+  it('F follows the layout, falling back to the physical key only for non-Latin layouts', () => {
+    const fs = stubFullscreen(true);
+    setup(mockEngine());
+    // Dvorak: the physical F key types "u", and "f" sits elsewhere.
+    expect(key('u', { code: 'KeyF' }).defaultPrevented).toBe(false);
+    expect(fs.request).not.toHaveBeenCalled();
+    key('f', { code: 'KeyY' });
+    expect(fs.request).toHaveBeenCalledTimes(1);
+    // Russian: the physical F key types "а" (Cyrillic), so the key code decides.
+    key('а', { code: 'KeyF' });
     expect(fs.exit).toHaveBeenCalledTimes(1);
   });
 
@@ -286,6 +305,78 @@ describe('buttons', () => {
     setup(mockEngine());
     expect(() => button('fullscreen').click()).not.toThrow();
     await vi.waitFor(() => expect(warn).toHaveBeenCalled());
+  });
+});
+
+describe('a tap that reveals the hidden UI', () => {
+  /** A pointer gesture on `target`: pointerdown, then the activity events, then its click. */
+  function tap(target: Element): void {
+    target.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'touch' }));
+    target.dispatchEvent(new Event('touchstart', { bubbles: true }));
+    target.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerType: 'touch' }));
+    (target as HTMLElement).click();
+  }
+
+  it('does not press the button under it, only shows the UI', () => {
+    const engine = mockEngine();
+    const c = setup(engine);
+    vi.advanceTimersByTime(UI_HIDE_DELAY_MS);
+    expect(c.isVisible()).toBe(false);
+
+    tap(button('pause'));
+    expect(c.isVisible()).toBe(true);
+    expect(engine.pause).not.toHaveBeenCalled();
+    expect(button('pause').textContent).toBe('Pause');
+
+    tap(button('speed'));
+    expect(engine.pause).not.toHaveBeenCalled();
+    tap(button('pause'));
+    expect(engine.pause).toHaveBeenCalledTimes(1);
+  });
+
+  it('a tap on a visible button presses it', () => {
+    const engine = mockEngine(0);
+    const c = setup(engine);
+    expect(c.isVisible()).toBe(true);
+    tap(button('pause'));
+    expect(engine.pause).toHaveBeenCalledTimes(1);
+    tap(button('speed'));
+    expect(engine.setSpeed).toHaveBeenLastCalledWith(1);
+  });
+
+  it('a revealing tap elsewhere just shows the UI', () => {
+    const engine = mockEngine();
+    const c = setup(engine);
+    vi.advanceTimersByTime(UI_HIDE_DELAY_MS);
+    const outside = document.createElement('div');
+    document.body.append(outside);
+    const onClick = vi.fn();
+    outside.addEventListener('click', onClick);
+
+    tap(outside);
+    expect(c.isVisible()).toBe(true);
+    expect(onClick).toHaveBeenCalledTimes(1);
+    expect(engine.pause).not.toHaveBeenCalled();
+    // The swallowing ended with that gesture.
+    button('pause').click();
+    expect(engine.pause).toHaveBeenCalledTimes(1);
+    outside.remove();
+  });
+
+  it('a cancelled gesture or a keypress does not swallow a later click', () => {
+    const engine = mockEngine();
+    setup(engine);
+    vi.advanceTimersByTime(UI_HIDE_DELAY_MS);
+    window.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch' }));
+    window.dispatchEvent(new PointerEvent('pointercancel', { pointerType: 'touch' }));
+    button('pause').click();
+    expect(engine.pause).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(UI_HIDE_DELAY_MS);
+    window.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch' }));
+    key('Enter');
+    button('pause').click();
+    expect(engine.resume).toHaveBeenCalledTimes(1);
   });
 });
 

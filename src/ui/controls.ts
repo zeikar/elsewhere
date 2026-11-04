@@ -69,7 +69,8 @@ export function createControls(engine: ControlsEngine, options: ControlsOptions 
 
   const element = doc.createElement('div');
   element.className = 'controls';
-  element.setAttribute('role', 'toolbar');
+  // A plain group, not a toolbar: the buttons are reached with Tab, without toolbar arrow-key navigation.
+  element.setAttribute('role', 'group');
   element.setAttribute('aria-label', 'Controls');
 
   const pauseButton = makeButton(doc, 'pause', 'Pause or resume (Space)', 'Space');
@@ -89,6 +90,8 @@ export function createControls(engine: ControlsEngine, options: ControlsOptions 
 
   let visible = false;
   let hideTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Set while a pointer gesture that started on the hidden UI is in progress (see onPointerDown). */
+  let revealGesture = false;
 
   function render(): void {
     pauseButton.textContent = engine.isPaused() ? 'Resume' : 'Pause';
@@ -105,7 +108,8 @@ export function createControls(engine: ControlsEngine, options: ControlsOptions 
   function setVisible(next: boolean): void {
     visible = next;
     element.classList.toggle(HIDDEN_CLASS, !next);
-    // Hidden controls can be neither focused nor clicked, so a tap on a hidden UI only reveals it.
+    // Hidden controls can be neither focused nor clicked. (`inert` alone does not stop a tap that
+    // reveals the UI from pressing a button: see onPointerDown.)
     element.toggleAttribute('inert', !next);
     root.style.cursor = next ? '' : 'none';
   }
@@ -167,14 +171,40 @@ export function createControls(engine: ControlsEngine, options: ControlsOptions 
 
   const onActivity = (): void => show();
 
+  // A tap on the hidden UI shows it on touchstart, but the browser picks the click target when the
+  // finger lifts, by which time the buttons are live again. So a pointer gesture that starts while
+  // the UI is hidden only reveals it: its click is swallowed if it lands on the controls.
+  const onPointerDown = (): void => {
+    revealGesture = !visible;
+  };
+  const onPointerCancel = (): void => {
+    revealGesture = false;
+  };
+  const onClickCapture = (event: MouseEvent): void => {
+    if (!revealGesture) return;
+    revealGesture = false;
+    if (event.target instanceof Node && element.contains(event.target)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  };
+
+  /** F by the character it types, or by its physical key on layouts without Latin letters. */
+  function isFullscreenKey(event: KeyboardEvent): boolean {
+    if (event.key.toLowerCase() === 'f') return true;
+    return !/^[a-z]$/i.test(event.key) && event.code === 'KeyF';
+  }
+
   const onKeyDown = (event: KeyboardEvent): void => {
+    // A keyboard-activated click is never a revealing tap.
+    revealGesture = false;
     // Leave browser and OS shortcuts (Ctrl/Cmd+F, Alt+Arrow, …) alone.
     if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
     if (event.code === 'Space' || event.key === ' ') {
       // Also stops a focused button from treating Space as a click, so Space always means pause.
       event.preventDefault();
       if (!event.repeat) togglePause();
-    } else if (event.key === 'f' || event.key === 'F' || event.code === 'KeyF') {
+    } else if (isFullscreenKey(event)) {
       event.preventDefault();
       if (!event.repeat) toggleFullscreen();
     } else if (event.key === 'ArrowUp') {
@@ -199,6 +229,9 @@ export function createControls(engine: ControlsEngine, options: ControlsOptions 
   pauseButton.addEventListener('click', onPauseClick);
   fullscreenButton.addEventListener('click', onFullscreenClick);
   speedButton.addEventListener('click', onSpeedClick);
+  win.addEventListener('pointerdown', onPointerDown, { capture: true, passive: true });
+  win.addEventListener('pointercancel', onPointerCancel, { capture: true, passive: true });
+  win.addEventListener('click', onClickCapture, { capture: true });
   for (const type of ACTIVITY_EVENTS) win.addEventListener(type, onActivity, { passive: true });
   win.addEventListener('keydown', onKeyDown);
   win.addEventListener('keyup', onKeyUp);
@@ -217,6 +250,9 @@ export function createControls(engine: ControlsEngine, options: ControlsOptions 
       pauseButton.removeEventListener('click', onPauseClick);
       fullscreenButton.removeEventListener('click', onFullscreenClick);
       speedButton.removeEventListener('click', onSpeedClick);
+      win.removeEventListener('pointerdown', onPointerDown, { capture: true });
+      win.removeEventListener('pointercancel', onPointerCancel, { capture: true });
+      win.removeEventListener('click', onClickCapture, { capture: true });
       for (const type of ACTIVITY_EVENTS) win.removeEventListener(type, onActivity);
       win.removeEventListener('keydown', onKeyDown);
       win.removeEventListener('keyup', onKeyUp);

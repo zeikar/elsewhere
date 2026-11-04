@@ -52,7 +52,7 @@ test('Space toggles pause, and the arrow keys change the speed', async ({ page }
 test('the UI shows on mouse move and hides, with the cursor, after about 3 s', async ({ page }) => {
   const errors = collectErrors(page);
   await openApp(page);
-  const controls = page.getByRole('toolbar', { name: 'Controls' });
+  const controls = page.getByRole('group', { name: 'Controls' });
 
   // Shown on load, then hidden once the delay passes with no input.
   await expect(controls).toBeHidden({ timeout: 15_000 });
@@ -78,7 +78,7 @@ test('the buttons pause, resume and cycle the speed', async ({ page }) => {
   const errors = collectErrors(page);
   await openApp(page);
   await page.mouse.move(100, 100);
-  const controls = page.getByRole('toolbar', { name: 'Controls' });
+  const controls = page.getByRole('group', { name: 'Controls' });
 
   await controls.getByRole('button', { name: 'Pause' }).click();
   expect((await snapshot(page)).paused).toBe(true);
@@ -95,4 +95,44 @@ test('the buttons pause, resume and cycle the speed', async ({ page }) => {
   expect(after.paused).toBe(true);
   expect(after.speed).toBe(before + 1);
   expect(errors).toEqual([]);
+});
+
+test.describe('on a touch screen', () => {
+  test.use({ hasTouch: true });
+
+  test('a tap on a hidden button only reveals the UI; a tap on a visible one presses it', async ({ page }) => {
+    const errors = collectErrors(page);
+    await openApp(page);
+    const controls = page.getByRole('group', { name: 'Controls' });
+    await expect(controls).toBeHidden({ timeout: 15_000 });
+
+    // The hidden button still has its layout box, so tap where it sits.
+    const box = await page.locator('.controls__pause').boundingBox();
+    expect(box).not.toBeNull();
+    const x = box!.x + box!.width / 2;
+    const y = box!.y + box!.height / 2;
+    await page.touchscreen.tap(x, y);
+    await expect(controls).toBeVisible();
+    expect((await snapshot(page)).paused).toBe(false);
+
+    // Now visible, the same tap presses the button.
+    await page.touchscreen.tap(x, y);
+    expect((await snapshot(page)).paused).toBe(true);
+    await expect(controls.getByRole('button', { name: 'Resume' })).toBeVisible();
+    expect(errors).toEqual([]);
+  });
+
+  test('a tap elsewhere on the hidden UI just reveals it', async ({ page }) => {
+    const errors = collectErrors(page);
+    await openApp(page);
+    const controls = page.getByRole('group', { name: 'Controls' });
+    await expect(controls).toBeHidden({ timeout: 15_000 });
+
+    await page.touchscreen.tap(50, 50);
+    await expect(controls).toBeVisible();
+    const after = await snapshot(page);
+    expect(after.paused).toBe(false);
+    expect(after.speed).toBe(SHIP_DEFAULT_SPEED_LEVEL);
+    expect(errors).toEqual([]);
+  });
 });
