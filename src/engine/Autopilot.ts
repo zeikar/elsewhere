@@ -30,6 +30,7 @@ import {
   ENCOUNTER_DRIFT_SETTLE_SECONDS,
   ENCOUNTER_FLYBY_DISTANCE,
   ENCOUNTER_INTERVAL_SECONDS,
+  ENCOUNTER_MIN_SPEED_FLOOR,
   ENCOUNTER_PLANET_RADIUS,
   ENCOUNTER_SIDE_OFFSET_FACTOR,
   SHIP_DEFAULT_SPEED_LEVEL,
@@ -255,6 +256,10 @@ export function updateAutopilot(
  * `cruiseSpeed / base.cruiseSpeed`, so an encounter slows down by the same proportion at every speed
  * level. Distances are untouched, so the fades, the transitions and the planned path are unchanged
  * and a change in the middle of an encounter never makes it skip a state. Allocates the new profile.
+ *
+ * The scaled minimum speed is floored at ENCOUNTER_MIN_SPEED_FLOOR, so the slowest levels (the
+ * reduced-motion start) slow down proportionally less instead of crawling through the flyby; it is
+ * also capped at the cruise speed, so an encounter never speeds the ship up.
  */
 export function setCruiseSpeed(
   params: AutopilotParams,
@@ -262,8 +267,9 @@ export function setCruiseSpeed(
   base: Readonly<AutopilotParams> = DEFAULT_AUTOPILOT_PARAMS,
 ): void {
   const factor = base.cruiseSpeed > 0 ? cruiseSpeed / base.cruiseSpeed : 1;
+  const minSpeed = Math.min(cruiseSpeed, Math.max(base.profile.minSpeed * factor, ENCOUNTER_MIN_SPEED_FLOOR));
   params.cruiseSpeed = cruiseSpeed;
-  params.profile = { ...base.profile, minSpeed: base.profile.minSpeed * factor };
+  params.profile = { ...base.profile, minSpeed };
 }
 
 /** Everything the simulation step advances: the ship, the autopilot and the params they feed each other. */

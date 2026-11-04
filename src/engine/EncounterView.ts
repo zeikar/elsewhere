@@ -3,8 +3,14 @@
  * floating origin, Planets and Performance).
  *
  * - Lifecycle: the planet is created when an encounter starts (the step that enters APPROACH) and
- *   disposed once it ends (DEPARTURE back to CRUISE). Only one planet is alive at a time, so the
- *   shared planet geometry is freed with it and GPU memory returns to its pre-encounter baseline.
+ *   disposed once it ends (DEPARTURE back to CRUISE). The shared planet geometry is reference-counted
+ *   by `Planet`, so it is freed with the last live planet and GPU memory returns to its
+ *   pre-encounter baseline.
+ * - Shader warm-up: disposing a planet frees its shader programs, so each new planet's programs are
+ *   compiled again. The view hands the new planet to a `compile` function (the engine passes
+ *   `renderer.compileAsync`, which compiles in parallel where `KHR_parallel_shader_compile` is
+ *   available) and keeps it hidden, at fade 0, until that settles, so the first frame that draws it
+ *   does not stall on compilation. A failed compile falls back to showing the planet anyway.
  * - Placement (floating origin): each frame the planet's render position is `planet - ship`, computed
  *   in float64 on the CPU from the encounter plan and written into the planet's preallocated
  *   `object.position`. Large absolute coordinates never reach the GPU.
@@ -17,7 +23,7 @@ import type { Object3D, Vector3 } from 'three';
 import { PLANET_ENCOUNTER_LIGHT } from '../config';
 import type { ActiveEncounter, AutopilotState } from './Autopilot';
 import { encounterOffset, encounterScale, type Encounter, type EncounterProfile } from './encounter';
-import { Planet, disposePlanetGeometry, planetParams, type PlanetParams } from './Planet';
+import { Planet, planetParams, type PlanetParams } from './Planet';
 import type { ShipState, Vec3 } from './Ship';
 
 /**
@@ -64,16 +70,27 @@ export function encounterPlanetParams(encounter: Readonly<ActiveEncounter>): Pla
   return params.radius === encounter.plan.radius ? params : { ...params, radius: encounter.plan.radius };
 }
 
+/**
+ * Prepares a new planet's shaders before it is first drawn (the engine passes
+ * `(object) => renderer.compileAsync(object, camera, scene)`). The planet stays hidden until the
+ * returned promise settles.
+ */
+export type PlanetCompiler = (object: Object3D) => PromiseLike<unknown>;
+
 export class EncounterView {
   private readonly scene: Object3D;
+  private readonly compile: PlanetCompiler | null;
   private planet: Planet | null = null;
   /** Encounter index of `planet`. */
   private index = -1;
+  /** Whether `planet`'s shaders are ready, so it may be drawn (always true without a compiler). */
+  private ready = false;
   /** Scratch light direction, reused for every planet. */
   private readonly light: Vec3 = { x: 0, y: 0, z: 0 };
 
-  constructor(scene: Object3D) {
+  constructor(scene: Object3D, compile: PlanetCompiler | null = null) {
     this.scene = scene;
+    this.compile = compile;
   }
 
   /** The planet of the current encounter, or `null` (read-only view; do not modify). */
@@ -94,6 +111,7 @@ export class EncounterView {
     this.planet = planet;
     this.index = encounter.index;
     this.scene.add(planet.object);
+    this.warmUp(planet);
   }
 
   /**
@@ -105,14 +123,40 @@ export class EncounterView {
     const encounter = autopilot.encounter;
     if (planet === null || encounter === null || encounter.index !== this.index) return;
     planetRenderPosition(encounter.plan, ship.position, planet.object.position);
-    planet.setFade(autopilot.fade);
+    // Hidden until its shaders are ready (the fade is still about 1e-4 by then).
+    planet.setFade(this.ready ? autopilot.fade : 0);
     planet.setScale(encounterScale(encounter.plan, autopilot.remaining, profile));
     planet.update(ship.time);
   }
 
-  /** Disposes the planet, if any, and the shared planet geometry. */
+  /** Disposes the planet, if any (which frees the shared geometry once no planet holds it). */
   dispose(): void {
     this.release();
+  }
+
+  /**
+   * Starts compiling `planet`'s shaders and marks it ready once that settles, whether it succeeds
+   * or fails (a failure only means the first frame may compile synchronously, as without warm-up).
+   * A planet released meanwhile is left alone: only the current planet is ever marked ready.
+   */
+  private warmUp(planet: Planet): void {
+    const compile = this.compile;
+    if (compile === null) {
+      this.ready = true;
+      return;
+    }
+    this.ready = false;
+    const settle = (): void => {
+      if (this.planet === planet) this.ready = true;
+    };
+    let pending: PromiseLike<unknown>;
+    try {
+      pending = compile(planet.object);
+    } catch {
+      settle();
+      return;
+    }
+    Promise.resolve(pending).then(settle, settle);
   }
 
   private release(): void {
@@ -120,7 +164,6 @@ export class EncounterView {
     this.planet.dispose();
     this.planet = null;
     this.index = -1;
-    // Only one planet is ever alive, so the shared geometry goes with it; the next planet makes a new one.
-    disposePlanetGeometry();
+    this.ready = false;
   }
 }

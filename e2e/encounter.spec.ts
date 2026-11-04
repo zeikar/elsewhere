@@ -10,6 +10,7 @@ import {
 } from '../src/config';
 import { DEFAULT_AUTOPILOT_PARAMS, setCruiseSpeed, type AutopilotParams } from '../src/engine/Autopilot';
 import { encounterTargetSpeed } from '../src/engine/encounter';
+import { SOAK_HEAP_GROWTH_LIMIT_BYTES } from './limits';
 
 const APP_PATH = '/elsewhere/';
 
@@ -52,8 +53,11 @@ interface TravelLog {
   states: { state: string; index: number | null; time: number }[];
   /** Renderer resources at install, before any encounter. */
   baseline: Resources;
-  /** Renderer resources and planet count on each return to CRUISE. */
-  afterEncounters: (Resources & { planets: number })[];
+  /**
+   * Renderer resources and planet count on each return to CRUISE, and on the first and third the
+   * used JS heap after a forced GC (`null` on the others, or without gc() / performance.memory).
+   */
+  afterEncounters: (Resources & { planets: number; heap: number | null })[];
   /** Frames whose planet count does not match the state (1 during an encounter, 0 outside). */
   planetCountErrors: string[];
   /** Largest step between consecutive frames beyond what the ship's speed allows (≤ 0 is fine). */
@@ -93,6 +97,15 @@ function watchTravel(page: Page, options: { pauseOnScreen?: boolean } = {}): Pro
         textures: s.renderer.textures,
         programs: s.renderer.programs,
       });
+      /** Used JS heap after a full GC, or null without --js-flags=--expose-gc / performance.memory. */
+      const heapAfterGc = (): number | null => {
+        const w = window as unknown as { gc?: () => void };
+        const memory = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
+        if (typeof w.gc !== 'function' || !memory) return null;
+        w.gc();
+        w.gc();
+        return memory.usedJSHeapSize;
+      };
       const log: TravelLog = {
         states: [{ state: prev.autopilot.state, index: prev.autopilot.encounterIndex, time: prev.ship.time }],
         baseline: resources(prev),
@@ -131,7 +144,11 @@ function watchTravel(page: Page, options: { pauseOnScreen?: boolean } = {}): Pro
 
         if (a.state !== log.states.at(-1)!.state) {
           log.states.push({ state: a.state, index: a.encounterIndex, time: s.ship.time });
-          if (a.state === 'CRUISE') log.afterEncounters.push({ ...resources(s), planets: s.planets });
+          if (a.state === 'CRUISE') {
+            const n = log.afterEncounters.length + 1;
+            const heap = n === 1 || n === 3 ? heapAfterGc() : null;
+            log.afterEncounters.push({ ...resources(s), planets: s.planets, heap });
+          }
         }
         const expectedPlanets = a.encounterIndex === null ? 0 : 1;
         if (s.planets !== expectedPlanets) {
@@ -231,6 +248,9 @@ test('three encounters run CRUISE → APPROACH → FLYBY → DEPARTURE → CRUIS
 }) => {
   test.setTimeout(600_000);
   const errors = collectErrors(page);
+  // No pixels are checked here, and SwiftShader is fill-rate bound (the dt cap slows simulated time
+  // at low frame rates), so a small viewport makes the three encounters pass much sooner.
+  await page.setViewportSize({ width: 480, height: 270 });
   await openApp(page, 1);
   // Top speed (setSpeed clamps), so the encounters pass as quickly as the profile allows.
   await page.evaluate(() => window.__elsewhere!.setSpeed(99));
@@ -277,6 +297,14 @@ test('three encounters run CRUISE → APPROACH → FLYBY → DEPARTURE → CRUIS
   }
   expect(third!.programs).toBeLessThanOrEqual(first!.programs);
   expect(second!.programs).toBeLessThanOrEqual(first!.programs);
+  // Nor does the JS heap grow from the first return to CRUISE to the third.
+  if (first!.heap !== null && third!.heap !== null) {
+    const growth = third!.heap - first!.heap;
+    test.info().annotations.push({ type: 'heap growth over two encounters (bytes)', description: String(growth) });
+    expect(growth).toBeLessThan(SOAK_HEAP_GROWTH_LIMIT_BYTES);
+  } else {
+    test.info().annotations.push({ type: 'heap growth', description: 'skipped: gc() or performance.memory unavailable' });
+  }
   expect(errors).toEqual([]);
 });
 

@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import type { E2EHookSnapshot } from '../src/e2eHook';
 import { STAR_BASE_SIZE_PX } from '../src/config';
+import { SOAK_HEAP_GROWTH_LIMIT_BYTES } from './limits';
 
 const APP_PATH = '/elsewhere/';
 
@@ -11,8 +12,6 @@ const LIT_THRESHOLD = 16;
 const SOAK_WARMUP_MS = 5_000;
 const SOAK_SAMPLE_MS = 5_000;
 const SOAK_SAMPLES = 11;
-/** Largest allowed JS heap growth (after a forced GC) between warm-up and the end of the soak. */
-const SOAK_HEAP_GROWTH_LIMIT_BYTES = 4 * 1024 * 1024;
 
 // SwiftShader renders at only a few fps, so the tests here routinely take 15+ s; leave headroom
 // over Playwright's 30 s default. (The soak test sets its own, longer timeout.)
@@ -122,7 +121,8 @@ test('soak: GPU resources stay constant and the JS heap does not grow', async ({
   test.setTimeout(SOAK_WARMUP_MS + SOAK_SAMPLE_MS * SOAK_SAMPLES + 60_000);
   const errors = collectErrors(page);
   // Starfield only: the e2e-only override pushes the first encounter far past the end of the run
-  // (encounter.spec.ts checks the resources planets use and free).
+  // (encounter.spec.ts checks the GPU resources planets use and free, and the JS heap across
+  // encounters).
   await page.goto(`${APP_PATH}?encounterInterval=1e9`);
   await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 0);
   expect((await snapshot(page)).autopilot.interval).toBe(1e9);

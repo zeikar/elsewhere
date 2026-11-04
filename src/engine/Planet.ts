@@ -6,8 +6,9 @@
  *   rotation and atmosphere from an encounter's appearance seed (`hash(baseSeed, encounterIndex)`).
  *   Its result is a `PlanetSpec`, so it can be passed straight to `AutopilotParams.planetFor`.
  * - `Planet` builds the meshes. Every planet reuses one module-level unit `SphereGeometry`, which is
- *   only freed by `disposePlanetGeometry()` (the module-level teardown). Each planet owns its
- *   materials and frees them in `dispose()`. Surfaces are fully procedural, so no textures are made.
+ *   reference-counted: each planet holds it from its constructor until its `dispose()`, and the last
+ *   planet to be disposed frees it (the next planet makes a new one). Each planet owns its materials
+ *   and frees them in `dispose()`. Surfaces are fully procedural, so no textures are made.
  * - Surfaces are shaded per fragment in a `ShaderMaterial`: domain-warped fBm terrain with seas,
  *   polar ice and bump shading for rocky planets, and turbulent latitude bands with an optional oval
  *   storm for gas giants. Shader programs depend only on the type, so all planets of one type share
@@ -716,21 +717,49 @@ void main() {
 // ---------------------------------------------------------------------------------------------
 
 let sharedGeometry: SphereGeometry | null = null;
+/** Number of live (not yet disposed) planets holding `sharedGeometry`. */
+let sharedGeometryRefs = 0;
 
-/** The unit sphere every planet (and its atmosphere shell) draws with. Created on first use. */
+/**
+ * The unit sphere every planet (and its atmosphere shell) draws with. Created on first use. Calling
+ * this takes no reference; planets take theirs in the constructor (see `acquirePlanetGeometry`).
+ */
 export function planetGeometry(): SphereGeometry {
   sharedGeometry ??= new SphereGeometry(1, PLANET_SPHERE_SEGMENTS[0], PLANET_SPHERE_SEGMENTS[1]);
   return sharedGeometry;
 }
 
-/**
- * Module-level teardown: frees the shared sphere geometry. Planets still alive keep a reference to
- * the disposed geometry, so call it only once every planet has been disposed. A planet created
- * afterwards gets a fresh geometry.
- */
-export function disposePlanetGeometry(): void {
+/** Number of live planets currently holding the shared geometry. */
+export function planetGeometryRefs(): number {
+  return sharedGeometryRefs;
+}
+
+/** Takes a reference to the shared geometry (one per planet, in its constructor). */
+function acquirePlanetGeometry(): SphereGeometry {
+  const geometry = planetGeometry();
+  sharedGeometryRefs++;
+  return geometry;
+}
+
+/** Drops a planet's reference; the last one frees the geometry, so the next planet makes a new one. */
+function releasePlanetGeometry(): void {
+  sharedGeometryRefs = Math.max(0, sharedGeometryRefs - 1);
+  if (sharedGeometryRefs === 0) disposeUnreferencedGeometry();
+}
+
+function disposeUnreferencedGeometry(): void {
   sharedGeometry?.dispose();
   sharedGeometry = null;
+}
+
+/**
+ * Frees the shared sphere geometry if no live planet holds it (for example one made by
+ * `planetGeometry()` alone); a no-op while any planet is alive, so it can never pull the geometry
+ * out from under one. Planets free it themselves when the last one is disposed, so callers only
+ * need this to clean up after `planetGeometry()` was called with no planet.
+ */
+export function disposePlanetGeometry(): void {
+  if (sharedGeometryRefs === 0) disposeUnreferencedGeometry();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -782,7 +811,7 @@ export class Planet {
 
   constructor(params: Readonly<PlanetParams>, lightDirection: Readonly<Vec3> = PLANET_LIGHT_DIRECTION) {
     this.params = params;
-    const geometry = planetGeometry();
+    const geometry = acquirePlanetGeometry();
     const [c0, c1, c2, c3] = params.palette;
     this.uniforms = {
       uColor0: { value: toColor(c0) },
@@ -902,12 +931,16 @@ export class Planet {
     this.surface.rotation.y = this.params.rotationPhase + time * this.params.rotationSpeed;
   }
 
-  /** Frees this planet's materials. The shared geometry stays until `disposePlanetGeometry()`. */
+  /**
+   * Frees this planet's materials and drops its reference to the shared geometry, which is freed
+   * once no live planet holds it. Disposing twice is harmless.
+   */
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
     this.object.removeFromParent();
     this.surface.material.dispose();
     this.atmosphere?.material.dispose();
+    releasePlanetGeometry();
   }
 }

@@ -7,7 +7,8 @@
  *
  * Each frame runs one simulation step (`stepTravel`: the ship, then the Autopilot, which sets the
  * ship's target speed and drift rate), then the encounter view creates or disposes the encounter
- * planet, and the render places it relative to the ship. The starfield keeps running underneath.
+ * planet (compiling a new planet's shaders with `renderer.compileAsync` before it is first drawn),
+ * and the render places it relative to the ship. The starfield keeps running underneath.
  * Pausing stops the simulation, so the encounter freezes with it.
  */
 import { PerspectiveCamera, SRGBColorSpace, Scene, Vector3, WebGLRenderer, type WebGLInfo } from 'three';
@@ -94,7 +95,10 @@ export class Engine {
     setCruiseSpeed(autopilotParams, SHIP_SPEED_LEVELS[this.speedLevel] ?? 0);
     this.travel = createTravel(autopilotParams, DEFAULT_SHIP_PARAMS);
     this.scene.add(this.starfield.mesh);
-    this.encounterView = new EncounterView(this.scene);
+    // Each new planet's shaders compile (in parallel where supported) before it is first drawn.
+    this.encounterView = new EncounterView(this.scene, (object) =>
+      this.renderer.compileAsync(object, this.camera, this.scene),
+    );
     this.applyHeading();
   }
 

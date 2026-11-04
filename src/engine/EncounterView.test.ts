@@ -1,9 +1,13 @@
-import { Scene, Vector3 } from 'three';
+import { Scene, Vector3, type Object3D } from 'three';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  DT_CAP_SECONDS,
   ENCOUNTER_BASE_SEED,
+  ENCOUNTER_CLEARANCE_MARGIN,
   ENCOUNTER_DISTANCE,
+  ENCOUNTER_MIN_SPEED_FLOOR,
   ENCOUNTER_SIDE_OFFSET_FACTOR,
+  REDUCED_MOTION_SPEED_LEVEL,
   SHIP_DEFAULT_SPEED_LEVEL,
   SHIP_SPEED_LEVELS,
 } from '../config';
@@ -17,14 +21,21 @@ import {
   type TravelState,
   type Travel,
 } from './Autopilot';
-import { DEFAULT_ENCOUNTER_PROFILE, encounterOpacity, encounterScale, encounterTargetSpeed, planEncounter } from './encounter';
+import {
+  DEFAULT_ENCOUNTER_PROFILE,
+  encounterOffset,
+  encounterOpacity,
+  encounterScale,
+  encounterTargetSpeed,
+  planEncounter,
+} from './encounter';
 import {
   EncounterView,
   encounterLightDirection,
   encounterPlanetParams,
   planetRenderPosition,
 } from './EncounterView';
-import { disposePlanetGeometry, planetGeometry, planetParams, type Planet } from './Planet';
+import { disposePlanetGeometry, planetGeometry, planetGeometryRefs, planetParams, type Planet } from './Planet';
 import { hash } from './seed';
 import { DEFAULT_SHIP_PARAMS, createShipState, headingAt, updateShip, type Vec3 } from './Ship';
 
@@ -200,6 +211,7 @@ describe('EncounterView', () => {
     // Both planets disposed their materials, and the shared geometry was freed after each one.
     expect(disposedMaterials).toBeGreaterThanOrEqual(2 * 2);
     expect(geometryDisposed).toBe(2);
+    expect(planetGeometryRefs()).toBe(0);
     expect(view.getPlanet()).toBeNull();
     expect(scene.children).toHaveLength(0);
   });
@@ -217,6 +229,118 @@ describe('EncounterView', () => {
     expect(view.getPlanet()).toBeNull();
     expect(scene.children).toHaveLength(0);
     expect(geometryDisposed).toBe(1);
+  });
+});
+
+/** A fake `PlanetCompiler` whose promises the test settles by hand. */
+function fakeCompiler() {
+  const calls: { object: Object3D; inScene: boolean; resolve: () => void; reject: (reason: unknown) => void }[] = [];
+  const compile = (object: Object3D) =>
+    new Promise<void>((resolve, reject) => calls.push({ object, inScene: object.parent !== null, resolve, reject }));
+  return { calls, compile };
+}
+
+/** Lets settled promises run their callbacks. */
+const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+/** Runs engine-like frames until `done` holds (at most `limit` frames). */
+function runUntil(travel: Travel, view: EncounterView, done: () => boolean, dt = 0.05, limit = 50_000): void {
+  for (let i = 0; i < limit && !done(); i++) frame(travel, view, dt);
+  expect(done()).toBe(true);
+}
+
+describe('EncounterView shader warm-up', () => {
+  it('keeps a new planet hidden until its compile settles, then follows the fade', async () => {
+    const scene = new Scene();
+    const { calls, compile } = fakeCompiler();
+    const view = new EncounterView(scene, compile);
+    const travel = createTravel(engineParams(1, 0.5), DEFAULT_SHIP_PARAMS);
+    runUntil(travel, view, () => view.getPlanet() !== null);
+    const planet = view.getPlanet()!;
+    // Compiled once, as soon as it is in the scene.
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.object).toBe(planet.object);
+    expect(calls[0]!.inScene).toBe(true);
+
+    // Still compiling: hidden even once the autopilot fades it in.
+    runUntil(travel, view, () => travel.autopilot.fade > 0.05);
+    expect(planet.object.visible).toBe(false);
+    expect(planet.uniforms.uOpacity.value).toBe(0);
+    expect(calls).toHaveLength(1);
+
+    calls[0]!.resolve();
+    await flush();
+    frame(travel, view, 0.05);
+    expect(planet.object.visible).toBe(true);
+    expect(planet.uniforms.uOpacity.value).toBeCloseTo(travel.autopilot.fade, 12);
+    view.dispose();
+  });
+
+  it.each(['rejects', 'throws'] as const)('shows the planet anyway when the compile %s', async (failure) => {
+    const scene = new Scene();
+    const calls: Object3D[] = [];
+    const view = new EncounterView(scene, (object) => {
+      calls.push(object);
+      if (failure === 'throws') throw new Error('no context');
+      return Promise.reject(new Error('compile failed'));
+    });
+    const travel = createTravel(engineParams(1, 0.5), DEFAULT_SHIP_PARAMS);
+    runUntil(travel, view, () => view.getPlanet() !== null);
+    await flush();
+    runUntil(travel, view, () => travel.autopilot.fade > 0.05);
+    const planet = view.getPlanet()!;
+    expect(calls).toEqual([planet.object]);
+    expect(planet.object.visible).toBe(true);
+    expect(planet.uniforms.uOpacity.value).toBeCloseTo(travel.autopilot.fade, 12);
+    view.dispose();
+  });
+
+  it('a compile that settles after its planet was released never marks the next planet ready', async () => {
+    const scene = new Scene();
+    const { calls, compile } = fakeCompiler();
+    const view = new EncounterView(scene, compile);
+    const travel = createTravel(engineParams(2, 0.5), DEFAULT_SHIP_PARAMS);
+    const index = () => travel.autopilot.encounter?.index ?? null;
+
+    // The first encounter runs to its end with its compile still pending: the planet stays hidden
+    // throughout and is released normally.
+    runUntil(travel, view, () => index() === 0);
+    const first = view.getPlanet()!;
+    let firstShown = false;
+    runUntil(travel, view, () => {
+      firstShown ||= first.object.visible;
+      return index() === null;
+    }, 0.1);
+    expect(firstShown).toBe(false);
+    expect(view.getPlanet()).toBeNull();
+    expect(scene.children).toHaveLength(0);
+    expect(planetGeometryRefs()).toBe(0);
+
+    // The next planet is compiled in turn; the stale compile settling now changes nothing.
+    runUntil(travel, view, () => index() === 1);
+    const second = view.getPlanet()!;
+    expect(second).not.toBe(first);
+    expect(calls.map((c) => c.object)).toEqual([first.object, second.object]);
+    calls[0]!.resolve();
+    await flush();
+    runUntil(travel, view, () => travel.autopilot.fade > 0.05);
+    expect(second.object.visible).toBe(false);
+    expect(second.uniforms.uOpacity.value).toBe(0);
+    // Its own compile does.
+    calls[1]!.resolve();
+    await flush();
+    frame(travel, view, 0.05);
+    expect(second.object.visible).toBe(true);
+
+    // Disposing the view with a compile pending, then settling it, is harmless too.
+    runUntil(travel, view, () => index() === 2, 0.1);
+    view.dispose();
+    expect(view.getPlanet()).toBeNull();
+    calls[2]!.reject(new Error('context lost'));
+    await flush();
+    expect(view.getPlanet()).toBeNull();
+    expect(scene.children).toHaveLength(0);
+    expect(planetGeometryRefs()).toBe(0);
   });
 });
 
@@ -245,24 +369,85 @@ describe('the travel step', () => {
 
   it('setCruiseSpeed scales the whole speed profile by the speed level instead of overriding it', () => {
     const base = DEFAULT_AUTOPILOT_PARAMS;
+    let floored = 0;
     for (const speed of SHIP_SPEED_LEVELS) {
       const params: AutopilotParams = { ...base };
       setCruiseSpeed(params, speed);
       const factor = speed / base.cruiseSpeed;
+      const scaledMin = DEFAULT_ENCOUNTER_PROFILE.minSpeed * factor;
       expect(params.cruiseSpeed).toBe(speed);
-      expect(params.profile.minSpeed).toBeCloseTo(DEFAULT_ENCOUNTER_PROFILE.minSpeed * factor, 12);
       // Distances, and so the fades and transitions, are unchanged.
       expect({ ...params.profile, minSpeed: 0 }).toEqual({ ...DEFAULT_ENCOUNTER_PROFILE, minSpeed: 0 });
-      for (const remaining of [2000, 900, 500, 100, 0, -30, -300, -900, -2000]) {
-        const scaled = encounterTargetSpeed(remaining, params.cruiseSpeed, params.profile);
-        expect(scaled).toBeCloseTo(factor * encounterTargetSpeed(remaining, base.cruiseSpeed, base.profile), 9);
+      if (scaledMin >= ENCOUNTER_MIN_SPEED_FLOOR) {
+        expect(params.profile.minSpeed).toBeCloseTo(scaledMin, 12);
+        for (const remaining of [2000, 900, 500, 100, 0, -30, -300, -900, -2000]) {
+          const scaled = encounterTargetSpeed(remaining, params.cruiseSpeed, params.profile);
+          expect(scaled).toBeCloseTo(factor * encounterTargetSpeed(remaining, base.cruiseSpeed, base.profile), 9);
+        }
+      } else {
+        // Floored at the slowest levels, and never above the cruise speed.
+        floored++;
+        expect(params.profile.minSpeed).toBe(Math.min(speed, ENCOUNTER_MIN_SPEED_FLOOR));
+        for (const remaining of [2000, 900, 500, 100, 0, -30, -300, -900, -2000]) {
+          const target = encounterTargetSpeed(remaining, params.cruiseSpeed, params.profile);
+          expect(target).toBeGreaterThanOrEqual(params.profile.minSpeed - 1e-9);
+          expect(target).toBeLessThanOrEqual(speed + 1e-9);
+        }
       }
     }
+    // The reduced-motion level is the floored one (15 × 20 / 60 = 5 would be below the floor).
+    expect(floored).toBeGreaterThan(0);
+    // A cruise speed below the floor is never sped up by an encounter.
+    const crawl: AutopilotParams = { ...base };
+    setCruiseSpeed(crawl, ENCOUNTER_MIN_SPEED_FLOOR / 2);
+    expect(crawl.profile.minSpeed).toBe(ENCOUNTER_MIN_SPEED_FLOOR / 2);
     // Still slows right down around the planet at the top speed.
     const top: AutopilotParams = { ...base };
     setCruiseSpeed(top, SHIP_SPEED_LEVELS[SHIP_SPEED_LEVELS.length - 1]!);
     expect(encounterTargetSpeed(0, top.cruiseSpeed, top.profile)).toBeLessThan(top.cruiseSpeed / 3);
   });
+
+  it.each([1 / 60, DT_CAP_SECONDS])(
+    'at the reduced-motion level the floored minimum speed keeps the clearance and gradual fades (dt = %f)',
+    (dt) => {
+      const params = engineParams(REDUCED_MOTION_SPEED_LEVEL, 1);
+      expect(params.profile.minSpeed).toBe(ENCOUNTER_MIN_SPEED_FLOOR);
+      const travel = createTravel(params, DEFAULT_SHIP_PARAMS);
+      const rel = { x: 0, y: 0, z: 0 };
+      let minClearance = Number.POSITIVE_INFINITY;
+      let radius = Number.NaN;
+      let worstFadeStep = 0;
+      let slowest = Number.POSITIVE_INFINITY;
+      let startedAt = Number.NaN;
+      let endedAt = Number.NaN;
+      let prevFade = travel.autopilot.fade;
+      for (let i = 0; i < 1e6 && Number.isNaN(endedAt); i++) {
+        const before = travel.autopilot.state;
+        stepTravel(travel, dt);
+        const { autopilot, ship } = travel;
+        worstFadeStep = Math.max(worstFadeStep, Math.abs(autopilot.fade - prevFade));
+        prevFade = autopilot.fade;
+        if (before === 'CRUISE' && autopilot.state === 'APPROACH') startedAt = ship.time;
+        if (before === 'DEPARTURE' && autopilot.state === 'CRUISE') endedAt = ship.time;
+        const encounter = autopilot.encounter;
+        if (encounter === null) continue;
+        radius = encounter.plan.radius;
+        minClearance = Math.min(minClearance, len(encounterOffset(encounter.plan, ship.position, rel)));
+        if (autopilot.state === 'FLYBY') slowest = Math.min(slowest, autopilot.targetSpeed);
+      }
+      expect(endedAt).toBeGreaterThan(startedAt);
+      // Clear of the planet, at its planned closest approach.
+      expect(minClearance).toBeGreaterThanOrEqual(radius * (1 + ENCOUNTER_CLEARANCE_MARGIN));
+      expect(minClearance).toBeCloseTo(radius * ENCOUNTER_SIDE_OFFSET_FACTOR, 0);
+      // Fades in and out gradually: no frame changes the opacity by more than 2%.
+      expect(worstFadeStep).toBeGreaterThan(0);
+      expect(worstFadeStep).toBeLessThan(0.02);
+      // Slows to the floor, not below it, so it does not crawl: one encounter takes about 195 s
+      // (about 250 s with the unfloored minimum of 5).
+      expect(slowest).toBeCloseTo(ENCOUNTER_MIN_SPEED_FLOOR, 9);
+      expect(endedAt - startedAt).toBeLessThan(210);
+    },
+  );
 
   it.each([1 / 60, 1 / 120])(
     'during an encounter, pause → resume → speed up keeps the state machine consistent (dt = %f)',
