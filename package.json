@@ -11,15 +11,20 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "build:e2e": "vite build --mode e2e --outDir dist-e2e",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p e2e",
     "test": "vitest run",
-    "check:base": "node scripts/check-base.mjs"
+    "test:e2e": "tsc --noEmit -p e2e && npm run build:e2e && playwright test",
+    "check:base": "node scripts/check-base.mjs",
+    "check:hook": "node scripts/check-hook.mjs"
   },
   "dependencies": {
     "three": "^0.187.0"
   },
   "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/node": "^22.20.5",
     "@types/three": "^0.187.0",
     "typescript": "^7.0.2",
     "vite": "^8.3.5",
