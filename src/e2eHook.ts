@@ -3,10 +3,13 @@
  * (`vite build --mode e2e`), so it is absent from the production build (checked by
  * `npm run check:hook`).
  *
- * The hook is read-only: getters expose engine state, and the only methods are the engine's own
- * public API, which the UI will call anyway.
+ * The hook is read-only toward the engine: getters expose engine state, and the only engine
+ * methods are its own public API, which the UI will call anyway. `showPlanet` / `hidePlanet` draw a
+ * planet on a separate e2e-only canvas (src/e2ePlanetPreview.ts) and never touch the engine.
  */
 import type { Engine } from './engine/Engine';
+import type { PlanetType } from './engine/Planet';
+import { hidePlanetPreview, showPlanetPreview, type PlanetPreviewInfo } from './e2ePlanetPreview';
 
 export interface E2EHookSnapshot {
   /** Speed level (index into SHIP_SPEED_LEVELS). */
@@ -46,6 +49,13 @@ export interface E2EHook {
   pause(): void;
   resume(): void;
   setSpeed(level: number): void;
+  /**
+   * Draws the `nth` (default 0) encounter planet of `type` at a fixed position in front of the camera
+   * on an overlay canvas (`#planet-preview`), replacing any planet already shown.
+   */
+  showPlanet(type: PlanetType, nth?: number): PlanetPreviewInfo;
+  /** Removes the planet overlay canvas. */
+  hidePlanet(): void;
 }
 
 declare global {
@@ -85,6 +95,8 @@ export function installE2EHook(engine: Engine): void {
     pause: () => engine.pause(),
     resume: () => engine.resume(),
     setSpeed: (level) => engine.setSpeed(level),
+    showPlanet: (type, nth) => showPlanetPreview(type, nth),
+    hidePlanet: () => hidePlanetPreview(),
   };
   Object.defineProperty(window, '__elsewhere', { value: Object.freeze(hook), configurable: false });
 }

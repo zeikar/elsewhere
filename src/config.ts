@@ -168,6 +168,89 @@ export const ENCOUNTER_FADE_OUT_DISTANCE = 1200;
 export const ENCOUNTER_DESPAWN_DISTANCE = 1500;
 
 /*
+ * Planets (docs/PLAN.md section 6, Planets). `planetParams(seed)` in engine/Planet.ts draws every
+ * value below from an encounter's appearance seed. Ranges are inclusive `[min, max]` pairs; radii are
+ * in world units, angles in radians, speeds in radians per second, and noise values are in the
+ * units of a unit sphere (the shared planet geometry).
+ *
+ * Radii stay compatible with the encounter plan: the closest approach is `radius × k`
+ * (ENCOUNTER_SIDE_OFFSET_FACTOR) whatever the radius, every planet fits far inside the spawn
+ * distance ENCOUNTER_DISTANCE, so it starts as a distant dot, and the atmosphere shell
+ * (`radius × (1 + thickness)`) stays inside the clearance `radius × (1 + ENCOUNTER_CLEARANCE_MARGIN)`,
+ * so the camera never enters it. ENCOUNTER_PLANET_RADIUS lies inside the combined radius range.
+ */
+
+/** Share of planets that are gas giants; the rest are rocky. */
+export const PLANET_GAS_SHARE = 0.45;
+
+/** Parameter ranges for rocky planets. */
+export const PLANET_ROCKY_RANGES = {
+  radius: [50, 100],
+  /** Base frequency of the terrain noise. */
+  noiseScale: [1.4, 2.4],
+  /** Terrain noise octaves (an integer). */
+  octaves: [5, 6],
+  /** Domain-warp strength: higher gives more swirled continents. */
+  warp: [0.15, 0.6],
+  /** Height below which the surface is flat basin or sea (terrain heights are roughly in [-0.6, 0.6]). */
+  seaLevel: [-0.3, 0.08],
+  /** Polar ice: fraction of the latitude, from each pole, that is covered. 0 means no caps. */
+  iceCap: [0, 0.3],
+  /** Specular highlight strength on seas. 0 for dry worlds. */
+  specular: [0, 0.5],
+  /** Surface relief used for bump shading. */
+  relief: [0.6, 1.4],
+  /** Crater density: the chance that a cell of the crater lattice holds a crater. 0 means none. */
+  craters: [0, 0.7],
+  rotationSpeed: [0.01, 0.03],
+  axialTilt: [0, 0.45],
+  /** Atmosphere shell thickness, as a fraction of the radius. */
+  atmosphereThickness: [0.035, 0.07],
+  /** Atmosphere glow strength. 0 means airless (no glow is drawn). */
+  atmosphereIntensity: [0, 1.1],
+} as const;
+
+/** Parameter ranges for gas giants. */
+export const PLANET_GAS_RANGES = {
+  radius: [100, 150],
+  /** Base frequency of the turbulence noise. */
+  noiseScale: [1.6, 3],
+  /** Turbulence noise octaves (an integer). */
+  octaves: [4, 5],
+  /** Band cycles from pole to pole. */
+  bandFrequency: [5, 11],
+  /** Phase of the band pattern, in radians. */
+  bandPhase: [0, 2 * Math.PI],
+  /** How far the turbulence pushes the bands around. */
+  turbulence: [0.25, 0.7],
+  /** Size of the oval storm, as an angle on the sphere. 0 means no storm. */
+  stormSize: [0, 0.22],
+  /** Storm latitude and longitude, in radians. */
+  stormLatitude: [-0.6, 0.6],
+  stormLongitude: [-Math.PI, Math.PI],
+  rotationSpeed: [0.02, 0.05],
+  axialTilt: [0, 0.5],
+  atmosphereThickness: [0.06, 0.12],
+  atmosphereIntensity: [0.6, 1.1],
+} as const;
+
+/** Range shared by both types for the starting rotation angle, in radians. */
+export const PLANET_ROTATION_PHASE_RANGE = [0, 2 * Math.PI] as const;
+
+/** Range for each component of the noise-domain offset, so each seed samples its own region of noise. */
+export const PLANET_NOISE_OFFSET_RANGE = [-100, 100] as const;
+
+/**
+ * Direction toward the light (the "sun") in world space, used until the encounter supplies its own.
+ * From the right, above and behind the camera's starting heading (-Z), so an approaching planet shows
+ * its lit face with the terminator to one side.
+ */
+export const PLANET_LIGHT_DIRECTION = { x: 0.8, y: 0.3, z: 0.45 } as const;
+
+/** Width and height segments of the shared planet sphere geometry. */
+export const PLANET_SPHERE_SEGMENTS = [96, 64] as const;
+
+/*
  * Reduced motion (docs/PLAN.md section 7): under `prefers-reduced-motion: reduce`, travel starts at a
  * slower speed level with shorter streaks. The user can still raise the speed from there.
  */
