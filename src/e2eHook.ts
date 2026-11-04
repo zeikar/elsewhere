@@ -1,0 +1,78 @@
+/**
+ * Test-only hook for the Playwright e2e suite. It is installed only in the `e2e` Vite mode
+ * (`vite build --mode e2e`), so it is absent from the production build (checked by
+ * `npm run check:hook`).
+ *
+ * The hook is read-only: getters expose engine state, and the only methods are the engine's own
+ * public API, which the UI will call anyway.
+ */
+import type { Engine } from './engine/Engine';
+
+export interface E2EHookSnapshot {
+  /** Speed level (index into SHIP_SPEED_LEVELS). */
+  speed: number;
+  paused: boolean;
+  /** Pixel ratio applied to the renderer. */
+  dpr: number;
+  frames: number;
+  cameraAspect: number;
+  ship: {
+    time: number;
+    speed: number;
+    distance: number;
+    position: { x: number; y: number; z: number };
+  };
+  renderer: {
+    calls: number;
+    triangles: number;
+    frame: number;
+    geometries: number;
+    textures: number;
+  };
+}
+
+export interface E2EHook {
+  snapshot(): E2EHookSnapshot;
+  pause(): void;
+  resume(): void;
+  setSpeed(level: number): void;
+}
+
+declare global {
+  interface Window {
+    __elsewhere?: E2EHook;
+  }
+}
+
+export function installE2EHook(engine: Engine): void {
+  const hook: E2EHook = {
+    snapshot() {
+      const ship = engine.getShip();
+      const info = engine.getRendererInfo();
+      return {
+        speed: engine.getSpeed(),
+        paused: engine.isPaused(),
+        dpr: engine.getAppliedDpr(),
+        frames: engine.getFrameCount(),
+        cameraAspect: engine.getCameraAspect(),
+        ship: {
+          time: ship.time,
+          speed: ship.speed,
+          distance: ship.distance,
+          position: { x: ship.position.x, y: ship.position.y, z: ship.position.z },
+        },
+        renderer: {
+          calls: info.render.calls,
+          triangles: info.render.triangles,
+          frame: info.render.frame,
+          geometries: info.memory.geometries,
+          textures: info.memory.textures,
+        },
+      };
+    },
+    pause: () => engine.pause(),
+    resume: () => engine.resume(),
+    setSpeed: (level) => engine.setSpeed(level),
+  };
+  Object.defineProperty(window, '__elsewhere', { value: Object.freeze(hook), configurable: false });
+}

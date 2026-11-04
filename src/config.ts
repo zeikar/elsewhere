@@ -6,6 +6,14 @@
 /** Upper bound on the device pixel ratio applied to the renderer (docs/PLAN.md section 6, Performance). */
 export const DPR_CAP = 2;
 
+/** Camera vertical field of view in degrees, and clip planes in world units. Placeholders until the starfield is tuned. */
+export const CAMERA_FOV_DEG = 60;
+export const CAMERA_NEAR = 0.1;
+export const CAMERA_FAR = 10000;
+
+/** Renderer clear colour (deep space). */
+export const CLEAR_COLOR = 0x000000;
+
 /** Largest simulation step per frame, in seconds (docs/PLAN.md section 6, Time and speed). */
 export const DT_CAP_SECONDS = 0.1;
 

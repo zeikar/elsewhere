@@ -30,4 +30,24 @@ jobs:
 
       - run: npm run check:base
 
+      # The production build must not contain the e2e test hook.
+      - run: npm run check:hook
+
       - run: npm test
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npx playwright install --with-deps chromium
+
+      # Type checks the e2e suite, builds in e2e mode and runs Playwright against `vite preview`.
+      - run: npm run test:e2e
