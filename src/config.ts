@@ -51,3 +51,49 @@ export const SHIP_PITCH_DRIFT_PERIOD_SECONDS = 150;
  * sqrt((yawAmp * 2π / yawPeriod)² + (pitchAmp * 2π / pitchPeriod)²) ≈ 0.018 rad/s.
  */
 export const SHIP_MAX_TURN_RATE_RAD_PER_S = 0.03;
+
+/*
+ * Starfield (docs/PLAN.md section 6, Starfield). Distances are in world units, the same units as the
+ * ship speeds above; pixel sizes are CSS pixels and are multiplied by the applied DPR on the GPU.
+ */
+
+/** Number of stars (one instanced quad each). */
+export const STAR_COUNT = 12000;
+
+/** Side `L` of the cube the stars live in, centred on the camera and wrapped as the ship moves. */
+export const STAR_CUBE_SIZE = 1200;
+
+/** Streak tail = head + ship velocity × this time, in seconds. Longer means longer streaks. */
+export const STAR_STREAK_TIME_SECONDS = 0.06;
+
+/** Star width in CSS pixels before the per-star size factor. A still star is a dot this wide. */
+export const STAR_BASE_SIZE_PX = 1.6;
+
+/** Range of the per-star size factor (multiplies STAR_BASE_SIZE_PX). Skewed toward the small end. */
+export const STAR_SIZE_MIN = 0.7;
+export const STAR_SIZE_MAX = 1.8;
+
+/** Range of the per-star brightness. Skewed toward the dim end, with a few bright stars. */
+export const STAR_BRIGHTNESS_MIN = 0.45;
+export const STAR_BRIGHTNESS_MAX = 1;
+
+/**
+ * Fading, so wrapping never pops a star in or out. A star fades to 0 over the last
+ * STAR_EDGE_FADE_WIDTH units before the cube boundary, and over the last STAR_NEAR_FADE_DISTANCE
+ * units before the camera.
+ */
+export const STAR_EDGE_FADE_WIDTH = 150;
+export const STAR_NEAR_FADE_DISTANCE = 4;
+
+/** Depth cue: brightness falls off as 1 / (1 + (distance / STAR_DIM_DISTANCE)²). */
+export const STAR_DIM_DISTANCE = 380;
+
+/** Stars closer than this grow (size × STAR_GROWTH_DISTANCE / distance), up to STAR_MAX_GROWTH times. */
+export const STAR_GROWTH_DISTANCE = 60;
+export const STAR_MAX_GROWTH = 2;
+
+/** Longest drawn streak, in CSS pixels, so a star passing right by the camera never spans the screen. */
+export const STAR_MAX_STREAK_PX = 360;
+
+/** Seed for the star layout, so every run starts from the same sky. */
+export const STAR_SEED = 0x5eed_57a2;

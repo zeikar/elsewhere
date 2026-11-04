@@ -18,6 +18,7 @@ import {
 import { FrameClock } from './FrameClock';
 import { computeRenderSize } from './renderSize';
 import { DEFAULT_SHIP_PARAMS, createShipState, updateShip, type ShipParams, type ShipState } from './Ship';
+import { Starfield } from './Starfield';
 
 export class Engine {
   private readonly canvas: HTMLCanvasElement;
@@ -27,6 +28,7 @@ export class Engine {
   private readonly clock = new FrameClock();
   private readonly ship: ShipState;
   private readonly shipParams: ShipParams;
+  private readonly starfield = new Starfield();
   /** Scratch look-at target, reused every frame. */
   private readonly lookTarget = new Vector3();
   private resizeObserver: ResizeObserver | null = null;
@@ -50,6 +52,7 @@ export class Engine {
     this.camera.position.set(0, 0, 0);
     this.shipParams = { ...DEFAULT_SHIP_PARAMS, targetSpeed: SHIP_SPEED_LEVELS[this.speedLevel] ?? 0 };
     this.ship = createShipState({}, this.shipParams);
+    this.scene.add(this.starfield.mesh);
     this.applyHeading();
   }
 
@@ -81,6 +84,8 @@ export class Engine {
     this.dprQuery?.removeEventListener('change', this.onDprChange);
     this.dprQuery = null;
     document.removeEventListener('visibilitychange', this.onVisibilityChange);
+    this.scene.remove(this.starfield.mesh);
+    this.starfield.dispose();
     this.renderer.dispose();
   }
 
@@ -142,6 +147,12 @@ export class Engine {
     return this.renderer.info;
   }
 
+  /** Starfield DPR and base pixel-size uniforms (device pixels). */
+  getStarfieldSizing(): { dpr: number; pixelSize: number } {
+    const u = this.starfield.uniforms;
+    return { dpr: u.uDpr.value, pixelSize: u.uPixelSize.value };
+  }
+
   private readonly frame = (now: number): void => {
     this.rafId = 0;
     if (this.paused || !this.running) return;
@@ -162,6 +173,7 @@ export class Engine {
     this.renderer.setSize(size.cssWidth, size.cssHeight, false);
     this.camera.aspect = size.cssWidth / size.cssHeight;
     this.camera.updateProjectionMatrix();
+    this.starfield.setRenderSize(size);
     // Setting the canvas size clears it; redraw now so a paused view stays correct.
     this.render();
   };
@@ -195,6 +207,7 @@ export class Engine {
 
   private render(): void {
     this.applyHeading();
+    this.starfield.update(this.ship);
     this.renderer.render(this.scene, this.camera);
   }
 
