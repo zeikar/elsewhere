@@ -24,8 +24,13 @@ export interface Vec3 {
 }
 
 export interface ShipState {
-  /** Accumulated simulation time in seconds; drives the heading drift. */
+  /** Accumulated simulation time in seconds. */
   time: number;
+  /**
+   * Drift clock in seconds: the heading is `headingAt(driftTime)`. It advances by `driftRate × dt`,
+   * so it equals `time` while the drift runs at full rate and stops while the drift is held.
+   */
+  driftTime: number;
   /** Current speed in world units per second. */
   speed: number;
   /** Total distance travelled along the path, in world units. */
@@ -47,6 +52,12 @@ export interface ShipParams {
   yawPeriod: number;
   pitchAmplitude: number;
   pitchPeriod: number;
+  /**
+   * How fast the drift clock runs relative to simulation time, in [0, 1]: 1 drifts normally, 0 holds
+   * the heading where it is. Changing it never makes the heading jump, because the heading follows
+   * the drift clock rather than this rate.
+   */
+  driftRate: number;
 }
 
 export const DEFAULT_SHIP_PARAMS: Readonly<ShipParams> = {
@@ -56,6 +67,7 @@ export const DEFAULT_SHIP_PARAMS: Readonly<ShipParams> = {
   yawPeriod: SHIP_YAW_DRIFT_PERIOD_SECONDS,
   pitchAmplitude: SHIP_PITCH_DRIFT_AMPLITUDE_RAD,
   pitchPeriod: SHIP_PITCH_DRIFT_PERIOD_SECONDS,
+  driftRate: 1,
 };
 
 /**
@@ -68,7 +80,7 @@ export function clampDt(dt: number): number {
 }
 
 /**
- * Writes the unit heading at simulation time `time` into `out` and returns it.
+ * Writes the unit heading at drift-clock time `time` into `out` and returns it.
  * Yaw turns about +Y (positive toward +X) and pitch tilts toward +Y; at zero yaw and pitch the
  * heading is -Z, the default Three.js camera direction.
  */
@@ -84,22 +96,26 @@ export function headingAt(time: number, params: Readonly<ShipParams>, out: Vec3)
 
 export interface ShipInit {
   time?: number;
+  /** Defaults to `time`. */
+  driftTime?: number;
   speed?: number;
   distance?: number;
   position?: Readonly<Vec3>;
 }
 
-/** Creates a ship state whose heading and velocity are consistent with its time and speed. */
+/** Creates a ship state whose heading and velocity are consistent with its drift time and speed. */
 export function createShipState(
   init: ShipInit = {},
   params: Readonly<ShipParams> = DEFAULT_SHIP_PARAMS,
 ): ShipState {
   const time = init.time ?? 0;
+  const driftTime = init.driftTime ?? time;
   const speed = init.speed ?? 0;
-  const heading = headingAt(time, params, { x: 0, y: 0, z: 0 });
+  const heading = headingAt(driftTime, params, { x: 0, y: 0, z: 0 });
   const position = init.position ?? { x: 0, y: 0, z: 0 };
   return {
     time,
+    driftTime,
     speed,
     distance: init.distance ?? 0,
     position: { x: position.x, y: position.y, z: position.z },
@@ -116,7 +132,8 @@ export function createShipState(
  *
  * Speed follows the exact solution of dv/dt = (target - v) / tau, and the distance is its exact
  * integral over the step, so results do not depend on how a span of time is split into frames.
- * The position moves that distance along the heading at the middle of the step.
+ * The position moves that distance along the heading at the middle of the step. The drift clock
+ * advances by `driftRate × dt`, so a rate of 0 keeps the heading exactly constant.
  */
 export function updateShip(
   state: Readonly<ShipState>,
@@ -134,19 +151,22 @@ export function updateShip(
   const step = targetSpeed * dt - gap * speedTau * Math.expm1(-dt / speedTau);
 
   const time = state.time + dt;
+  const driftStep = params.driftRate * dt;
+  const driftTime = state.driftTime + driftStep;
   const px = state.position.x;
   const py = state.position.y;
   const pz = state.position.z;
   const distance = state.distance + step;
 
   // Mid-step heading, written into out.heading as scratch before the final heading overwrites it.
-  const mid = headingAt(state.time + dt / 2, params, out.heading);
+  const mid = headingAt(state.driftTime + driftStep / 2, params, out.heading);
   out.position.x = px + mid.x * step;
   out.position.y = py + mid.y * step;
   out.position.z = pz + mid.z * step;
 
-  const heading = headingAt(time, params, out.heading);
+  const heading = headingAt(driftTime, params, out.heading);
   out.time = time;
+  out.driftTime = driftTime;
   out.speed = speed;
   out.distance = distance;
   out.velocity.x = heading.x * speed;

@@ -167,7 +167,7 @@ export const DEFAULT_ENCOUNTER_PROFILE: Readonly<EncounterProfile> = {
 };
 
 /** Smoothstep: 0 at or below `edge0`, 1 at or beyond `edge1`, C¹ in between. `edge0 > edge1` is allowed. */
-function smoothstep(edge0: number, edge1: number, x: number): number {
+export function smoothstep(edge0: number, edge1: number, x: number): number {
   const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)));
   return t * t * (3 - 2 * t);
 }

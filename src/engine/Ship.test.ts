@@ -130,6 +130,38 @@ describe('updateShip', () => {
     expect(maxTurn).toBeLessThan(SHIP_MAX_TURN_RATE_RAD_PER_S);
   });
 
+  it('runs the drift clock at the drift rate: 0 holds the heading exactly, and it resumes without a jump', () => {
+    const params: ShipParams = { ...DEFAULT_SHIP_PARAMS, targetSpeed: 60 };
+    let s = createShipState({ speed: 60, time: 50 }, params);
+    expect(s.driftTime).toBe(50);
+    s = run(s, 1 / 60, 60, params);
+    expect(s.driftTime).toBeCloseTo(s.time, 9);
+
+    const held: ShipParams = { ...params, driftRate: 0 };
+    const heldHeading = { ...s.heading };
+    const heldDriftTime = s.driftTime;
+    const start = { ...s.position };
+    s = run(s, 1 / 60, 600, held);
+    expect(s.heading).toEqual(heldHeading);
+    expect(s.driftTime).toBe(heldDriftTime);
+    // The ship moved in a straight line along the held heading.
+    const moved = { x: s.position.x - start.x, y: s.position.y - start.y, z: s.position.z - start.z };
+    expect(angleBetween(moved, heldHeading)).toBeLessThan(1e-9);
+
+    // Half rate advances the drift clock half as fast; resuming continues from the held heading.
+    const half: ShipParams = { ...params, driftRate: 0.5 };
+    const next = updateShip(s, 1 / 60, half);
+    expect(next.driftTime).toBeCloseTo(heldDriftTime + 0.5 / 60, 12);
+    expect(angleBetween(heldHeading, next.heading)).toBeLessThan(SHIP_MAX_TURN_RATE_RAD_PER_S / 60);
+  });
+
+  it('the drift time can start apart from the simulation time', () => {
+    const s = createShipState({ time: 10, driftTime: 90 });
+    const t = createShipState({ time: 90 });
+    expect(s.time).toBe(10);
+    expect(s.heading).toEqual(t.heading);
+  });
+
   it('exposes velocity as heading × speed', () => {
     const params = DEFAULT_SHIP_PARAMS;
     const s = run(createShipState({}, params), 1 / 60, 500, params);
