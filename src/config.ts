@@ -99,6 +99,55 @@ export const STAR_MAX_STREAK_PX = 360;
 export const STAR_SEED = 0x5eed_57a2;
 
 /*
+ * Encounters (docs/PLAN.md section 6, Planets). An encounter plans a straight path along the heading
+ * at the moment it starts, and places the planet beside it. Distances are in world units, measured
+ * along that path from the point of closest approach: positive while approaching, negative after
+ * passing. Values are first tunings until the autopilot and planets land.
+ */
+
+/** Base seed for encounter appearance: encounter `i` uses `hash(ENCOUNTER_BASE_SEED, i)`. */
+export const ENCOUNTER_BASE_SEED = 0x91a7_e7a5;
+
+/**
+ * `D`: the planet is placed this far ahead along the heading when the encounter starts, so it is
+ * also the spawn distance. Kept well inside CAMERA_FAR.
+ */
+export const ENCOUNTER_DISTANCE = 1600;
+
+/** `k`: the planet centre sits `radius × k` to the side of the path, which is the closest approach. */
+export const ENCOUNTER_SIDE_OFFSET_FACTOR = 2;
+
+/**
+ * Required clearance: the closest approach to the centre must be at least `radius × (1 + margin)`,
+ * so ENCOUNTER_SIDE_OFFSET_FACTOR must stay above 1 + this margin and the path never meets the sphere.
+ */
+export const ENCOUNTER_CLEARANCE_MARGIN = 0.25;
+
+/**
+ * Speed profile. The target speed is the cruise speed until ENCOUNTER_SLOWDOWN_DISTANCE before the
+ * closest approach, then eases down to ENCOUNTER_MIN_SPEED (units per second), which it holds within
+ * ENCOUNTER_MIN_SPEED_DISTANCE either side of the closest approach, then eases back up to cruise over
+ * ENCOUNTER_SPEEDUP_DISTANCE. The ship follows it through its exponential speed approach
+ * (SHIP_SPEED_TAU_SECONDS), so the slowdown spans several time constants even at the top speed.
+ */
+export const ENCOUNTER_MIN_SPEED = 15;
+export const ENCOUNTER_SLOWDOWN_DISTANCE = 800;
+export const ENCOUNTER_MIN_SPEED_DISTANCE = 40;
+export const ENCOUNTER_SPEEDUP_DISTANCE = 800;
+
+/**
+ * Fade. From the spawn distance (the encounter's `D`, ENCOUNTER_DISTANCE by default), opacity eases
+ * up from 0 to 1 and the size scale from ENCOUNTER_SPAWN_SCALE to 1 over ENCOUNTER_FADE_IN_DISTANCE,
+ * so the planet starts as a distant dot. After passing, opacity eases back down to 0 over ENCOUNTER_FADE_OUT_DISTANCE, reaching
+ * 0 at ENCOUNTER_DESPAWN_DISTANCE past the closest approach. The fade distances are long enough that
+ * at the top cruise speed one capped frame changes opacity by less than 2%.
+ */
+export const ENCOUNTER_FADE_IN_DISTANCE = 1200;
+export const ENCOUNTER_SPAWN_SCALE = 0.15;
+export const ENCOUNTER_FADE_OUT_DISTANCE = 1200;
+export const ENCOUNTER_DESPAWN_DISTANCE = 1500;
+
+/*
  * Reduced motion (docs/PLAN.md section 7): under `prefers-reduced-motion: reduce`, travel starts at a
  * slower speed level with shorter streaks. The user can still raise the speed from there.
  */
