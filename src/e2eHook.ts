@@ -36,6 +36,8 @@ export interface E2EHookSnapshot {
     dpr: number;
     /** Base star width uniform, in device pixels. */
     pixelSize: number;
+    /** Streak time uniform, in seconds. */
+    streakTime: number;
   };
 }
 
@@ -77,7 +79,7 @@ export function installE2EHook(engine: Engine): void {
           textures: info.memory.textures,
           programs: info.programs?.length ?? 0,
         },
-        starfield: engine.getStarfieldSizing(),
+        starfield: { ...engine.getStarfieldSizing(), streakTime: engine.getStreakTime() },
       };
     },
     pause: () => engine.pause(),

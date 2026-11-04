@@ -18,7 +18,17 @@ import {
 import { FrameClock } from './FrameClock';
 import { computeRenderSize } from './renderSize';
 import { DEFAULT_SHIP_PARAMS, createShipState, updateShip, type ShipParams, type ShipState } from './Ship';
-import { Starfield } from './Starfield';
+import { DEFAULT_STARFIELD_OPTIONS, Starfield } from './Starfield';
+
+export interface EngineOptions {
+  /** Speed level travel starts at (index into SHIP_SPEED_LEVELS, clamped). Default: SHIP_DEFAULT_SPEED_LEVEL. */
+  speedLevel?: number;
+  /** Starfield streak time, in seconds. Default: STAR_STREAK_TIME_SECONDS. */
+  streakTime?: number;
+}
+
+/** Called with the new paused state whenever pause() or resume() changes it. */
+export type PausedChangeListener = (paused: boolean) => void;
 
 export class Engine {
   private readonly canvas: HTMLCanvasElement;
@@ -28,14 +38,15 @@ export class Engine {
   private readonly clock = new FrameClock();
   private readonly ship: ShipState;
   private readonly shipParams: ShipParams;
-  private readonly starfield = new Starfield();
+  private readonly starfield: Starfield;
+  private readonly pausedListeners = new Set<PausedChangeListener>();
   /** Scratch look-at target, reused every frame. */
   private readonly lookTarget = new Vector3();
   private resizeObserver: ResizeObserver | null = null;
   /** Matches only the current devicePixelRatio; re-registered after each change. */
   private dprQuery: MediaQueryList | null = null;
 
-  private speedLevel: number = SHIP_DEFAULT_SPEED_LEVEL;
+  private speedLevel: number;
   private paused = false;
   private running = false;
   private disposed = false;
@@ -43,13 +54,18 @@ export class Engine {
   private frameCount = 0;
   private appliedDpr = 1;
 
-  constructor(canvas: HTMLCanvasElement) {
+  constructor(canvas: HTMLCanvasElement, options: EngineOptions = {}) {
     this.canvas = canvas;
+    this.starfield = new Starfield({
+      ...DEFAULT_STARFIELD_OPTIONS,
+      streakTime: options.streakTime ?? DEFAULT_STARFIELD_OPTIONS.streakTime,
+    });
     this.renderer = new WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
     this.renderer.outputColorSpace = SRGBColorSpace;
     this.renderer.setClearColor(CLEAR_COLOR, 1);
     this.camera = new PerspectiveCamera(CAMERA_FOV_DEG, 1, CAMERA_NEAR, CAMERA_FAR);
     this.camera.position.set(0, 0, 0);
+    this.speedLevel = clampSpeedLevel(options.speedLevel ?? SHIP_DEFAULT_SPEED_LEVEL, SHIP_DEFAULT_SPEED_LEVEL);
     this.shipParams = { ...DEFAULT_SHIP_PARAMS, targetSpeed: SHIP_SPEED_LEVELS[this.speedLevel] ?? 0 };
     this.ship = createShipState({}, this.shipParams);
     this.scene.add(this.starfield.mesh);
@@ -84,6 +100,7 @@ export class Engine {
     this.dprQuery?.removeEventListener('change', this.onDprChange);
     this.dprQuery = null;
     document.removeEventListener('visibilitychange', this.onVisibilityChange);
+    this.pausedListeners.clear();
     this.scene.remove(this.starfield.mesh);
     this.starfield.dispose();
     this.renderer.dispose();
@@ -93,6 +110,7 @@ export class Engine {
     if (this.paused) return;
     this.paused = true;
     this.cancelFrame();
+    this.notifyPausedChange();
   }
 
   resume(): void {
@@ -101,16 +119,24 @@ export class Engine {
     // Forget the reference time so the paused duration never becomes a step.
     this.clock.reset();
     if (this.running) this.requestFrame();
+    this.notifyPausedChange();
   }
 
   isPaused(): boolean {
     return this.paused;
   }
 
+  /** Calls `listener` with the new paused state on every pause/resume change. Returns an unsubscribe function. */
+  onPausedChange(listener: PausedChangeListener): () => void {
+    this.pausedListeners.add(listener);
+    return () => {
+      this.pausedListeners.delete(listener);
+    };
+  }
+
   /** Sets the speed level, an index into SHIP_SPEED_LEVELS (clamped); the ship eases toward it. */
   setSpeed(level: number): void {
-    const max = SHIP_SPEED_LEVELS.length - 1;
-    const clamped = Math.min(max, Math.max(0, Math.round(Number.isFinite(level) ? level : this.speedLevel)));
+    const clamped = clampSpeedLevel(level, this.speedLevel);
     this.speedLevel = clamped;
     this.shipParams.targetSpeed = SHIP_SPEED_LEVELS[clamped] ?? 0;
   }
@@ -145,6 +171,11 @@ export class Engine {
 
   getRendererInfo(): Readonly<WebGLInfo> {
     return this.renderer.info;
+  }
+
+  /** Starfield streak time, in seconds. */
+  getStreakTime(): number {
+    return this.starfield.uniforms.uStreakTime.value;
   }
 
   /** Starfield DPR and base pixel-size uniforms (device pixels). */
@@ -218,6 +249,10 @@ export class Engine {
     this.camera.lookAt(this.lookTarget);
   }
 
+  private notifyPausedChange(): void {
+    for (const listener of this.pausedListeners) listener(this.paused);
+  }
+
   private requestFrame(): void {
     if (this.rafId === 0) this.rafId = requestAnimationFrame(this.frame);
   }
@@ -228,4 +263,10 @@ export class Engine {
       this.rafId = 0;
     }
   }
+}
+
+/** Rounds and clamps a speed level into SHIP_SPEED_LEVELS; a non-finite level falls back to `fallback`. */
+function clampSpeedLevel(level: number, fallback: number): number {
+  const max = SHIP_SPEED_LEVELS.length - 1;
+  return Math.min(max, Math.max(0, Math.round(Number.isFinite(level) ? level : fallback)));
 }
