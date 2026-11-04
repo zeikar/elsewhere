@@ -58,7 +58,10 @@ export const DEFAULT_SHIP_PARAMS: Readonly<ShipParams> = {
   pitchPeriod: SHIP_PITCH_DRIFT_PERIOD_SECONDS,
 };
 
-/** Clamps a raw frame delta to [0, DT_CAP_SECONDS]; negative or non-finite input gives 0. */
+/**
+ * Clamps a raw frame delta to [0, DT_CAP_SECONDS]. Negative or NaN input gives 0; +Infinity gives
+ * the cap.
+ */
 export function clampDt(dt: number): number {
   if (!(dt > 0)) return 0; // also catches NaN
   return Math.min(dt, DT_CAP_SECONDS);

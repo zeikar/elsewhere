@@ -33,7 +33,7 @@ describe('clampDt', () => {
     expect(clampDt(1 / 60)).toBe(1 / 60);
   });
 
-  it('turns negative and non-finite dt into 0', () => {
+  it('turns negative and NaN dt into 0, and caps +Infinity', () => {
     expect(clampDt(-1)).toBe(0);
     expect(clampDt(Number.NaN)).toBe(0);
     expect(clampDt(Number.POSITIVE_INFINITY)).toBe(0.1);
@@ -41,9 +41,11 @@ describe('clampDt', () => {
 });
 
 describe('updateShip', () => {
-  // Section 10: refresh-rate independence. Stated tolerance: 0.5% relative, as the issue suggests;
-  // the analytic integration actually agrees to rounding error.
+  // Section 10: refresh-rate independence. Stated tolerance: 0.5% relative, as the issue suggests.
+  // The analytic integration actually agrees to rounding error, so the distance is also held to a
+  // much tighter bound that an Euler-style regression (~0.1-1% off) would clearly fail.
   const REFRESH_TOLERANCE = 0.005;
+  const ANALYTIC_DISTANCE_TOLERANCE = 1e-9;
 
   it.each([
     { label: 'converging from rest', speed: 0 },
@@ -61,9 +63,9 @@ describe('updateShip', () => {
       expect(Math.abs(at60.speed - 60)).toBeGreaterThan(1);
     }
     expect(at60.distance).toBeGreaterThan(0);
-    expect(Math.abs(at60.distance - at120.distance) / at60.distance).toBeLessThan(
-      REFRESH_TOLERANCE,
-    );
+    const distanceError = Math.abs(at60.distance - at120.distance) / at60.distance;
+    expect(distanceError).toBeLessThan(REFRESH_TOLERANCE);
+    expect(distanceError).toBeLessThan(ANALYTIC_DISTANCE_TOLERANCE);
     expect(Math.abs(at60.speed - at120.speed)).toBeLessThan(1e-9);
 
     const gap = Math.hypot(
