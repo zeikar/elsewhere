@@ -166,7 +166,8 @@ export function createAutopilotState(params: Readonly<AutopilotParams> = DEFAULT
  *   current heading with the next index and seed, and moves to APPROACH.
  * - A transition fires on the first step past its threshold, up to one step late. That overshoot is
  *   carried into the next CRUISE (the time past `interval`, plus the time since passing the despawn
- *   distance), so the timeline does not depend on dt and does not drift over many encounters.
+ *   distance), so transition lateness does not add up over encounters. A small O(dt) difference per
+ *   encounter remains, because the target speed is updated only once per frame.
  * - APPROACH becomes FLYBY once the remaining distance is at most `flybyDistance`, FLYBY becomes
  *   DEPARTURE once the closest approach is passed (remaining ≤ 0), and DEPARTURE returns to CRUISE
  *   once the ship is the profile's despawn distance past it, where the fade has reached 0.

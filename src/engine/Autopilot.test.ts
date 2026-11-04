@@ -321,8 +321,10 @@ describe('autopilot simulation', () => {
 
   // Stated tolerance: 0.05 s. Each transition fires on the first frame past its threshold, so it
   // lands up to one frame (1/60 s) after the exact time. The autopilot carries that overshoot into
-  // the next phase, so the lateness never adds up across cycles; everything else agrees far more
-  // closely.
+  // the next phase, so the lateness does not add up across encounters. A small O(dt) difference per
+  // encounter remains, because the target speed is updated only once per frame, so the gap still
+  // grows slowly with the encounter count (it passes 0.05 s at around 30 encounters). Raising the
+  // count here needs a larger tolerance.
   const TIMELINE_TOLERANCE_S = 0.05;
 
   it.each([3, 15])('the timeline matches between dt = 1/60 and dt = 1/120 over %i encounters', (n) => {
