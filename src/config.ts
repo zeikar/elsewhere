@@ -136,9 +136,9 @@ export const ENCOUNTER_MIN_SPEED_DISTANCE = 40;
 export const ENCOUNTER_SPEEDUP_DISTANCE = 800;
 
 /**
- * Fade. From the spawn distance (ENCOUNTER_DISTANCE), opacity eases up from 0 to 1 and the size
- * scale from ENCOUNTER_SPAWN_SCALE to 1 over ENCOUNTER_FADE_IN_DISTANCE, so the planet starts as a
- * distant dot. After passing, opacity eases back down to 0 over ENCOUNTER_FADE_OUT_DISTANCE, reaching
+ * Fade. From the spawn distance (the encounter's `D`, ENCOUNTER_DISTANCE by default), opacity eases
+ * up from 0 to 1 and the size scale from ENCOUNTER_SPAWN_SCALE to 1 over ENCOUNTER_FADE_IN_DISTANCE,
+ * so the planet starts as a distant dot. After passing, opacity eases back down to 0 over ENCOUNTER_FADE_OUT_DISTANCE, reaching
  * 0 at ENCOUNTER_DESPAWN_DISTANCE past the closest approach. The fade distances are long enough that
  * at the top cruise speed one capped frame changes opacity by less than 2%.
  */

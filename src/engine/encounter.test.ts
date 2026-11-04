@@ -258,25 +258,48 @@ describe('encounterTargetSpeed', () => {
 
 describe('encounter fade', () => {
   const despawn = -ENCOUNTER_DESPAWN_DISTANCE;
+  const e = planEncounter({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: -1 }, 50);
+
+  it('records the D it was planned with as the spawn distance', () => {
+    expect(e.spawnDistance).toBe(ENCOUNTER_DISTANCE);
+    expect(encounterRemaining(e, { x: 0, y: 0, z: 0 })).toBeCloseTo(e.spawnDistance, 9);
+  });
+
+  it('starts at opacity 0 and the spawn scale for a non-default D (no pop-in)', () => {
+    for (const D of [1000, 1500, ENCOUNTER_DISTANCE * 2, 5000]) {
+      const ship = { x: 12, y: -3, z: 40 };
+      const custom = planEncounter(ship, { x: 1, y: 0.2, z: -1 }, 50, D);
+      expect(custom.spawnDistance).toBe(D);
+      const remaining = encounterRemaining(custom, ship);
+      expect(remaining).toBeCloseTo(D, 9);
+      expect(encounterOpacity(custom, D)).toBe(0);
+      expect(encounterScale(custom, D)).toBe(ENCOUNTER_SPAWN_SCALE);
+      // The first frame, at the remaining distance actually measured from the ship.
+      expect(encounterOpacity(custom, remaining)).toBeLessThan(1e-12);
+      // Then eases in over the fade-in distance, as with the default D.
+      expect(encounterOpacity(custom, D - MAX_FRAME_STEP)).toBeLessThan(FADE_EPSILON);
+      expect(encounterOpacity(custom, D - ENCOUNTER_FADE_IN_DISTANCE)).toBe(1);
+    }
+  });
 
   it('opacity is 0 at the spawn and despawn distances, and 1 around the closest approach', () => {
-    expect(encounterOpacity(ENCOUNTER_DISTANCE)).toBe(0);
-    expect(encounterOpacity(despawn)).toBe(0);
-    expect(encounterOpacity(ENCOUNTER_DISTANCE + 100)).toBe(0);
-    expect(encounterOpacity(despawn - 100)).toBe(0);
-    expect(encounterOpacity(ENCOUNTER_DISTANCE - 1)).toBeGreaterThan(0);
-    expect(encounterOpacity(despawn + 1)).toBeGreaterThan(0);
+    expect(encounterOpacity(e, ENCOUNTER_DISTANCE)).toBe(0);
+    expect(encounterOpacity(e, despawn)).toBe(0);
+    expect(encounterOpacity(e, ENCOUNTER_DISTANCE + 100)).toBe(0);
+    expect(encounterOpacity(e, despawn - 100)).toBe(0);
+    expect(encounterOpacity(e, ENCOUNTER_DISTANCE - 1)).toBeGreaterThan(0);
+    expect(encounterOpacity(e, despawn + 1)).toBeGreaterThan(0);
     for (let s = ENCOUNTER_MIN_SPEED_DISTANCE; s >= -ENCOUNTER_MIN_SPEED_DISTANCE; s -= 1) {
-      expect(encounterOpacity(s)).toBe(1);
+      expect(encounterOpacity(e, s)).toBe(1);
     }
   });
 
   it('scale starts at the spawn scale and reaches 1 before the closest approach', () => {
-    expect(encounterScale(ENCOUNTER_DISTANCE)).toBe(ENCOUNTER_SPAWN_SCALE);
-    expect(encounterScale(ENCOUNTER_DISTANCE + 100)).toBe(ENCOUNTER_SPAWN_SCALE);
-    expect(encounterScale(ENCOUNTER_DISTANCE - ENCOUNTER_FADE_IN_DISTANCE)).toBe(1);
-    expect(encounterScale(0)).toBe(1);
-    expect(encounterScale(despawn)).toBe(1);
+    expect(encounterScale(e, ENCOUNTER_DISTANCE)).toBe(ENCOUNTER_SPAWN_SCALE);
+    expect(encounterScale(e, ENCOUNTER_DISTANCE + 100)).toBe(ENCOUNTER_SPAWN_SCALE);
+    expect(encounterScale(e, ENCOUNTER_DISTANCE - ENCOUNTER_FADE_IN_DISTANCE)).toBe(1);
+    expect(encounterScale(e, 0)).toBe(1);
+    expect(encounterScale(e, despawn)).toBe(1);
   });
 
   it(`changes by less than ${FADE_EPSILON} over a 0.1 s capped frame at the top speed`, () => {
@@ -285,14 +308,14 @@ describe('encounter fade', () => {
     // Every alignment of frames: offsets in 0.5-unit steps, frames of MAX_FRAME_STEP.
     for (let start = 0; start < MAX_FRAME_STEP; start += 0.5) {
       for (let s = ENCOUNTER_DISTANCE + 50 - start; s >= despawn - 50; s -= MAX_FRAME_STEP) {
-        const opacity = encounterOpacity(s);
-        const scale = encounterScale(s);
-        const nextOpacity = encounterOpacity(s - MAX_FRAME_STEP);
-        const nextScale = encounterScale(s - MAX_FRAME_STEP);
+        const opacity = encounterOpacity(e, s);
+        const scale = encounterScale(e, s);
+        const nextOpacity = encounterOpacity(e, s - MAX_FRAME_STEP);
+        const nextScale = encounterScale(e, s - MAX_FRAME_STEP);
         maxOpacityStep = Math.max(maxOpacityStep, Math.abs(nextOpacity - opacity));
         maxScaleStep = Math.max(maxScaleStep, Math.abs(nextScale - scale));
         // Continuity at a fine step as well.
-        expect(Math.abs(encounterOpacity(s - 0.01) - opacity)).toBeLessThan(1e-4);
+        expect(Math.abs(encounterOpacity(e, s - 0.01) - opacity)).toBeLessThan(1e-4);
       }
     }
     expect(maxOpacityStep).toBeGreaterThan(0);
@@ -301,14 +324,14 @@ describe('encounter fade', () => {
   });
 
   it('opacity rises monotonically while fading in and falls monotonically while fading out', () => {
-    let prev = encounterOpacity(ENCOUNTER_DISTANCE);
+    let prev = encounterOpacity(e, ENCOUNTER_DISTANCE);
     for (let s = ENCOUNTER_DISTANCE; s >= 0; s -= 1) {
-      const o = encounterOpacity(s);
+      const o = encounterOpacity(e, s);
       expect(o).toBeGreaterThanOrEqual(prev);
       prev = o;
     }
     for (let s = 0; s >= despawn; s -= 1) {
-      const o = encounterOpacity(s);
+      const o = encounterOpacity(e, s);
       expect(o).toBeLessThanOrEqual(prev);
       prev = o;
     }

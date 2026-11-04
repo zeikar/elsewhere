@@ -41,6 +41,11 @@ export interface Encounter {
   radius: number;
   /** Closest distance between the path and the planet centre: `radius × k`. */
   closestDistance: number;
+  /**
+   * Remaining distance when the encounter was planned (the `D` it was planned with). The fade-in
+   * starts here, so the planet always appears at opacity 0 whatever `D` is.
+   */
+  spawnDistance: number;
 }
 
 /**
@@ -102,6 +107,7 @@ export function planEncounter(
     side,
     radius,
     closestDistance,
+    spawnDistance: D,
   };
 }
 
@@ -131,8 +137,6 @@ export function encounterRemaining(encounter: Readonly<Encounter>, shipPos: Read
 }
 
 export interface EncounterProfile {
-  /** Remaining distance at which the encounter starts (= `D`). */
-  spawnDistance: number;
   /** Lowest target speed, held around the closest approach, in world units per second. */
   minSpeed: number;
   /** Remaining distance at which the slowdown starts. */
@@ -152,7 +156,6 @@ export interface EncounterProfile {
 }
 
 export const DEFAULT_ENCOUNTER_PROFILE: Readonly<EncounterProfile> = {
-  spawnDistance: ENCOUNTER_DISTANCE,
   minSpeed: ENCOUNTER_MIN_SPEED,
   slowdownDistance: ENCOUNTER_SLOWDOWN_DISTANCE,
   minSpeedDistance: ENCOUNTER_MIN_SPEED_DISTANCE,
@@ -193,31 +196,37 @@ export function encounterTargetSpeed(
   return minSpeed + (cruiseSpeed - minSpeed) * w;
 }
 
-/** Fade-in progress: 0 at the spawn distance (and before it), 1 once `fadeInDistance` has been travelled. */
-function fadeIn(remaining: number, profile: Readonly<EncounterProfile>): number {
-  return smoothstep(profile.spawnDistance, profile.spawnDistance - profile.fadeInDistance, remaining);
+/**
+ * Fade-in progress: 0 at the encounter's spawn distance (and before it), 1 once `fadeInDistance` has
+ * been travelled. The spawn distance comes from the encounter itself, so it always matches its `D`.
+ */
+function fadeIn(encounter: Readonly<Encounter>, remaining: number, profile: Readonly<EncounterProfile>): number {
+  const { spawnDistance } = encounter;
+  return smoothstep(spawnDistance, spawnDistance - profile.fadeInDistance, remaining);
 }
 
 /**
- * Planet opacity in [0, 1] at `remaining` distance: 0 at the spawn distance, easing up to 1 over
- * `fadeInDistance`, and easing back down to 0 at `despawnDistance` past the closest approach.
+ * Planet opacity in [0, 1] at `remaining` distance: 0 at the encounter's spawn distance, easing up
+ * to 1 over `fadeInDistance`, and easing back down to 0 at `despawnDistance` past the closest approach.
  */
 export function encounterOpacity(
+  encounter: Readonly<Encounter>,
   remaining: number,
   profile: Readonly<EncounterProfile> = DEFAULT_ENCOUNTER_PROFILE,
 ): number {
   const fadeOut = smoothstep(-profile.despawnDistance, profile.fadeOutDistance - profile.despawnDistance, remaining);
-  return fadeIn(remaining, profile) * fadeOut;
+  return fadeIn(encounter, remaining, profile) * fadeOut;
 }
 
 /**
- * Planet size scale in [spawnScale, 1] at `remaining` distance: `spawnScale` at the spawn distance,
+ * Planet size scale in [spawnScale, 1] at `remaining` distance: `spawnScale` at the encounter's spawn distance,
  * easing up to 1 over `fadeInDistance` and staying 1 after that, so the planet starts as a distant dot
  * and has its full radius well before the closest approach.
  */
 export function encounterScale(
+  encounter: Readonly<Encounter>,
   remaining: number,
   profile: Readonly<EncounterProfile> = DEFAULT_ENCOUNTER_PROFILE,
 ): number {
-  return profile.spawnScale + (1 - profile.spawnScale) * fadeIn(remaining, profile);
+  return profile.spawnScale + (1 - profile.spawnScale) * fadeIn(encounter, remaining, profile);
 }
