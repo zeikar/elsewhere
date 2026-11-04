@@ -11,8 +11,6 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 # One deployment at a time. An in-progress deployment is allowed to finish.
 concurrency:
@@ -49,6 +47,10 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    # Only this job gets the Pages and OIDC token scopes; the build job (which runs npm ci) does not.
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
