@@ -17,6 +17,13 @@
  *   at the shell's edge, and it is brighter on the day side.
  * - `setFade(opacity)` drives one opacity uniform shared by the surface and the atmosphere (the
  *   Autopilot's fade); at 0 the planet is hidden.
+ * - Draw order and depth, relative to the starfield (contract for whoever adds planets to the scene):
+ *   the surface writes depth and draws before the starfield (renderOrder below
+ *   STARFIELD_RENDER_ORDER), and the starfield depth-tests without writing, so only the stars behind
+ *   the planet are hidden and stars nearer than the planet still show in front of its disc. The
+ *   atmosphere draws after the starfield, additively, depth-tested and without depth writes. The
+ *   surface writes depth while it fades too, so stars behind a partly faded planet are hidden; fades
+ *   happen while the planet is far beyond most of the star cube, so few stars are affected.
  *
  * Positions are relative to the ship (floating origin): the caller sets `object.position` to
  * `planet centre - ship position`, computed in float64 on the CPU.
@@ -45,6 +52,7 @@ import {
 import type { PlanetSpec } from './Autopilot';
 import { mulberry32 } from './seed';
 import type { Vec3 } from './Ship';
+import { STARFIELD_RENDER_ORDER } from './Starfield';
 
 // ---------------------------------------------------------------------------------------------
 // Seeded parameters (pure)
@@ -309,7 +317,9 @@ export function planetParams(seed: number): PlanetParams {
 
 /*
  * 3D simplex noise: "webgl-noise" by Ian McEwan and Stefan Gustavson (Ashima Arts), MIT licence,
- * https://github.com/ashima/webgl-noise. Returns values in about [-1, 1].
+ * https://github.com/ashima/webgl-noise. Returns values in about [-1, 1]. snoiseGrad() also returns
+ * the analytic gradient of the same function; snoise() drops it (the compiler removes the unused
+ * gradient code).
  */
 const noiseChunk = /* glsl */ `
 vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
@@ -317,7 +327,7 @@ vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
 vec4 permute(vec4 x) { return mod289(((x * 34.0) + 1.0) * x); }
 vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
 
-float snoise(vec3 v) {
+float snoiseGrad(vec3 v, out vec3 grad) {
   const vec2 C = vec2(1.0 / 6.0, 1.0 / 3.0);
   const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
   vec3 i = floor(v + dot(v, C.yyy));
@@ -359,8 +369,19 @@ float snoise(vec3 v) {
   p2 *= norm.z;
   p3 *= norm.w;
   vec4 m = max(0.6 - vec4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), 0.0);
-  m = m * m;
-  return 42.0 * dot(m * m, vec4(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3)));
+  vec4 m2 = m * m;
+  vec4 m4 = m2 * m2;
+  vec4 px = vec4(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3));
+  // d/dv of 42 * sum(m^4 * dot(p, x)), with dm/dv = -2x and dx/dv = I.
+  vec4 t = m2 * m * px;
+  grad = 42.0 * (m4.x * p0 + m4.y * p1 + m4.z * p2 + m4.w * p3
+    - 8.0 * (t.x * x0 + t.y * x1 + t.z * x2 + t.w * x3));
+  return 42.0 * dot(m4, px);
+}
+
+float snoise(vec3 v) {
+  vec3 unused;
+  return snoiseGrad(v, unused);
 }
 
 #define MAX_OCTAVES 6
@@ -454,11 +475,12 @@ vec3 hash33(vec3 p) {
 }
 
 // Impact craters: at most one per lattice cell (kept with probability uCraters), each a bowl with a
-// raised rim. Returns a height offset, negative in the bowls.
-float craters(vec3 p) {
+// raised rim. Returns a height offset, negative in the bowls, and its gradient.
+float craters(vec3 p, out vec3 grad) {
   vec3 cell = floor(p);
   vec3 f = p - cell;
   float h = 0.0;
+  grad = vec3(0.0);
   for (int i = -1; i <= 1; i++) {
     for (int j = -1; j <= 1; j++) {
       for (int k = -1; k <= 1; k++) {
@@ -467,27 +489,73 @@ float craters(vec3 p) {
         if (r.z >= uCraters) continue;
         vec3 c = o + 0.25 + 0.5 * hash33(cell + o + 19.7);
         float radius = 0.12 + 0.3 * r.x * r.x;
-        float d = length(f - c) / radius;
+        vec3 fc = f - c;
+        float dist = length(fc);
+        float d = dist / radius;
         float bowl = d < 1.0 ? d * d - 1.0 : 0.0;
-        float rim = exp(-18.0 * (d - 1.0) * (d - 1.0)) * 0.4;
+        float e = exp(-18.0 * (d - 1.0) * (d - 1.0));
+        float rim = e * 0.4;
         h += (bowl + rim) * radius;
+        // d/dd of (bowl + rim), times radius × dd/dp = fc / dist.
+        float slope = (d < 1.0 ? 2.0 * d : 0.0) - 14.4 * (d - 1.0) * e;
+        grad += slope * fc / max(dist, 1e-6);
       }
     }
   }
   return h;
 }
 
+// fbm() and its gradient. The gradient (used only for the bump shading) fades each octave out as
+// its features shrink below a few pixels, so the relief does not sparkle when the planet is small:
+// footprint is the pixel's size in the units of p. The height itself is fbm(p, octaves).
+float fbmGrad(vec3 p, int octaves, float footprint, out vec3 grad) {
+  float sum = 0.0;
+  float amp = 0.5;
+  float norm = 0.0;
+  float freq = 1.0;
+  grad = vec3(0.0);
+  for (int i = 0; i < MAX_OCTAVES; i++) {
+    if (i >= octaves) break;
+    vec3 g;
+    sum += amp * snoiseGrad(p, g);
+    norm += amp;
+    grad += (1.0 - smoothstep(0.2, 0.4, freq * footprint)) * amp * freq * g;
+    p = p * 2.03 + vec3(17.1, 3.7, 9.4);
+    amp *= 0.5;
+    freq *= 2.03;
+  }
+  grad /= norm;
+  return sum / norm;
+}
+
 // Terrain height at unit-sphere point p: domain-warped broad fBm, finer unwarped detail, and
-// craters. Mostly within ±0.6.
-float terrain(vec3 p) {
+// craters. Mostly within ±0.6. Also returns the height's gradient in object space (not yet projected
+// onto the surface), computed analytically alongside the height, so the bump shading needs no extra
+// terrain() calls. footprint is the pixel's size on the unit sphere; it filters the gradient only.
+float terrain(vec3 p, float footprint, out vec3 grad) {
   vec3 q = p * uNoiseScale + uNoiseOffset;
+  vec3 gw0;
+  vec3 gw1;
+  vec3 gw2;
   vec3 w = vec3(
-    snoise(q * 0.6 + vec3(3.1, 7.4, 1.9)),
-    snoise(q * 0.6 + vec3(8.3, 2.8, 5.1)),
-    snoise(q * 0.6 + vec3(4.6, 9.7, 6.2)));
+    snoiseGrad(q * 0.6 + vec3(3.1, 7.4, 1.9), gw0),
+    snoiseGrad(q * 0.6 + vec3(8.3, 2.8, 5.1), gw1),
+    snoiseGrad(q * 0.6 + vec3(4.6, 9.7, 6.2), gw2));
   // Warp only the broad shapes: warping the fine octaves too would stretch them into fibres.
-  float h = fbm(q + uWarp * w, 3) + 0.4 * fbm(q * 3.7 + 13.0, uOctaves - 2);
-  if (uCraters > 0.0) h += 0.55 * craters(p * CRATER_SCALE + uNoiseOffset.yzx);
+  vec3 gBroad;
+  vec3 gFine;
+  float h = fbmGrad(q + uWarp * w, 3, footprint * uNoiseScale, gBroad)
+    + 0.4 * fbmGrad(q * 3.7 + 13.0, uOctaves - 2, footprint * uNoiseScale * 3.7, gFine);
+  // Chain rule through the warp, d(q + uWarp w)/dq = I + uWarp × 0.6 × (rows gw0, gw1, gw2), and
+  // through the scales of q.
+  vec3 gq = gBroad + uWarp * 0.6 * (gBroad.x * gw0 + gBroad.y * gw1 + gBroad.z * gw2) + 0.4 * 3.7 * gFine;
+  grad = uNoiseScale * gq;
+  if (uCraters > 0.0) {
+    vec3 gc;
+    h += 0.55 * craters(p * CRATER_SCALE + uNoiseOffset.yzx, gc);
+    // Crater rims are narrow: drop their relief once a pixel spans a good part of a small crater.
+    grad += (1.0 - smoothstep(0.1, 0.3, footprint * CRATER_SCALE)) * 0.55 * CRATER_SCALE * gc;
+  }
   return h;
 }
 #endif
@@ -537,7 +605,9 @@ void main() {
   // Darker, hazier poles.
   albedo *= mix(1.0, 0.72, smoothstep(0.78, 1.0, abs(p.y)));
 #else
-  float h = terrain(p);
+  // The pixel's footprint on the unit sphere filters the bump shading's gradient.
+  vec3 heightGradient;
+  float h = terrain(p, max(length(dFdx(p)), length(dFdy(p))), heightGradient);
   float fw = max(fwidth(h), 1e-4);
   float sea = 1.0 - smoothstep(uSeaLevel - fw, uSeaLevel + fw, h);
   float land = clamp((h - uSeaLevel) / (0.5 - uSeaLevel), 0.0, 1.0);
@@ -556,16 +626,11 @@ void main() {
   float ice = step(0.0001, uIceCap) * smoothstep(1.0 - uIceCap, 1.0 - uIceCap + 0.04, lat);
   albedo = mix(albedo, vec3(0.85, 0.89, 0.94), ice);
 
-  // Bump shading from the terrain gradient, by finite differences along two tangents. The step
-  // follows the pixel footprint, which also filters the relief when the planet is small.
-  vec3 t1 = normalize(cross(p, abs(p.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
-  vec3 t2 = cross(p, t1);
-  float eps = clamp(length(fwidth(p)), 0.0015, 0.03);
-  float g1 = (terrain(normalize(p + eps * t1)) - h) / eps;
-  float g2 = (terrain(normalize(p + eps * t2)) - h) / eps;
+  // Bump shading from the terrain gradient along the surface (the analytic gradient from terrain(),
+  // with its radial part removed).
+  vec3 gradient = heightGradient - p * dot(heightGradient, p);
   // Seas and ice are flat.
   float bumpiness = 0.045 * uRelief * (1.0 - sea) * (1.0 - ice);
-  vec3 gradient = g1 * t1 + g2 * t2;
   vec3 gradientW = gradient.x * vRotX + gradient.y * vRotY + gradient.z * vRotZ;
   n = normalize(ng - bumpiness * gradientW);
   specular = uSpecular * sea * (1.0 - ice);
@@ -695,9 +760,12 @@ export interface PlanetUniforms {
   uThickness: { value: number };
 }
 
-/** Render order: after the starfield (0), so the planet covers the stars behind it. */
-const SURFACE_RENDER_ORDER = 1;
-const ATMOSPHERE_RENDER_ORDER = 2;
+/**
+ * Render order. The surface draws before the starfield and writes depth, so the depth-tested stars
+ * are hidden only where they are behind it. The additive atmosphere draws after the starfield.
+ */
+export const SURFACE_RENDER_ORDER = STARFIELD_RENDER_ORDER - 1;
+export const ATMOSPHERE_RENDER_ORDER = STARFIELD_RENDER_ORDER + 1;
 
 export class Planet {
   readonly params: Readonly<PlanetParams>;
@@ -770,9 +838,11 @@ export class Planet {
       vertexShader: surfaceVertexShader,
       fragmentShader: surfaceFragmentShader,
       side: FrontSide,
-      // Transparent so the fade can show the stars through it; drawn after the starfield.
+      // Transparent so the fade blends it over the background. Drawn before the starfield and writes
+      // depth, so the stars behind it fail their depth test (see SURFACE_RENDER_ORDER).
       transparent: true,
       blending: NormalBlending,
+      depthTest: true,
       depthWrite: true,
     });
     this.surface = new Mesh(geometry, surfaceMaterial);
@@ -795,6 +865,7 @@ export class Planet {
         side: FrontSide,
         transparent: true,
         blending: AdditiveBlending,
+        depthTest: true,
         depthWrite: false,
       });
       this.atmosphere = new Mesh(geometry, atmosphereMaterial);

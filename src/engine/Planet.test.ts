@@ -1,4 +1,4 @@
-import { Texture } from 'three';
+import { Mesh, type ShaderMaterial, Texture } from 'three';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CAMERA_FAR,
@@ -19,6 +19,7 @@ import { DEFAULT_AUTOPILOT_PARAMS, createAutopilotState, updateAutopilot } from 
 import { Planet, disposePlanetGeometry, planetGeometry, planetParams, type PlanetParams, type Rgb } from './Planet';
 import { hash } from './seed';
 import { createShipState } from './Ship';
+import { STARFIELD_RENDER_ORDER, Starfield } from './Starfield';
 
 const SEEDS = Array.from({ length: 1000 }, (_, i) => hash(ENCOUNTER_BASE_SEED, i));
 
@@ -246,6 +247,36 @@ describe('Planet', () => {
     expect(planet.object.visible).toBe(true);
     planet.setFade(-1);
     expect(planet.uniforms.uOpacity.value).toBe(0);
+    planet.dispose();
+  });
+
+  it('draws its surface before the depth-tested starfield with depth writes, and its atmosphere after', () => {
+    const planet = new Planet(firstOfType('gas'));
+    const meshes: Mesh[] = [];
+    planet.object.traverse((o) => {
+      if (o instanceof Mesh) meshes.push(o);
+    });
+    const surface = meshes.find((m) => m.parent !== planet.object)!;
+    const atmosphere = meshes.find((m) => m.parent === planet.object)!;
+    expect(surface).toBeDefined();
+    expect(atmosphere).toBeDefined();
+    const starfield = new Starfield();
+    const stars = starfield.mesh;
+    // All three are in Three.js's transparent list, which draws in ascending renderOrder.
+    for (const m of [surface, atmosphere, stars]) expect((m.material as ShaderMaterial).transparent).toBe(true);
+    expect(stars.renderOrder).toBe(STARFIELD_RENDER_ORDER);
+    expect(surface.renderOrder).toBeLessThan(stars.renderOrder);
+    expect(atmosphere.renderOrder).toBeGreaterThan(stars.renderOrder);
+    // The surface's depth hides only the stars behind it; nothing else writes depth.
+    const surfaceMaterial = surface.material as ShaderMaterial;
+    expect(surfaceMaterial.depthTest).toBe(true);
+    expect(surfaceMaterial.depthWrite).toBe(true);
+    expect(stars.material.depthTest).toBe(true);
+    expect(stars.material.depthWrite).toBe(false);
+    const atmosphereMaterial = atmosphere.material as ShaderMaterial;
+    expect(atmosphereMaterial.depthTest).toBe(true);
+    expect(atmosphereMaterial.depthWrite).toBe(false);
+    starfield.dispose();
     planet.dispose();
   });
 
