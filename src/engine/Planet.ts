@@ -872,6 +872,49 @@ export interface PlanetUniforms {
 export const SURFACE_RENDER_ORDER = STARFIELD_RENDER_ORDER - 1;
 export const ATMOSPHERE_RENDER_ORDER = STARFIELD_RENDER_ORDER + 1;
 
+type Uniforms = ShaderMaterial['uniforms'];
+
+/** The surface material of a planet of `type`. Its shader program depends only on the type. */
+function createSurfaceMaterial(type: PlanetType, uniforms: Uniforms): ShaderMaterial {
+  return new ShaderMaterial({
+    uniforms,
+    defines: type === 'gas' ? { PLANET_GAS: 1 } : {},
+    vertexShader: surfaceVertexShader,
+    fragmentShader: surfaceFragmentShader,
+    side: FrontSide,
+    // Transparent so the fade blends it over the background. Drawn before the starfield and writes
+    // depth, so the stars behind it fail their depth test (see SURFACE_RENDER_ORDER).
+    transparent: true,
+    blending: NormalBlending,
+    depthTest: true,
+    depthWrite: true,
+  });
+}
+
+/** The atmosphere shell's material. One shader program for every planet. */
+function createAtmosphereMaterial(uniforms: Uniforms): ShaderMaterial {
+  return new ShaderMaterial({
+    uniforms,
+    vertexShader: atmosphereVertexShader,
+    fragmentShader: atmosphereFragmentShader,
+    side: FrontSide,
+    transparent: true,
+    blending: AdditiveBlending,
+    depthTest: true,
+    depthWrite: false,
+  });
+}
+
+/**
+ * One material per planet shader program (the rocky surface, the gas surface and the atmosphere),
+ * built exactly as planets build theirs but with no uniforms, so each compiles to the program the
+ * planets use. For keeping those programs compiled between encounters (see ProgramWarmup.ts); they
+ * are never drawn. The caller owns and disposes them.
+ */
+export function planetProgramMaterials(): ShaderMaterial[] {
+  return [createSurfaceMaterial('rocky', {}), createSurfaceMaterial('gas', {}), createAtmosphereMaterial({})];
+}
+
 export class Planet {
   readonly params: Readonly<PlanetParams>;
   /**
@@ -924,31 +967,19 @@ export class Planet {
             uCraters: { value: params.craters },
           };
 
-    const surfaceMaterial = new ShaderMaterial({
-      uniforms: {
-        uColor0: u.uColor0,
-        uColor1: u.uColor1,
-        uColor2: u.uColor2,
-        uColor3: u.uColor3,
-        uNoiseScale: u.uNoiseScale,
-        uNoiseOffset: u.uNoiseOffset,
-        uOctaves: u.uOctaves,
-        uLightDir: u.uLightDir,
-        uOpacity: u.uOpacity,
-        uAtmosphereColor: u.uAtmosphereColor,
-        uAtmosphereIntensity: u.uAtmosphereIntensity,
-        ...typeUniforms,
-      },
-      defines: params.type === 'gas' ? { PLANET_GAS: 1 } : {},
-      vertexShader: surfaceVertexShader,
-      fragmentShader: surfaceFragmentShader,
-      side: FrontSide,
-      // Transparent so the fade blends it over the background. Drawn before the starfield and writes
-      // depth, so the stars behind it fail their depth test (see SURFACE_RENDER_ORDER).
-      transparent: true,
-      blending: NormalBlending,
-      depthTest: true,
-      depthWrite: true,
+    const surfaceMaterial = createSurfaceMaterial(params.type, {
+      uColor0: u.uColor0,
+      uColor1: u.uColor1,
+      uColor2: u.uColor2,
+      uColor3: u.uColor3,
+      uNoiseScale: u.uNoiseScale,
+      uNoiseOffset: u.uNoiseOffset,
+      uOctaves: u.uOctaves,
+      uLightDir: u.uLightDir,
+      uOpacity: u.uOpacity,
+      uAtmosphereColor: u.uAtmosphereColor,
+      uAtmosphereIntensity: u.uAtmosphereIntensity,
+      ...typeUniforms,
     });
     this.surface = new Mesh(geometry, surfaceMaterial);
     this.surface.renderOrder = SURFACE_RENDER_ORDER;
@@ -957,21 +988,12 @@ export class Planet {
     this.object.add(this.tilt);
 
     if (params.atmosphereIntensity > 0) {
-      const atmosphereMaterial = new ShaderMaterial({
-        uniforms: {
-          uAtmosphereColor: u.uAtmosphereColor,
-          uAtmosphereIntensity: u.uAtmosphereIntensity,
-          uThickness: u.uThickness,
-          uLightDir: u.uLightDir,
-          uOpacity: u.uOpacity,
-        },
-        vertexShader: atmosphereVertexShader,
-        fragmentShader: atmosphereFragmentShader,
-        side: FrontSide,
-        transparent: true,
-        blending: AdditiveBlending,
-        depthTest: true,
-        depthWrite: false,
+      const atmosphereMaterial = createAtmosphereMaterial({
+        uAtmosphereColor: u.uAtmosphereColor,
+        uAtmosphereIntensity: u.uAtmosphereIntensity,
+        uThickness: u.uThickness,
+        uLightDir: u.uLightDir,
+        uOpacity: u.uOpacity,
       });
       this.atmosphere = new Mesh(geometry, atmosphereMaterial);
       this.atmosphere.scale.setScalar(1 + params.atmosphereThickness);

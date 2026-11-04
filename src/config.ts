@@ -17,6 +17,13 @@ export const CLEAR_COLOR = 0x000000;
 /** Largest simulation step per frame, in seconds (docs/PLAN.md section 6, Time and speed). */
 export const DT_CAP_SECONDS = 0.1;
 
+/**
+ * Performance instrumentation (docs/PLAN.md section 6, Performance): the engine keeps the last this
+ * many frame intervals and frame work times, and reports their rolling mean and 95th percentile
+ * (engine/FrameStats.ts). About 2 s at 60 FPS.
+ */
+export const PERF_FRAME_WINDOW = 120;
+
 /** Delay before the UI and cursor hide with no input, in milliseconds (docs/PLAN.md section 7). Placeholder. */
 export const UI_HIDE_DELAY_MS = 2500;
 

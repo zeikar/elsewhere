@@ -8,8 +8,15 @@
  * Each frame runs one simulation step (`stepTravel`: the ship, then the Autopilot, which sets the
  * ship's target speed and drift rate), then the encounter view creates or disposes the encounter
  * object, a planet or a nebula (compiling its shaders with `renderer.compileAsync` before it is first
- * drawn), and the render places it relative to the ship. The starfield keeps running underneath.
+ * drawn), and the render places it relative to the ship. The encounter shader programs themselves
+ * are compiled once at construction and kept for the whole run (`ProgramWarmup`), so encounters
+ * reuse them instead of compiling their own. The starfield keeps running underneath.
  * Pausing stops the simulation, so the encounter freezes with it.
+ *
+ * Instrumentation (docs/PLAN.md section 6, Performance): every frame records its interval since the
+ * previous frame (from the frame clock, so a pause or a hidden period is never counted) and its work
+ * time (simulation, encounter sync and render submission, on the main thread) into two fixed-size
+ * `FrameStats` windows, read through `getFrameIntervals()` and `getFrameWork()`.
  */
 import { PerspectiveCamera, SRGBColorSpace, Scene, Vector3, WebGLRenderer, type WebGLInfo } from 'three';
 import {
@@ -34,9 +41,11 @@ import {
 } from './Autopilot';
 import { EncounterView } from './EncounterView';
 import { FrameClock } from './FrameClock';
-import { nebulaParams, type Nebula } from './Nebula';
+import { FrameStats } from './FrameStats';
+import { nebulaParams, nebulaProgramMaterials, type Nebula } from './Nebula';
 import { computeRenderSize } from './renderSize';
-import { planetParams, type Planet } from './Planet';
+import { planetParams, planetProgramMaterials, type Planet } from './Planet';
+import { ProgramWarmup } from './ProgramWarmup';
 import { DEFAULT_SHIP_PARAMS, type ShipState } from './Ship';
 import { DEFAULT_STARFIELD_OPTIONS, Starfield } from './Starfield';
 
@@ -60,10 +69,16 @@ export class Engine {
   private readonly scene = new Scene();
   private readonly camera: PerspectiveCamera;
   private readonly clock = new FrameClock();
+  /** Recent frame intervals, in milliseconds. */
+  private readonly frameIntervals = new FrameStats();
+  /** Recent frame work times (simulation step, encounter sync and render call), in milliseconds. */
+  private readonly frameWork = new FrameStats();
   /** Ship, autopilot and their params, advanced by `stepTravel`. */
   private readonly travel: Travel;
   private readonly starfield: Starfield;
   private readonly encounterView: EncounterView;
+  /** Keeps every encounter shader program compiled for the whole run (see ProgramWarmup.ts). */
+  private readonly programWarmup: ProgramWarmup;
   private readonly pausedListeners = new Set<PausedChangeListener>();
   /** Scratch look-at target, reused every frame. */
   private readonly lookTarget = new Vector3();
@@ -107,6 +122,9 @@ export class Engine {
     this.encounterView = new EncounterView(this.scene, (object) =>
       this.renderer.compileAsync(object, this.camera, this.scene),
     );
+    // Compile the planet and nebula programs once, now, and keep them, so no encounter compiles any.
+    this.programWarmup = new ProgramWarmup([...planetProgramMaterials(), ...nebulaProgramMaterials()]);
+    void this.programWarmup.compile(this.renderer, this.camera, this.scene);
     this.applyHeading();
   }
 
@@ -140,6 +158,7 @@ export class Engine {
     document.removeEventListener('visibilitychange', this.onVisibilityChange);
     this.pausedListeners.clear();
     this.encounterView.dispose();
+    this.programWarmup.dispose();
     this.scene.remove(this.starfield.mesh);
     this.starfield.dispose();
     this.renderer.dispose();
@@ -203,6 +222,37 @@ export class Engine {
     return this.frameCount;
   }
 
+  /**
+   * Recent frame intervals in milliseconds: the time between consecutive frames, a rolling window
+   * (read-only view; do not record into it). The first frame after a start, resume or the tab
+   * becoming visible again has no interval, so pauses and hidden periods never show up as frames.
+   */
+  getFrameIntervals(): Readonly<FrameStats> {
+    return this.frameIntervals;
+  }
+
+  /**
+   * Recent frame work times in milliseconds: the main-thread time each frame spends on the
+   * simulation step, the encounter sync and the render call, a rolling window (read-only view; do
+   * not record into it). A synchronous shader compile, for example, shows up here.
+   */
+  getFrameWork(): Readonly<FrameStats> {
+    return this.frameWork;
+  }
+
+  /**
+   * The latest frame's interval since the frame before it, in milliseconds, or NaN when it had none
+   * (the first frame after a start, resume or the tab becoming visible again).
+   */
+  getLastFrameInterval(): number {
+    return this.clock.lastIntervalMs;
+  }
+
+  /** Whether the current encounter object, planet or nebula, is drawn; false with none. */
+  isEncounterVisible(): boolean {
+    return this.encounterView.getObject()?.object.visible ?? false;
+  }
+
   /** Live ship state (read-only view; do not modify). */
   getShip(): Readonly<ShipState> {
     return this.travel.ship;
@@ -264,10 +314,13 @@ export class Engine {
     if (this.paused || !this.running) return;
     this.requestFrame();
     const dt = this.clock.tick(now);
+    this.frameIntervals.record(this.clock.lastIntervalMs);
+    const workStart = performance.now();
     stepTravel(this.travel, dt);
     this.encounterView.sync(this.travel.autopilot);
     this.frameCount++;
     this.render();
+    this.frameWork.record(performance.now() - workStart);
   };
 
   private readonly resize = (): void => {

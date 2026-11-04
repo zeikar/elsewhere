@@ -505,6 +505,35 @@ export interface NebulaLayer {
   readonly fade: { value: number };
 }
 
+/** A layer's material. Every layer of every nebula shares its one shader program. */
+function createLayerMaterial(uniforms: ShaderMaterial['uniforms']): ShaderMaterial {
+  return new ShaderMaterial({
+    uniforms,
+    vertexShader: layerVertexShader,
+    fragmentShader: layerFragmentShader,
+    side: DoubleSide,
+    transparent: true,
+    depthTest: true,
+    depthWrite: false,
+    blending: CustomBlending,
+    blendEquation: AddEquation,
+    blendSrc: OneFactor,
+    blendDst: OneMinusSrcAlphaFactor,
+    blendEquationAlpha: AddEquation,
+    blendSrcAlpha: OneFactor,
+    blendDstAlpha: OneMinusSrcAlphaFactor,
+  });
+}
+
+/**
+ * One material for the nebula layers' shader program, built exactly as the layers build theirs but
+ * with no uniforms. For keeping that program compiled between encounters (see ProgramWarmup.ts); it
+ * is never drawn. The caller owns and disposes it.
+ */
+export function nebulaProgramMaterials(): ShaderMaterial[] {
+  return [createLayerMaterial({})];
+}
+
 export class Nebula {
   readonly params: Readonly<NebulaParams>;
   /** Root object to add to the scene. Its position is the nebula centre relative to the ship. */
@@ -546,29 +575,14 @@ export class Nebula {
     const placements = nebulaLayerLayout(params, frame);
     this.layers = params.layers.map((layer, i) => {
       const fade = { value: 1 };
-      const material = new ShaderMaterial({
-        uniforms: {
-          ...shared,
-          uLayerFade: fade,
-          uIntensity: { value: layer.intensity },
-          uColorShift: { value: layer.colorShift },
-          uCore: { value: layer.core },
-          uLongAxis: { value: new Vector2(Math.cos(layer.orientation), Math.sin(layer.orientation)) },
-          uNoiseOffset: { value: new Vector3(...layer.noiseOffset) },
-        },
-        vertexShader: layerVertexShader,
-        fragmentShader: layerFragmentShader,
-        side: DoubleSide,
-        transparent: true,
-        depthTest: true,
-        depthWrite: false,
-        blending: CustomBlending,
-        blendEquation: AddEquation,
-        blendSrc: OneFactor,
-        blendDst: OneMinusSrcAlphaFactor,
-        blendEquationAlpha: AddEquation,
-        blendSrcAlpha: OneFactor,
-        blendDstAlpha: OneMinusSrcAlphaFactor,
+      const material = createLayerMaterial({
+        ...shared,
+        uLayerFade: fade,
+        uIntensity: { value: layer.intensity },
+        uColorShift: { value: layer.colorShift },
+        uCore: { value: layer.core },
+        uLongAxis: { value: new Vector2(Math.cos(layer.orientation), Math.sin(layer.orientation)) },
+        uNoiseOffset: { value: new Vector3(...layer.noiseOffset) },
       });
       const mesh = new Mesh(geometry, material);
       mesh.renderOrder = NEBULA_RENDER_ORDER;
@@ -606,7 +620,10 @@ export class Nebula {
     this.time.value = time * this.params.churn;
     const position = this.object.position;
     const scale = this.object.scale.x;
-    for (const layer of this.layers) {
+    const layers = this.layers;
+    // Indexed loops on the per-frame path: no iterator objects.
+    for (let i = 0; i < layers.length; i++) {
+      const layer = layers[i]!;
       layer.fade.value = nebulaLayerFade(nebulaLayerPlaneDistance(position, scale, layer.placement));
     }
     this.updateLayerVisibility();
@@ -614,7 +631,11 @@ export class Nebula {
 
   private updateLayerVisibility(): void {
     const opacity = this.opacity.value;
-    for (const layer of this.layers) layer.mesh.visible = opacity * layer.fade.value >= NEBULA_MIN_ALPHA;
+    const layers = this.layers;
+    for (let i = 0; i < layers.length; i++) {
+      const layer = layers[i]!;
+      layer.mesh.visible = opacity * layer.fade.value >= NEBULA_MIN_ALPHA;
+    }
   }
 
   /** Frees the layer materials and drops this nebula's reference to the shared plane. Idempotent. */
