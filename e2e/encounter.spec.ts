@@ -8,7 +8,7 @@ import {
   SHIP_DEFAULT_SPEED_LEVEL,
   SHIP_SPEED_LEVELS,
 } from '../src/config';
-import { DEFAULT_AUTOPILOT_PARAMS, setCruiseSpeed, type AutopilotParams } from '../src/engine/Autopilot';
+import { DEFAULT_AUTOPILOT_PARAMS, setCruiseSpeed, type AutopilotParams, type EncounterKind } from '../src/engine/Autopilot';
 import { encounterTargetSpeed } from '../src/engine/encounter';
 import { SOAK_HEAP_GROWTH_LIMIT_BYTES } from './limits';
 
@@ -31,9 +31,16 @@ function collectErrors(page: Page): string[] {
   return errors;
 }
 
-/** Opens the app, with the e2e-only encounter interval override when `interval` is given. */
-async function openApp(page: Page, interval?: number): Promise<void> {
-  await page.goto(interval === undefined ? APP_PATH : `${APP_PATH}?encounterInterval=${interval}`);
+/**
+ * Opens the app, with the e2e-only overrides when given: the encounter interval, and `kind` to make
+ * every encounter that kind (the seeded mix otherwise).
+ */
+async function openApp(page: Page, interval?: number, kind?: EncounterKind): Promise<void> {
+  const query = new URLSearchParams();
+  if (interval !== undefined) query.set('encounterInterval', String(interval));
+  if (kind !== undefined) query.set('encounterKind', kind);
+  const search = query.toString();
+  await page.goto(search === '' ? APP_PATH : `${APP_PATH}?${search}`);
   await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 0);
 }
 
@@ -264,7 +271,8 @@ test('three encounters run CRUISE → APPROACH → FLYBY → DEPARTURE → CRUIS
   const log = await travelLog(page);
   test.info().annotations.push({ type: 'travel log', description: JSON.stringify({ ...log, frameMs: undefined }) });
 
-  // The full cycle, three times, each with its own encounter index.
+  // The default seeded mix of kinds (a planet, a nebula, then a planet with the default base seed;
+  // the nebula and variety specs check nebulae). The full cycle, three times, each with its own index.
   expect(log.states.slice(0, 13).map((s) => [s.state, s.index])).toEqual([
     ['CRUISE', null],
     ...[0, 1, 2].flatMap((i) => [
@@ -313,7 +321,8 @@ test('mid-APPROACH the planet is lit on the engine canvas, and pause → resume 
 }) => {
   test.setTimeout(480_000);
   const errors = collectErrors(page);
-  await openApp(page, 2);
+  // Planets only: this checks the planet's pixels, whatever kind the seeded schedule picks first.
+  await openApp(page, 2, 'planet');
   await watchTravel(page, { pauseOnScreen: true });
 
   // The watcher pauses the engine once the planet is half faded in and well inside the view.
@@ -395,7 +404,8 @@ test('mid-APPROACH the planet is lit on the engine canvas, and pause → resume 
 test('with the default config, a planet becomes visible within 60 s of load', async ({ page }) => {
   test.setTimeout(400_000);
   const errors = collectErrors(page);
-  await openApp(page);
+  // The default interval (with its seeded jitter), with every encounter a planet.
+  await openApp(page, undefined, 'planet');
   await watchTravel(page);
   const start = await snapshot(page);
   expect(start.autopilot.interval).toBe(ENCOUNTER_INTERVAL_SECONDS);

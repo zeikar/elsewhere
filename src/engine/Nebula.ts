@@ -3,9 +3,10 @@
  * shaded with a cheap domain-warped fBm cloud, soft-blended over one another. No volumetric
  * raymarching.
  *
- * - `nebulaParams(seed)` is pure: it derives the palette, core radius, layer count and layout, and
- *   the noise parameters from an encounter's appearance seed (`hash(baseSeed, encounterIndex)`). Its
- *   result is a `NebulaSpec`, so it can be passed straight to `AutopilotParams.nebulaFor`.
+ * - `nebulaParams(seed)` is pure: it derives the palette, core radius, layer count and layout, the
+ *   cloud shape (elongation along a seeded axis, raggedness) and the noise parameters from an
+ *   encounter's appearance seed (`hash(baseSeed, encounterIndex)`). Its result is a `NebulaSpec`,
+ *   so it can be passed straight to `AutopilotParams.nebulaFor`.
  * - Layout: the nebula has its own frame, built from the encounter plan: local +Z along the planned
  *   path, +X toward the side the nebula sits on. Each layer is a square in a local XY plane (so it
  *   faces the ship as it approaches), tilted a little and spread in depth along the path, so the
@@ -45,6 +46,7 @@ import {
   PlaneGeometry,
   SRGBColorSpace,
   ShaderMaterial,
+  Vector2,
   Vector3,
 } from 'three';
 import {
@@ -77,6 +79,11 @@ export interface NebulaLayerParams {
   tilt: readonly [number, number];
   /** Rotation of the cloud pattern within the plane, in radians. */
   roll: number;
+  /**
+   * Direction of the nebula's long axis in this layer's own (rolled) plane coordinates, in radians:
+   * the nebula's `orientation` minus the layer's `roll`, so every layer is elongated the same way.
+   */
+  orientation: number;
   /** Offset into the noise domain, so each layer has its own clouds. */
   noiseOffset: readonly [number, number, number];
   /** Emission strength: the nebula's `intensity` times a factor in NEBULA_RANGES.layerIntensityJitter. */
@@ -115,6 +122,12 @@ export interface NebulaParams extends NebulaSpec {
   core: number;
   /** Speed at which the clouds churn, in noise units per second. */
   churn: number;
+  /** How elongated the cloud outline is: the long axis is this times the short one (1 is round). */
+  elongation: number;
+  /** Direction of the long axis in the layer planes, in radians from the nebula frame's side axis. */
+  orientation: number;
+  /** How far the low-frequency warp pushes the cloud's outline around. */
+  raggedness: number;
   /** The layers, nearest (smallest `offset[2]`) first. */
   layers: readonly NebulaLayerParams[];
 }
@@ -142,7 +155,16 @@ const FAMILIES: readonly NebulaFamily[] = [
   { name: 'violet', palette: [0x1c0a3c, 0x7a3ac8, 0xd04a8a, 0xf2c8ff] },
   // Warm dust lit from within: amber with wine-red patches and a gold core.
   { name: 'ember', palette: [0x2c0c06, 0xc85a26, 0x8a2a50, 0xffe0a0] },
+  // Planetary-nebula-like: a cyan-teal shell with orange-red patches around a white core.
+  { name: 'planetary', palette: [0x061c2c, 0x2aa0b8, 0xd8603a, 0xe8fff4] },
+  // Rosette-like: rose-pink hydrogen with gold patches.
+  { name: 'rosette', palette: [0x2a0614, 0xd04468, 0xd8962e, 0xffe2dc] },
+  // Green-teal oxygen gas with blue patches.
+  { name: 'aurora', palette: [0x041e16, 0x2aae6e, 0x3a62d0, 0xdcffea] },
 ];
+
+/** Names of the nebula palette families, in draw order. */
+export const NEBULA_FAMILY_NAMES: readonly string[] = FAMILIES.map((f) => f.name);
 
 /** Salt mixed into the seed so the parameter stream differs from other values drawn from the seed. */
 const PARAMS_SALT = 0x4eb1a5;
@@ -196,6 +218,9 @@ export function nebulaParams(seed: number): NebulaParams {
   const absorption = lerp(r.absorption, random());
   const core = lerp(r.core, random());
   const churn = lerp(r.churn, random());
+  const elongation = lerp(r.elongation, random());
+  const orientation = lerp(r.orientation, random());
+  const raggedness = lerp(r.raggedness, random());
 
   const layers: NebulaLayerParams[] = [];
   const spacing = (2 * depthSpread) / layerCount;
@@ -208,11 +233,13 @@ export function nebulaParams(seed: number): NebulaParams {
     const depthT = Math.abs(z) / depthSpread;
     const size = layerSize * (0.9 + 0.1 * depthT + 0.1 * random());
     const halfSize = radius * Math.min(r.layerSize[1], Math.max(r.layerSize[0], size));
+    const roll = 2 * Math.PI * random();
     layers.push({
       offset: [Math.cos(angle) * lateral, Math.sin(angle) * lateral, z],
       halfSize,
       tilt: [(random() * 2 - 1) * tiltMax, (random() * 2 - 1) * tiltMax],
-      roll: 2 * Math.PI * random(),
+      roll,
+      orientation: orientation - roll,
       noiseOffset: [
         lerp(NEBULA_NOISE_OFFSET_RANGE, random()),
         lerp(NEBULA_NOISE_OFFSET_RANGE, random()),
@@ -237,6 +264,9 @@ export function nebulaParams(seed: number): NebulaParams {
     absorption,
     core,
     churn,
+    elongation,
+    orientation,
+    raggedness,
     layers,
   };
 }
@@ -350,6 +380,9 @@ uniform int uOctaves;
 uniform float uWarp;
 uniform float uCoverage;
 uniform float uAbsorption;
+uniform float uElongation;
+uniform float uRaggedness;
+uniform vec2 uLongAxis;
 uniform float uTime;
 uniform float uOpacity;
 uniform float uLayerFade;
@@ -380,8 +413,11 @@ void main() {
   vec3 q = vec3(vUv * uNoiseScale, uTime) + uNoiseOffset;
   // Low-frequency warp, also used to make the outline ragged and to place the dust and the accent hue.
   vec2 w = vec2(snoise(q * 0.55 + vec3(3.1, 7.4, 1.9)), snoise(q * 0.55 + vec3(8.3, 2.8, 5.1)));
-  // Envelope: a ragged blob inside the edge.
-  float r = length(vUv + 0.3 * w);
+  // Envelope: a ragged blob inside the edge, stretched along the nebula's long axis (uLongAxis, a
+  // unit vector in this layer's plane coordinates) at the same area.
+  vec2 e = vec2(dot(vUv, uLongAxis), dot(vUv, vec2(-uLongAxis.y, uLongAxis.x)));
+  float s = sqrt(uElongation);
+  float r = length(vec2(e.x / s, e.y * s) + uRaggedness * w);
   float envelope = (1.0 - smoothstep(0.0, 0.95, r)) * edge;
   if (envelope <= 0.0) discard;
 
@@ -502,6 +538,8 @@ export class Nebula {
       uWarp: { value: params.warp },
       uCoverage: { value: params.coverage },
       uAbsorption: { value: params.absorption },
+      uElongation: { value: params.elongation },
+      uRaggedness: { value: params.raggedness },
       uTime: this.time,
       uOpacity: this.opacity,
     };
@@ -515,6 +553,7 @@ export class Nebula {
           uIntensity: { value: layer.intensity },
           uColorShift: { value: layer.colorShift },
           uCore: { value: layer.core },
+          uLongAxis: { value: new Vector2(Math.cos(layer.orientation), Math.sin(layer.orientation)) },
           uNoiseOffset: { value: new Vector3(...layer.noiseOffset) },
         },
         vertexShader: layerVertexShader,

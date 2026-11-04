@@ -25,19 +25,29 @@
  * never jumps, and the ship flies the planned straight line past the planet.
  *
  * Kinds (docs/PLAN.md section 6, Nebulae): each encounter is a planet or a nebula, chosen from its
- * appearance seed `hash(baseSeed, index)` (`encounterKind`). Both are planned with `planEncounter`
- * and held the same way; a nebula uses its own `D`, side offset and speed and fade profile
- * (`AutopilotParams.nebula`), and its encounter radius is its core radius (see config.ts, Nebulae).
+ * appearance seed `hash(baseSeed, index)` (`nextEncounterKind`). Both are planned with
+ * `planEncounter` and held the same way; a nebula uses its own `D`, side offset and speed and fade
+ * profile (`AutopilotParams.nebula`), and its encounter radius is its core radius (see config.ts,
+ * Nebulae).
+ *
+ * Variety (docs/PLAN.md section 9, Phase 3), all drawn from the appearance seed by pure functions:
+ * the cruise before each encounter is the interval with a seeded jitter (`cruiseInterval`, whose
+ * mean is the configured interval), no more than `maxSameKindRun` encounters of one kind come in a
+ * row (`nextEncounterKind`), and the object sits to the left or right of the path at a seeded
+ * elevation (`encounterSide`). `encounterSchedule` lists what the autopilot will meet.
  */
 import {
   ENCOUNTER_BASE_SEED,
   ENCOUNTER_DISTANCE,
   ENCOUNTER_DRIFT_SETTLE_SECONDS,
   ENCOUNTER_FLYBY_DISTANCE,
+  ENCOUNTER_INTERVAL_JITTER,
   ENCOUNTER_INTERVAL_SECONDS,
+  ENCOUNTER_MAX_SAME_KIND_RUN,
   ENCOUNTER_MIN_SPEED_FLOOR,
   ENCOUNTER_NEBULA_SHARE,
   ENCOUNTER_PLANET_RADIUS,
+  ENCOUNTER_SIDE_ELEVATION_RANGE,
   ENCOUNTER_SIDE_OFFSET_FACTOR,
   NEBULA_DESPAWN_DISTANCE,
   NEBULA_ENCOUNTER_DISTANCE,
@@ -69,6 +79,9 @@ export type TravelState = 'CRUISE' | 'APPROACH' | 'FLYBY' | 'DEPARTURE';
 
 /** What an encounter meets. */
 export type EncounterKind = 'planet' | 'nebula';
+
+/** Which side of the planned path the encounter object sits on, seen along the path. */
+export type EncounterSide = 'left' | 'right';
 
 /**
  * The planet met in an encounter. Only the radius for now; seeded planet parameters (type,
@@ -103,6 +116,8 @@ interface ActiveEncounterBase {
   index: number;
   /** Appearance seed: `hash(baseSeed, index)`. */
   seed: number;
+  /** Side of the path the object sits on (`encounterSide`). */
+  side: EncounterSide;
   /** Planned path and object position (`plan.radius` is the planet's or the nebula's radius). */
   plan: Encounter;
 }
@@ -146,8 +161,10 @@ export const NEBULA_ENCOUNTER_PROFILE: Readonly<EncounterProfile> = {
 export interface AutopilotParams {
   /** Speed outside encounters, in world units per second; the encounter speed profile scales from it. */
   cruiseSpeed: number;
-  /** Seconds of cruise before each encounter starts (the encounter interval). */
+  /** Mean seconds of cruise before each encounter starts (the encounter interval). */
   interval: number;
+  /** Seeded jitter on each cruise, as a fraction of `interval`, in [0, 1] (see `cruiseInterval`). */
+  intervalJitter: number;
   /** Seconds at the end of the cruise over which the heading drift eases to a stop. */
   driftSettleTime: number;
   /** Remaining distance at which APPROACH becomes FLYBY. */
@@ -164,6 +181,10 @@ export interface AutopilotParams {
   planetFor: (seed: number) => PlanetSpec;
   /** Share of encounters that are nebulae, in [0, 1] (0: planets only, 1: nebulae only). */
   nebulaShare: number;
+  /** Most encounters of one kind in a row (an integer ≥ 1; `Infinity` for no limit). */
+  maxSameKindRun: number;
+  /** Range of the object's elevation above or below the path, in radians (see `encounterSide`). */
+  sideElevation: readonly [number, number];
   /** How nebula encounters are planned and flown. */
   nebula: Readonly<EncounterKindParams>;
   /** Chooses the nebula for an encounter seed. Called once when each nebula encounter starts. */
@@ -173,6 +194,7 @@ export interface AutopilotParams {
 export const DEFAULT_AUTOPILOT_PARAMS: Readonly<AutopilotParams> = {
   cruiseSpeed: SHIP_SPEED_LEVELS[SHIP_DEFAULT_SPEED_LEVEL],
   interval: ENCOUNTER_INTERVAL_SECONDS,
+  intervalJitter: ENCOUNTER_INTERVAL_JITTER,
   driftSettleTime: ENCOUNTER_DRIFT_SETTLE_SECONDS,
   flybyDistance: ENCOUNTER_FLYBY_DISTANCE,
   encounterDistance: ENCOUNTER_DISTANCE,
@@ -181,6 +203,8 @@ export const DEFAULT_AUTOPILOT_PARAMS: Readonly<AutopilotParams> = {
   baseSeed: ENCOUNTER_BASE_SEED,
   planetFor: defaultPlanet,
   nebulaShare: ENCOUNTER_NEBULA_SHARE,
+  maxSameKindRun: ENCOUNTER_MAX_SAME_KIND_RUN,
+  sideElevation: ENCOUNTER_SIDE_ELEVATION_RANGE,
   nebula: {
     encounterDistance: NEBULA_ENCOUNTER_DISTANCE,
     sideOffsetFactor: NEBULA_SIDE_OFFSET_FACTOR,
@@ -198,6 +222,10 @@ export interface AutopilotState {
   cruiseTime: number;
   /** Encounters started so far, which is also the index the next encounter gets. */
   encounterCount: number;
+  /** Kind of the latest encounter started, or `null` before the first. */
+  lastKind: EncounterKind | null;
+  /** How many encounters of `lastKind` in a row ended with the latest one (0 before the first). */
+  kindRun: number;
   /** The encounter in progress, or `null` in CRUISE. */
   encounter: ActiveEncounter | null;
   /** Remaining distance to the closest approach (see encounter.ts); `Infinity` with no encounter. */
@@ -210,18 +238,143 @@ export interface AutopilotState {
   driftRate: number;
 }
 
-/** Salt for the side-angle hash, so it is independent of other values drawn from the same seed. */
-const SIDE_ANGLE_SALT = 0x51de;
-
-/** Salt for the kind hash, independent of the side angle and of the seeded appearance. */
+/** Salts for values drawn from the appearance seed, independent of each other and of the appearance. */
+const ELEVATION_SALT = 0x51de;
 const KIND_SALT = 0x6b1d;
+const SIDE_SALT = 0x5e1d;
+const INTERVAL_SALT = 0x1e7a;
 
 /**
- * The kind of the encounter with appearance seed `seed` (`hash(baseSeed, index)`): a nebula with
- * probability `nebulaShare`, otherwise a planet. Pure and deterministic.
+ * The seeded kind draw for appearance seed `seed` (`hash(baseSeed, index)`): a nebula with
+ * probability `nebulaShare`, otherwise a planet. Pure and deterministic. The autopilot draws with
+ * the share `kindDrawShare` gives and caps same-kind runs (`nextEncounterKind`).
  */
 export function encounterKind(seed: number, nebulaShare: number): EncounterKind {
   return hashUnit(seed, KIND_SALT) < nebulaShare ? 'nebula' : 'planet';
+}
+
+/** Whether `maxRun` caps runs at all (a finite count of at least 1). */
+function capsRuns(maxRun: number): boolean {
+  return Number.isFinite(maxRun) && maxRun >= 1;
+}
+
+/**
+ * Long-run share of nebulae when each encounter is drawn a nebula with probability `drawShare` and
+ * runs of one kind are cut at `maxRun` (the next encounter is the other kind). A run of a kind that
+ * repeats with probability `s` has mean length `(1 - s^maxRun) / (1 - s)`, and runs alternate.
+ */
+export function cappedNebulaShare(drawShare: number, maxRun: number): number {
+  if (!(drawShare > 0)) return 0;
+  if (!(drawShare < 1)) return 1;
+  if (!capsRuns(maxRun)) return drawShare;
+  const n = Math.floor(maxRun);
+  const nebulaRun = (1 - drawShare ** n) / (1 - drawShare);
+  const planetRun = (1 - (1 - drawShare) ** n) / drawShare;
+  return nebulaRun / (nebulaRun + planetRun);
+}
+
+/**
+ * The draw share that, with runs capped at `maxRun`, gives a long-run nebula share of `nebulaShare`
+ * (the inverse of `cappedNebulaShare`, which increases with the draw share; found by bisection).
+ * With runs capped at `n` the long-run share can only lie in [1 / (n + 1), n / (n + 1)]; a share
+ * outside that gets the nearest end. Pure and allocation-free.
+ */
+export function kindDrawShare(nebulaShare: number, maxRun: number): number {
+  if (!(nebulaShare > 0)) return 0;
+  if (!(nebulaShare < 1)) return 1;
+  if (!capsRuns(maxRun)) return nebulaShare;
+  let low = 0;
+  let high = 1;
+  for (let i = 0; i < 50; i++) {
+    const mid = (low + high) / 2;
+    if (cappedNebulaShare(mid, maxRun) < nebulaShare) low = mid;
+    else high = mid;
+  }
+  return (low + high) / 2;
+}
+
+/**
+ * The kind of the encounter with appearance seed `seed`, given the kind of the latest encounter and
+ * how many of that kind came in a row (`run`). The seeded draw (`encounterKind` with
+ * `kindDrawShare`), except that it is the other kind when the draw would make the run longer than
+ * `params.maxSameKindRun`. A share of 0 or 1 forces one kind and ignores the cap.
+ */
+export function nextEncounterKind(
+  seed: number,
+  params: Pick<AutopilotParams, 'nebulaShare' | 'maxSameKindRun'>,
+  lastKind: EncounterKind | null,
+  run: number,
+): EncounterKind {
+  const { nebulaShare, maxSameKindRun } = params;
+  if (!(nebulaShare > 0)) return 'planet';
+  if (!(nebulaShare < 1)) return 'nebula';
+  const kind = encounterKind(seed, kindDrawShare(nebulaShare, maxSameKindRun));
+  if (kind === lastKind && capsRuns(maxSameKindRun) && run >= Math.floor(maxSameKindRun)) {
+    return kind === 'nebula' ? 'planet' : 'nebula';
+  }
+  return kind;
+}
+
+/**
+ * Seconds of cruise before the encounter with appearance seed `seed`: `interval × (1 + jitter × u)`,
+ * with `u` uniform in [-1, 1) from the seed, so the mean is `interval`. The jitter is clamped to
+ * [0, 1], so the result is never negative.
+ */
+export function cruiseIntervalFor(seed: number, interval: number, jitter: number): number {
+  const j = Math.min(1, Math.max(0, jitter));
+  return interval * (1 + j * (2 * hashUnit(seed, INTERVAL_SALT) - 1));
+}
+
+/** Seconds of cruise before encounter `index` starts (`cruiseIntervalFor` its appearance seed). */
+export function cruiseInterval(
+  params: Pick<AutopilotParams, 'baseSeed' | 'interval' | 'intervalJitter'>,
+  index: number,
+): number {
+  return cruiseIntervalFor(hash(params.baseSeed, index), params.interval, params.intervalJitter);
+}
+
+/**
+ * Where the encounter with appearance seed `seed` sits beside the path: the left or right side
+ * (even odds), and the `sideAngle` for `planEncounter`, which rotates the right of the path toward
+ * up by that angle. The elevation (drawn from `elevation`, radians, positive up) is measured from
+ * level with the path on either side: `sideAngle` is the elevation on the right and π − elevation
+ * on the left.
+ */
+export function encounterSide(
+  seed: number,
+  elevation: readonly [number, number] = ENCOUNTER_SIDE_ELEVATION_RANGE,
+): { side: EncounterSide; elevation: number; sideAngle: number } {
+  const side: EncounterSide = hashUnit(seed, SIDE_SALT) < 0.5 ? 'right' : 'left';
+  const e = elevation[0] + (elevation[1] - elevation[0]) * hashUnit(seed, ELEVATION_SALT);
+  return { side, elevation: e, sideAngle: side === 'right' ? e : Math.PI - e };
+}
+
+/** One planned encounter, as `encounterSchedule` lists it. */
+export interface ScheduledEncounter {
+  index: number;
+  seed: number;
+  kind: EncounterKind;
+  side: EncounterSide;
+  /** Seconds of cruise before it starts. */
+  interval: number;
+}
+
+/**
+ * The first `count` encounters the autopilot will meet with `params`, from load: what
+ * `updateAutopilot` picks for each, computed without simulating travel. Pure.
+ */
+export function encounterSchedule(params: Readonly<AutopilotParams>, count: number): ScheduledEncounter[] {
+  const out: ScheduledEncounter[] = [];
+  let lastKind: EncounterKind | null = null;
+  let run = 0;
+  for (let index = 0; index < count; index++) {
+    const seed = hash(params.baseSeed, index);
+    const kind = nextEncounterKind(seed, params, lastKind, run);
+    run = kind === lastKind ? run + 1 : 1;
+    lastKind = kind;
+    out.push({ index, seed, kind, side: encounterSide(seed, params.sideElevation).side, interval: cruiseInterval(params, index) });
+  }
+  return out;
 }
 
 /** The speed and fade profile in use for an encounter of `kind`. */
@@ -230,12 +383,11 @@ export function encounterProfile(params: Readonly<AutopilotParams>, kind: Encoun
 }
 
 /**
- * Drift rate after `cruiseTime` seconds of cruise: 1, easing (smoothstep) to 0 over the last
- * `driftSettleTime` seconds before the encounter starts. The settle time is capped at the interval,
- * so the rate is always 1 when a cruise begins and the drift never stalls abruptly.
+ * Drift rate after `cruiseTime` seconds of a cruise lasting `interval`: 1, easing (smoothstep) to 0
+ * over the last `driftSettleTime` seconds before the encounter starts. The settle time is capped at
+ * the interval, so the rate is always 1 when a cruise begins and the drift never stalls abruptly.
  */
-function cruiseDriftRate(cruiseTime: number, params: Readonly<AutopilotParams>): number {
-  const { interval } = params;
+function cruiseDriftRate(cruiseTime: number, interval: number, params: Readonly<AutopilotParams>): number {
   const settle = Math.min(params.driftSettleTime, interval);
   if (!(settle > 0)) return cruiseTime >= interval ? 0 : 1;
   return smoothstep(interval, interval - settle, cruiseTime);
@@ -247,11 +399,13 @@ export function createAutopilotState(params: Readonly<AutopilotParams> = DEFAULT
     state: 'CRUISE',
     cruiseTime: 0,
     encounterCount: 0,
+    lastKind: null,
+    kindRun: 0,
     encounter: null,
     remaining: Number.POSITIVE_INFINITY,
     fade: 0,
     targetSpeed: params.cruiseSpeed,
-    driftRate: cruiseDriftRate(0, params),
+    driftRate: cruiseDriftRate(0, cruiseInterval(params, 0), params),
   };
 }
 
@@ -262,10 +416,11 @@ export function createAutopilotState(params: Readonly<AutopilotParams> = DEFAULT
  * `state` is never modified. The result is written into `out` (a fresh state by default), which may
  * be `state` itself; the only allocation is the plan made when an encounter starts.
  *
- * - CRUISE counts cruise time. Once it reaches `interval`, it plans an encounter along the ship's
- *   current heading with the next index and seed, and moves to APPROACH.
+ * - CRUISE counts cruise time. Once it reaches the cruise's interval (`cruiseInterval` for the next
+ *   index), it plans an encounter along the ship's current heading with the next index and seed, of
+ *   the kind `nextEncounterKind` picks and on the side `encounterSide` picks, and moves to APPROACH.
  * - A transition fires on the first step past its threshold, up to one step late. That overshoot is
- *   carried into the next CRUISE (the time past `interval`, plus the time since passing the despawn
+ *   carried into the next CRUISE (the time past the interval, plus the time since passing the despawn
  *   distance), so transition lateness does not add up over encounters. A small O(dt) difference per
  *   encounter remains, because the target speed is updated only once per frame.
  * - APPROACH becomes FLYBY once the remaining distance is at most `flybyDistance`, FLYBY becomes
@@ -286,29 +441,35 @@ export function updateAutopilot(
   let travel = state.state;
   let cruiseTime = state.cruiseTime;
   let encounterCount = state.encounterCount;
+  let lastKind = state.lastKind;
+  let kindRun = state.kindRun;
   let encounter = state.encounter;
 
   if (travel === 'CRUISE') {
     cruiseTime += dt;
-    if (cruiseTime >= params.interval) {
+    const interval = cruiseInterval(params, encounterCount);
+    if (cruiseTime >= interval) {
       const index = encounterCount;
       const seed = hash(params.baseSeed, index);
-      const sideAngle = 2 * Math.PI * hashUnit(seed, SIDE_ANGLE_SALT);
-      if (encounterKind(seed, params.nebulaShare) === 'nebula') {
+      const kind = nextEncounterKind(seed, params, lastKind, kindRun);
+      const { side, sideAngle } = encounterSide(seed, params.sideElevation);
+      if (kind === 'nebula') {
         const nebula = params.nebulaFor(seed);
         const { encounterDistance, sideOffsetFactor } = params.nebula;
         const plan = planEncounter(ship.position, ship.heading, nebula.radius, encounterDistance, sideOffsetFactor, sideAngle);
-        encounter = { kind: 'nebula', index, seed, nebula, plan };
+        encounter = { kind: 'nebula', index, seed, side, nebula, plan };
       } else {
         const planet = params.planetFor(seed);
         const { encounterDistance, sideOffsetFactor } = params;
         const plan = planEncounter(ship.position, ship.heading, planet.radius, encounterDistance, sideOffsetFactor, sideAngle);
-        encounter = { kind: 'planet', index, seed, planet, plan };
+        encounter = { kind: 'planet', index, seed, side, planet, plan };
       }
       encounterCount = index + 1;
+      kindRun = kind === lastKind ? kindRun + 1 : 1;
+      lastKind = kind;
       // How late this encounter starts. The plan stays at the ship's actual position; the next CRUISE
       // is shortened by this instead.
-      cruiseTime = Math.min(cruiseTime - params.interval, dt);
+      cruiseTime = Math.min(cruiseTime - interval, dt);
       travel = 'APPROACH';
     }
   }
@@ -333,12 +494,14 @@ export function updateAutopilot(
   out.state = travel;
   out.cruiseTime = cruiseTime;
   out.encounterCount = encounterCount;
+  out.lastKind = lastKind;
+  out.kindRun = kindRun;
   out.encounter = encounter;
   out.remaining = remaining;
   if (encounter === null) {
     out.fade = 0;
     out.targetSpeed = params.cruiseSpeed;
-    out.driftRate = cruiseDriftRate(cruiseTime, params);
+    out.driftRate = cruiseDriftRate(cruiseTime, cruiseInterval(params, encounterCount), params);
   } else {
     const profile = encounterProfile(params, encounter.kind);
     out.fade = encounterOpacity(encounter.plan, remaining, profile);

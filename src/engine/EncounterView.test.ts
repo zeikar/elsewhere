@@ -14,8 +14,8 @@ import {
 import {
   DEFAULT_AUTOPILOT_PARAMS,
   createTravel,
-  encounterKind,
   encounterProfile,
+  encounterSchedule,
   setCruiseSpeed,
   stepTravel,
   updateAutopilot,
@@ -332,9 +332,7 @@ describe('EncounterView with nebulae', () => {
         expect(kinds.at(-1)).toBe(encounter!.kind);
       }
     }
-    expect(kinds.slice(0, 4)).toEqual(
-      [0, 1, 2, 3].map((i) => encounterKind(hash(ENCOUNTER_BASE_SEED, i), DEFAULT_AUTOPILOT_PARAMS.nebulaShare)),
-    );
+    expect(kinds.slice(0, 5)).toEqual(encounterSchedule(travel.autopilotParams, 5).map((e) => e.kind));
     expect(new Set(kinds)).toEqual(new Set(['planet', 'nebula']));
     view.dispose();
     expect(planetGeometryRefs()).toBe(0);

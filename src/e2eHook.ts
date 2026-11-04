@@ -4,8 +4,9 @@
  * `npm run check:hook`).
  *
  * The hook is read-only toward the engine: getters expose engine state, and the only engine
- * methods are its own public API, which the UI will call anyway. `showPlanet` / `hidePlanet` draw a
- * planet on a separate e2e-only canvas (src/e2ePlanetPreview.ts) and never touch the engine.
+ * methods are its own public API, which the UI will call anyway. `showPlanet` / `showEncounter` /
+ * `hidePlanet` draw a planet or a nebula on a separate e2e-only canvas (src/e2ePlanetPreview.ts) and
+ * never touch the engine.
  *
  * `e2eEngineOptions` reads e2e-only engine overrides from the page URL (also absent from the
  * production build): `?encounterInterval=<seconds>` shortens (or, with a huge value, effectively
@@ -14,10 +15,16 @@
  */
 import { Vector3 } from 'three';
 import type { Engine, EngineOptions } from './engine/Engine';
-import type { EncounterKind, TravelState } from './engine/Autopilot';
+import type { EncounterKind, EncounterSide, TravelState } from './engine/Autopilot';
 import { nebulaLayerPlaneDistance } from './engine/Nebula';
 import type { PlanetType } from './engine/Planet';
-import { hidePlanetPreview, showPlanetPreview, type PlanetPreviewInfo } from './e2ePlanetPreview';
+import {
+  hidePlanetPreview,
+  showEncounterPreview,
+  showPlanetPreview,
+  type EncounterPreviewInfo,
+  type PlanetPreviewInfo,
+} from './e2ePlanetPreview';
 
 export interface E2EHookSnapshot {
   /** Speed level (index into SHIP_SPEED_LEVELS). */
@@ -62,12 +69,14 @@ export interface E2EHookSnapshot {
     fade: number;
     targetSpeed: number;
     driftRate: number;
-    /** Encounter interval in use, in seconds. */
+    /** Mean encounter interval in use, in seconds (each cruise is jittered around it). */
     interval: number;
     /** Planned closest distance between the path and the planet centre, or `null` with no encounter. */
     closestDistance: number | null;
     /** Kind of the encounter in progress, or `null` in CRUISE. */
     kind: EncounterKind | null;
+    /** Side of the path the encounter object sits on, or `null` in CRUISE. */
+    side: EncounterSide | null;
   };
   /** Objects in the scene besides the starfield (the encounter planet or nebula). */
   planets: number;
@@ -121,6 +130,11 @@ export interface E2EHook {
    * on an overlay canvas (`#planet-preview`), replacing any planet already shown.
    */
   showPlanet(type: PlanetType, nth?: number): PlanetPreviewInfo;
+  /**
+   * Draws the planet or nebula for appearance seed `seed` on the same overlay canvas, replacing
+   * anything shown: a planet framed as `showPlanet` frames it, a nebula as seen mid-APPROACH.
+   */
+  showEncounter(kind: EncounterKind, seed: number): EncounterPreviewInfo;
   /** Removes the planet overlay canvas. */
   hidePlanet(): void;
 }
@@ -223,6 +237,7 @@ export function installE2EHook(engine: Engine): void {
           interval: engine.getEncounterInterval(),
           closestDistance: autopilot.encounter?.plan.closestDistance ?? null,
           kind: autopilot.encounter?.kind ?? null,
+          side: autopilot.encounter?.side ?? null,
         },
         planets: engine.getPlanetCount(),
         planet: planetView,
@@ -233,6 +248,7 @@ export function installE2EHook(engine: Engine): void {
     resume: () => engine.resume(),
     setSpeed: (level) => engine.setSpeed(level),
     showPlanet: (type, nth) => showPlanetPreview(type, nth),
+    showEncounter: (kind, seed) => showEncounterPreview(kind, seed),
     hidePlanet: () => hidePlanetPreview(),
   };
   Object.defineProperty(window, '__elsewhere', { value: Object.freeze(hook), configurable: false });

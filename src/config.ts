@@ -113,6 +113,28 @@ export const STAR_SEED = 0x5eed_57a2;
 export const ENCOUNTER_INTERVAL_SECONDS = 40;
 
 /**
+ * Seeded jitter on the encounter interval (docs/PLAN.md section 9, Phase 3): the cruise before
+ * encounter `i` lasts `interval × (1 + jitter × u)`, with `u` drawn uniformly from [-1, 1) by the
+ * encounter's appearance seed, so the mean interval is still ENCOUNTER_INTERVAL_SECONDS. With 40 s
+ * and 0.2 every cruise lasts 32–48 s, so the first encounter still appears 30–60 s after load.
+ */
+export const ENCOUNTER_INTERVAL_JITTER = 0.2;
+
+/**
+ * Most encounters of one kind (planet or nebula) in a row. When the seeded draw would make one more,
+ * the encounter is the other kind instead; the draw is biased to compensate, so the long-run share
+ * of nebulae is still ENCOUNTER_NEBULA_SHARE. Ignored when every encounter is forced to one kind.
+ */
+export const ENCOUNTER_MAX_SAME_KIND_RUN = 3;
+
+/**
+ * Side of the path (docs/PLAN.md section 9, Phase 3): each encounter's planet or nebula sits to the
+ * left or the right of the path (seeded, even odds), raised or lowered by an elevation angle drawn
+ * from this range, in radians (0 is level with the path, positive is up).
+ */
+export const ENCOUNTER_SIDE_ELEVATION_RANGE = [-0.6, 0.6] as const;
+
+/**
  * Over the last this many seconds of the cruise, the heading drift eases to a stop, so the heading
  * is already still when the encounter is planned and stays held through APPROACH and FLYBY. It
  * resumes gradually in DEPARTURE, continuing from where it stopped.
@@ -125,8 +147,12 @@ export const ENCOUNTER_FLYBY_DISTANCE = 300;
 /** Planet radius in world units. A fixed placeholder until seeded planet parameters land. */
 export const ENCOUNTER_PLANET_RADIUS = 120;
 
-/** Base seed for encounter appearance: encounter `i` uses `hash(ENCOUNTER_BASE_SEED, i)`. */
-export const ENCOUNTER_BASE_SEED = 0x91a7_e7a5;
+/**
+ * Base seed for encounter appearance: encounter `i` uses `hash(ENCOUNTER_BASE_SEED, i)`. It is the
+ * same on every load, so it is chosen for its opening: an oceanic planet first (within the 30–60 s
+ * of docs/PLAN.md section 9, Phase 2), then a nebula, then another planet and another nebula.
+ */
+export const ENCOUNTER_BASE_SEED = 0x91b3_a5ba;
 
 /**
  * `D`: the planet is placed this far ahead along the heading when the encounter starts, so it is
@@ -192,54 +218,62 @@ export const PLANET_GAS_SHARE = 0.45;
 
 /** Parameter ranges for rocky planets. */
 export const PLANET_ROCKY_RANGES = {
-  radius: [50, 100],
+  radius: [45, 110],
   /** Base frequency of the terrain noise. */
-  noiseScale: [1.4, 2.4],
+  noiseScale: [1.2, 2.8],
   /** Terrain noise octaves (an integer). */
   octaves: [5, 6],
   /** Domain-warp strength: higher gives more swirled continents. */
-  warp: [0.15, 0.6],
+  warp: [0.1, 0.7],
   /** Height below which the surface is flat basin or sea (terrain heights are roughly in [-0.6, 0.6]). */
-  seaLevel: [-0.3, 0.08],
+  seaLevel: [-0.3, 0.2],
   /** Polar ice: fraction of the latitude, from each pole, that is covered. 0 means no caps. */
   iceCap: [0, 0.3],
   /** Specular highlight strength on seas. 0 for dry worlds. */
   specular: [0, 0.5],
   /** Surface relief used for bump shading. */
-  relief: [0.6, 1.4],
+  relief: [0.5, 1.5],
   /** Crater density: the chance that a cell of the crater lattice holds a crater. 0 means none. */
   craters: [0, 0.7],
-  rotationSpeed: [0.01, 0.03],
-  axialTilt: [0, 0.45],
+  rotationSpeed: [0.008, 0.035],
+  axialTilt: [0, 0.6],
   /** Atmosphere shell thickness, as a fraction of the radius. */
   atmosphereThickness: [0.035, 0.07],
   /** Atmosphere glow strength. 0 means airless (no glow is drawn). */
-  atmosphereIntensity: [0, 1.1],
+  atmosphereIntensity: [0, 1.2],
 } as const;
 
 /** Parameter ranges for gas giants. */
 export const PLANET_GAS_RANGES = {
-  radius: [100, 150],
+  radius: [100, 170],
   /** Base frequency of the turbulence noise. */
-  noiseScale: [1.6, 3],
+  noiseScale: [1.4, 3.4],
   /** Turbulence noise octaves (an integer). */
   octaves: [4, 5],
-  /** Band cycles from pole to pole. */
-  bandFrequency: [5, 11],
+  /** Band cycles from pole to pole (how many bands there are). */
+  bandFrequency: [4, 14],
   /** Phase of the band pattern, in radians. */
   bandPhase: [0, 2 * Math.PI],
   /** How far the turbulence pushes the bands around. */
-  turbulence: [0.25, 0.7],
+  turbulence: [0.2, 0.8],
   /** Size of the oval storm, as an angle on the sphere. 0 means no storm. */
   stormSize: [0, 0.22],
   /** Storm latitude and longitude, in radians. */
   stormLatitude: [-0.6, 0.6],
   stormLongitude: [-Math.PI, Math.PI],
-  rotationSpeed: [0.02, 0.05],
-  axialTilt: [0, 0.5],
+  rotationSpeed: [0.015, 0.06],
+  axialTilt: [0, 0.6],
   atmosphereThickness: [0.06, 0.12],
-  atmosphereIntensity: [0.6, 1.1],
+  atmosphereIntensity: [0.5, 1.2],
 } as const;
+
+/**
+ * Largest seeded tints of a planet's colours, so no two planets of a palette family match exactly:
+ * each channel of the family's palette colours (which also share a small brightness shift) and of
+ * the atmosphere colour picked from the family's is multiplied by a factor within `1 ± this`.
+ */
+export const PLANET_PALETTE_TINT = 0.06;
+export const PLANET_ATMOSPHERE_TINT = 0.1;
 
 /** Range shared by both types for the starting rotation angle, in radians. */
 export const PLANET_ROTATION_PHASE_RANGE = [0, 2 * Math.PI] as const;
@@ -339,7 +373,7 @@ export const NEBULA_RANGES = {
   /** Core radius in world units (the encounter radius). */
   radius: [240, 360],
   /** Number of layers (an integer). */
-  layerCount: [5, 7],
+  layerCount: [4, 8],
   /** Layer half-size (half the side of its square), in radii. */
   layerSize: [1.9, 2.8],
   /** Largest distance of a layer centre from the nebula's axis, in radii. */
@@ -366,6 +400,15 @@ export const NEBULA_RANGES = {
   core: [0.015, 0.04],
   /** Speed at which the clouds slowly churn, in noise units per second. */
   churn: [0.004, 0.012],
+  /**
+   * Shape: how elongated the cloud outline is (1 is round; the long axis is this times the short
+   * one, at the same area), along a seeded axis `orientation` (radians, in the layer planes, shared
+   * by every layer so the nebula reads as one elongated cloud).
+   */
+  elongation: [1, 2],
+  orientation: [0, Math.PI],
+  /** How ragged the outline is: how far the low-frequency warp pushes the cloud's edge around. */
+  raggedness: [0.15, 0.5],
 } as const;
 
 /** Range for each component of a layer's noise-domain offset. */
