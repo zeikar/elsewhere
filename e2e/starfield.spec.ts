@@ -121,7 +121,11 @@ test.describe('at deviceScaleFactor 2', () => {
 test('soak: GPU resources stay constant and the JS heap does not grow', async ({ page }) => {
   test.setTimeout(SOAK_WARMUP_MS + SOAK_SAMPLE_MS * SOAK_SAMPLES + 60_000);
   const errors = collectErrors(page);
-  await openApp(page);
+  // Starfield only: the e2e-only override pushes the first encounter far past the end of the run
+  // (encounter.spec.ts checks the resources planets use and free).
+  await page.goto(`${APP_PATH}?encounterInterval=1e9`);
+  await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 0);
+  expect((await snapshot(page)).autopilot.interval).toBe(1e9);
   // Top speed (setSpeed clamps), so stars wrap around the cube many times during the run.
   await page.evaluate(() => window.__elsewhere!.setSpeed(99));
 

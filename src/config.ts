@@ -247,6 +247,15 @@ export const PLANET_NOISE_OFFSET_RANGE = [-100, 100] as const;
  */
 export const PLANET_LIGHT_DIRECTION = { x: 0.8, y: 0.3, z: 0.45 } as const;
 
+/**
+ * Direction toward the light during an encounter, in the encounter's own frame, so every planet is
+ * lit the same way whatever the heading was when it was planned. `behind`: toward where the ship
+ * came from (against the planned direction), so the approaching planet shows a lit face. `inward`:
+ * from the planet toward the path, so the face turned to the ship at the closest approach is lit
+ * too. `up`: along the third axis of the frame. Normalised when applied.
+ */
+export const PLANET_ENCOUNTER_LIGHT = { behind: 0.6, inward: 0.6, up: 0.3 } as const;
+
 /** Width and height segments of the shared planet sphere geometry. */
 export const PLANET_SPHERE_SEGMENTS = [96, 64] as const;
 

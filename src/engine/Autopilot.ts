@@ -14,6 +14,9 @@
  * shipParams.driftRate = autopilot.driftRate;
  * ```
  *
+ * `stepTravel` is that step, and is what the engine runs each frame. The user's speed setting goes
+ * through `setCruiseSpeed`, which scales the whole speed profile rather than overriding it.
+ *
  * Heading: `planEncounter` assumes the ship holds the planned heading. Shrinking the drift
  * amplitudes would turn the heading back toward -Z and move the path sideways, eating into the
  * clearance. Instead the autopilot slows the ship's drift clock to a stop over the end of the
@@ -43,7 +46,7 @@ import {
   type EncounterProfile,
 } from './encounter';
 import { hash, hashUnit } from './seed';
-import { clampDt, type ShipState } from './Ship';
+import { clampDt, createShipState, updateShip, type ShipParams, type ShipState } from './Ship';
 
 export type TravelState = 'CRUISE' | 'APPROACH' | 'FLYBY' | 'DEPARTURE';
 
@@ -244,4 +247,55 @@ export function updateAutopilot(
     out.driftRate = travel === 'DEPARTURE' ? smoothstep(0, -profile.despawnDistance, remaining) : 0;
   }
   return out;
+}
+
+/**
+ * Sets the cruise speed (the user's speed setting) without overriding the encounter speed profile:
+ * the profile is tuned for `base.cruiseSpeed`, and every speed in it is multiplied by
+ * `cruiseSpeed / base.cruiseSpeed`, so an encounter slows down by the same proportion at every speed
+ * level. Distances are untouched, so the fades, the transitions and the planned path are unchanged
+ * and a change in the middle of an encounter never makes it skip a state. Allocates the new profile.
+ */
+export function setCruiseSpeed(
+  params: AutopilotParams,
+  cruiseSpeed: number,
+  base: Readonly<AutopilotParams> = DEFAULT_AUTOPILOT_PARAMS,
+): void {
+  const factor = base.cruiseSpeed > 0 ? cruiseSpeed / base.cruiseSpeed : 1;
+  params.cruiseSpeed = cruiseSpeed;
+  params.profile = { ...base.profile, minSpeed: base.profile.minSpeed * factor };
+}
+
+/** Everything the simulation step advances: the ship, the autopilot and the params they feed each other. */
+export interface Travel {
+  ship: ShipState;
+  shipParams: ShipParams;
+  autopilot: AutopilotState;
+  autopilotParams: AutopilotParams;
+}
+
+/**
+ * Creates a travel simulation at rest, in CRUISE, with the ship params taken from the autopilot so
+ * the first step already follows it. `shipParams` supplies the drift settings (and the speed time
+ * constant); its target speed and drift rate are replaced.
+ */
+export function createTravel(autopilotParams: AutopilotParams, shipParams: Readonly<ShipParams>): Travel {
+  const autopilot = createAutopilotState(autopilotParams);
+  const params: ShipParams = { ...shipParams, targetSpeed: autopilot.targetSpeed, driftRate: autopilot.driftRate };
+  return { ship: createShipState({}, params), shipParams: params, autopilot, autopilotParams };
+}
+
+/**
+ * The simulation step (docs/PLAN.md section 6, Time and speed): advances the ship by `dt` seconds,
+ * then the autopilot from the new ship state, and feeds the autopilot's target speed and drift rate
+ * into the ship params for the next step. Updates `travel` in place and allocates nothing except the
+ * plan made when an encounter starts. A zero `dt` (the first frame after a resume) changes nothing
+ * but the ship params, which then follow any speed change made meanwhile.
+ */
+export function stepTravel(travel: Travel, dt: number): void {
+  const { ship, shipParams, autopilot, autopilotParams } = travel;
+  updateShip(ship, dt, shipParams, ship);
+  updateAutopilot(autopilot, ship, dt, autopilotParams, autopilot);
+  shipParams.targetSpeed = autopilot.targetSpeed;
+  shipParams.driftRate = autopilot.driftRate;
 }
