@@ -8,6 +8,12 @@
  * `hidePlanet` draw a planet or a nebula on a separate e2e-only canvas (src/e2ePlanetPreview.ts) and
  * never touch the engine.
  *
+ * Performance instrumentation: `snapshot().perf` reports the engine's rolling frame-time statistics
+ * (mean and 95th percentile of the frame interval and of the frame work time) and, in Chromium, the
+ * used JS heap (`performance.memory`); `snapshot().renderer` reports `renderer.info`. `probe(out)`
+ * is a cheap per-frame reading that writes into a caller-owned object, so a watcher running every
+ * animation frame (the soak test's) allocates nothing.
+ *
  * `e2eEngineOptions` reads e2e-only engine overrides from the page URL (also absent from the
  * production build): `?encounterInterval=<seconds>` shortens (or, with a huge value, effectively
  * disables) the encounter interval so tests run quickly, and `?encounterKind=planet|nebula` makes
@@ -15,6 +21,7 @@
  */
 import { Vector3 } from 'three';
 import type { Engine, EngineOptions } from './engine/Engine';
+import type { FrameStats } from './engine/FrameStats';
 import type { EncounterKind, EncounterSide, TravelState } from './engine/Autopilot';
 import { nebulaLayerPlaneDistance } from './engine/Nebula';
 import type { PlanetType } from './engine/Planet';
@@ -25,6 +32,41 @@ import {
   type EncounterPreviewInfo,
   type PlanetPreviewInfo,
 } from './e2ePlanetPreview';
+
+/** A rolling window of frame times, in milliseconds (`null` fields while the window is empty). */
+export interface E2EFrameTimes {
+  /** The most recent frame's value. */
+  last: number | null;
+  mean: number | null;
+  /** 95th percentile (nearest rank). */
+  p95: number | null;
+  max: number | null;
+  /** Frames in the window. */
+  count: number;
+  /** Frames recorded in total. */
+  total: number;
+}
+
+/** What `probe` writes: a cheap per-frame reading of the engine. */
+export interface E2EProbe {
+  /** Frames the engine loop has run. */
+  frames: number;
+  paused: boolean;
+  state: TravelState;
+  /** Index of the encounter in progress, or -1 in CRUISE. */
+  encounterIndex: number;
+  /** Whether the encounter object (planet or nebula) is drawn this frame. */
+  visible: boolean;
+  /** Interval from the previous frame to the latest one, in ms (NaN when it had none, e.g. after a resume). */
+  frameMs: number;
+  /** The latest frame's work time (simulation, encounter sync, render call), in ms. */
+  workMs: number;
+  /** Ship travel position and speed. */
+  x: number;
+  y: number;
+  z: number;
+  speed: number;
+}
 
 export interface E2EHookSnapshot {
   /** Speed level (index into SHIP_SPEED_LEVELS). */
@@ -48,6 +90,15 @@ export interface E2EHookSnapshot {
     textures: number;
     /** Compiled shader programs. */
     programs: number;
+  };
+  /** Performance instrumentation (see the module comment). */
+  perf: {
+    /** Time between consecutive frames. */
+    frameMs: E2EFrameTimes;
+    /** Main-thread work per frame: the simulation step, the encounter sync and the render call. */
+    workMs: E2EFrameTimes;
+    /** `performance.memory.usedJSHeapSize` in bytes (no forced GC), or `null` outside Chromium. */
+    heapUsed: number | null;
   };
   starfield: {
     /** DPR uniform. */
@@ -122,6 +173,11 @@ export interface E2EHookSnapshot {
 
 export interface E2EHook {
   snapshot(): E2EHookSnapshot;
+  /**
+   * Writes a cheap reading of the engine into `out` and returns it; allocates nothing when `out` is
+   * given (a new object otherwise). Meant for watchers that run every animation frame.
+   */
+  probe(out?: E2EProbe): E2EProbe;
   pause(): void;
   resume(): void;
   setSpeed(level: number): void;
@@ -158,6 +214,40 @@ export function e2eEngineOptions(search: string): Pick<EngineOptions, 'encounter
 }
 
 const ndc = new Vector3();
+
+function frameTimes(stats: Readonly<FrameStats>): E2EFrameTimes {
+  const orNull = (x: number) => (Number.isFinite(x) ? x : null);
+  return {
+    last: orNull(stats.last),
+    mean: orNull(stats.mean()),
+    p95: orNull(stats.percentile(95)),
+    max: orNull(stats.max()),
+    count: stats.count,
+    total: stats.total,
+  };
+}
+
+/** Used JS heap in bytes (Chromium's non-standard `performance.memory`), or `null`. */
+function heapUsed(): number | null {
+  const memory = (performance as Performance & { memory?: { usedJSHeapSize: number } }).memory;
+  return memory ? memory.usedJSHeapSize : null;
+}
+
+function newProbe(): E2EProbe {
+  return {
+    frames: 0,
+    paused: false,
+    state: 'CRUISE',
+    encounterIndex: -1,
+    visible: false,
+    frameMs: Number.NaN,
+    workMs: Number.NaN,
+    x: 0,
+    y: 0,
+    z: 0,
+    speed: 0,
+  };
+}
 
 export function installE2EHook(engine: Engine): void {
   const hook: E2EHook = {
@@ -225,6 +315,11 @@ export function installE2EHook(engine: Engine): void {
           textures: info.memory.textures,
           programs: info.programs?.length ?? 0,
         },
+        perf: {
+          frameMs: frameTimes(engine.getFrameIntervals()),
+          workMs: frameTimes(engine.getFrameWork()),
+          heapUsed: heapUsed(),
+        },
         starfield: { ...engine.getStarfieldSizing(), streakTime: engine.getStreakTime() },
         autopilot: {
           state: autopilot.state,
@@ -243,6 +338,22 @@ export function installE2EHook(engine: Engine): void {
         planet: planetView,
         nebula: nebulaView,
       };
+    },
+    probe(out = newProbe()) {
+      const ship = engine.getShip();
+      const autopilot = engine.getAutopilot();
+      out.frames = engine.getFrameCount();
+      out.paused = engine.isPaused();
+      out.state = autopilot.state;
+      out.encounterIndex = autopilot.encounter?.index ?? -1;
+      out.visible = engine.isEncounterVisible();
+      out.frameMs = engine.getLastFrameInterval();
+      out.workMs = engine.getFrameWork().last;
+      out.x = ship.position.x;
+      out.y = ship.position.y;
+      out.z = ship.position.z;
+      out.speed = ship.speed;
+      return out;
     },
     pause: () => engine.pause(),
     resume: () => engine.resume(),

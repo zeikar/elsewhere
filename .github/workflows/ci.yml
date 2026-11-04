@@ -61,3 +61,34 @@ jobs:
 
       # Type checks the e2e suite, builds in e2e mode and runs Playwright against `vite preview`.
       - run: npm run test:e2e
+
+  # A short long-run soak: 3 minutes of travel through planet and nebula encounters, checking heap,
+  # frame time and GPU resources late versus early (e2e/soak/soak.spec.ts). The full 30-minute run
+  # is the Soak workflow (soak.yml). Runs beside the e2e job.
+  soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npx playwright install --with-deps chromium
+
+      - run: npm run soak
+        env:
+          SOAK_MINUTES: 3
+
+      # The soak report (every sample and the summary), and traces on failure.
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: soak-report
+          path: test-results/
+          if-no-files-found: ignore
+          retention-days: 14

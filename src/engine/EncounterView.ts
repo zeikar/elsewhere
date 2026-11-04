@@ -8,11 +8,12 @@
  *   disposed once it ends (DEPARTURE back to CRUISE). The shared planet sphere and nebula plane are
  *   reference-counted by `Planet` and `Nebula`, so each is freed with the last live object holding it
  *   and GPU memory returns to its pre-encounter baseline.
- * - Shader warm-up: disposing an object frees its shader programs, so each new object's programs are
- *   compiled again. The view hands the new object to a `compile` function (the engine passes
+ * - Shader warm-up: the view hands each new object to a `compile` function (the engine passes
  *   `renderer.compileAsync`, which compiles in parallel where `KHR_parallel_shader_compile` is
  *   available) and keeps it hidden, at fade 0, until that settles, so the first frame that draws it
- *   does not stall on compilation. A failed compile falls back to showing the object anyway.
+ *   does not stall on compilation. A failed compile falls back to showing the object anyway. The
+ *   engine also keeps every encounter program compiled for the whole run (ProgramWarmup.ts), so
+ *   disposing an object frees no program and a new object's compile finds its programs ready.
  * - Placement (floating origin): each frame the object's render position is `centre - ship`, computed
  *   in float64 on the CPU from the encounter plan and written into its preallocated
  *   `object.position`. Large absolute coordinates never reach the GPU.

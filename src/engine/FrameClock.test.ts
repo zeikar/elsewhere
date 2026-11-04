@@ -75,4 +75,25 @@ describe('FrameClock', () => {
     expect(clock.tick(10 * 60 * 1000)).toBe(0);
     expect(clock.tick(10 * 60 * 1000 + FRAME_MS)).toBeCloseTo(1 / 60, 12);
   });
+
+  it('lastIntervalMs is the raw interval of the latest tick, and NaN when it had no reference time', () => {
+    const clock = new FrameClock();
+    expect(clock.lastIntervalMs).toBeNaN();
+    clock.tick(1000);
+    expect(clock.lastIntervalMs).toBeNaN();
+    clock.tick(1250);
+    // Unclamped, though the dt it gave was capped.
+    expect(clock.lastIntervalMs).toBe(250);
+    clock.hide();
+    clock.tick(5000);
+    expect(clock.lastIntervalMs).toBeNaN();
+    clock.show();
+    clock.tick(6000);
+    expect(clock.lastIntervalMs).toBeNaN();
+    clock.tick(6000 + FRAME_MS);
+    expect(clock.lastIntervalMs).toBeCloseTo(FRAME_MS, 12);
+    clock.reset();
+    clock.tick(60_000);
+    expect(clock.lastIntervalMs).toBeNaN();
+  });
 });

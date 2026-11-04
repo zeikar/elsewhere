@@ -6,6 +6,8 @@ const PORT = 4173;
 // at the /elsewhere/ base path. `npm run test:e2e` builds it first.
 export default defineConfig({
   testDir: 'e2e',
+  // The long-run soak has its own command and config (`npm run soak`, playwright.soak.config.ts).
+  testIgnore: 'soak/**',
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,

@@ -46,6 +46,15 @@ npm run test:e2e    # end-to-end tests (Playwright, Chromium)
 
 Before the first e2e run, install the browser with `npx playwright install chromium`. The e2e suite builds the site in e2e mode into `dist-e2e/` and runs against `vite preview`. In that build only, `?encounterInterval=<seconds>` overrides the mean encounter interval (each cruise is still seeded-jittered around it) so encounters come quickly, and `?encounterKind=planet` or `?encounterKind=nebula` makes every encounter that kind.
 
+A long-run soak travels through many planet and nebula encounters at a short interval and fails if the JS heap (after a forced GC) grows, if the frame time late in the run is worse than early on, or if the renderer's resource counts drift:
+
+```sh
+npm run soak                  # 30 minutes (the default)
+SOAK_MINUTES=3 npm run soak   # what CI runs
+```
+
+It samples every 30 s (`SOAK_SAMPLE_SECONDS`) and writes `soak-report.json` under `test-results/`. The full run can also be started from the Actions tab ([.github/workflows/soak.yml](.github/workflows/soak.yml)).
+
 After `npm run build`, two checks guard the production build:
 
 ```sh
