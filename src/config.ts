@@ -323,6 +323,15 @@ export const NEBULA_NEAR_FADE_MIN_DISTANCE = 40;
 export const NEBULA_NEAR_FADE_DISTANCE = 360;
 
 /**
+ * Smallest nebula layer alpha that is drawn. A fragment whose combined alpha (encounter fade × near
+ * fade × edge-on fade) is below this is discarded before any noise is evaluated, and a layer whose
+ * encounter fade × near fade is below it is not drawn at all. Even the brightest possible fragment
+ * then changes an 8-bit channel by under half a step, so skipping it leaves every pixel as it was
+ * (no edge where the cut-off falls, no pop when a layer is hidden). Checked in Nebula.test.ts.
+ */
+export const NEBULA_MIN_ALPHA = 1 / 1024;
+
+/**
  * Parameter ranges for `nebulaParams(seed)` in engine/Nebula.ts (inclusive `[min, max]` pairs).
  * Lengths given "in radii" are multiples of the nebula's core radius.
  */
@@ -347,8 +356,10 @@ export const NEBULA_RANGES = {
   warp: [0.5, 1.1],
   /** How much of each layer is cloud: higher fills more of it. */
   coverage: [0.45, 0.75],
-  /** Brightness of each layer's gas colour. */
+  /** Brightness of the nebula's gas colour. */
   intensity: [0.55, 0.85],
+  /** Per-layer factor on that brightness, so the layers differ a little (layer intensity = intensity × this). */
+  layerIntensityJitter: [0.75, 1.1],
   /** How much a layer's densest gas covers what is behind it (the rest of its light is glow). */
   absorption: [0.45, 0.7],
   /** Brightness of the glowing core at the nebula centre. */

@@ -16,6 +16,9 @@
  *   NEBULA_NEAR_FADE_MIN_DISTANCE is not drawn, so flying through the layers never pops. The fragment
  *   shader also fades each fragment out as its layer is seen edge-on, so an oblique layer never shows
  *   as a hard sliver.
+ * - Cost: the fragment shader computes its alpha (the fades above) first and discards a fragment
+ *   below NEBULA_MIN_ALPHA before any noise, and a layer whose encounter fade × near fade is below it
+ *   is not drawn at all. Both cut-offs are under half an 8-bit step, so they change no pixel.
  * - Draw order, blending and depth (the render-order contract in Planet.ts and Starfield.ts): the
  *   layers draw before the starfield (NEBULA_RENDER_ORDER, below STARFIELD_RENDER_ORDER), depth-tested
  *   and without depth writes. They blend as premultiplied "glow over": each layer adds its emission
@@ -46,6 +49,7 @@ import {
 } from 'three';
 import {
   NEBULA_NEAR_FADE_DISTANCE,
+  NEBULA_MIN_ALPHA,
   NEBULA_NEAR_FADE_MIN_DISTANCE,
   NEBULA_NOISE_OFFSET_RANGE,
   NEBULA_RANGES,
@@ -75,7 +79,7 @@ export interface NebulaLayerParams {
   roll: number;
   /** Offset into the noise domain, so each layer has its own clouds. */
   noiseOffset: readonly [number, number, number];
-  /** Emission strength. */
+  /** Emission strength: the nebula's `intensity` times a factor in NEBULA_RANGES.layerIntensityJitter. */
   intensity: number;
   /** Shift of this layer's colours toward the accent hue, in [0, 1]. */
   colorShift: number;
@@ -103,6 +107,8 @@ export interface NebulaParams extends NebulaSpec {
   warp: number;
   /** How much of each layer is cloud. */
   coverage: number;
+  /** Brightness of the gas colour (each layer's `intensity` is this times a seeded jitter). */
+  intensity: number;
   /** How much each layer dims what is behind it. */
   absorption: number;
   /** Brightness of the core glow. */
@@ -212,7 +218,7 @@ export function nebulaParams(seed: number): NebulaParams {
         lerp(NEBULA_NOISE_OFFSET_RANGE, random()),
         lerp(NEBULA_NOISE_OFFSET_RANGE, random()),
       ],
-      intensity: intensity * (0.75 + 0.35 * random()),
+      intensity: intensity * lerp(r.layerIntensityJitter, random()),
       colorShift: random(),
       core: core * Math.exp(-2.5 * depthT * depthT),
     });
@@ -227,6 +233,7 @@ export function nebulaParams(seed: number): NebulaParams {
     octaves,
     warp,
     coverage,
+    intensity,
     absorption,
     core,
     churn,
@@ -355,11 +362,18 @@ varying vec2 vUv;
 varying vec3 vWorld;
 varying vec3 vNormalW;
 
+const float MIN_ALPHA = ${NEBULA_MIN_ALPHA.toExponential()};
+
 ${noiseChunk}
 
 void main() {
   float r0 = length(vUv);
   if (r0 >= 1.0) discard;
+  // Seen edge-on, a layer fades out per fragment, so it never shows as a sliver. The combined alpha
+  // needs no noise, so a fragment too faint to change any pixel (NEBULA_MIN_ALPHA) skips the noise.
+  float facing = abs(dot(normalize(vWorld - cameraPosition), normalize(vNormalW)));
+  float a = uOpacity * uLayerFade * smoothstep(0.08, 0.35, facing);
+  if (a < MIN_ALPHA) discard;
   // 1 inside, easing to exactly 0 at the inscribed circle, so no layer ever shows its square's edge.
   float edge = 1.0 - smoothstep(0.7, 1.0, r0);
 
@@ -394,10 +408,6 @@ void main() {
   // Additive glow on top: thin bright filaments and a soft core, ragged like the outline.
   vec3 glow = mix(gas, uHighlight, 0.4) * filaments * uIntensity * 0.08;
   glow += uHighlight * uCore * exp(-r * r * 10.0) * edge;
-
-  // Seen edge-on, a layer fades out per fragment, so it never shows as a sliver.
-  float facing = abs(dot(normalize(vWorld - cameraPosition), normalize(vNormalW)));
-  float a = uOpacity * uLayerFade * smoothstep(0.08, 0.35, facing);
 
   // Premultiplied "over" (colours converted to the output space before premultiplying): the gas's
   // colour by its cover plus the glow, over what is behind dimmed by the cover.
@@ -532,11 +542,15 @@ export class Nebula {
     this.update(0);
   }
 
-  /** Sets the encounter fade in [0, 1] (the Autopilot's fade). At 0 the nebula is not drawn. */
+  /**
+   * Sets the encounter fade in [0, 1] (the Autopilot's fade). At 0 the nebula is not drawn, and a
+   * layer whose fade × near fade is below NEBULA_MIN_ALPHA is not drawn (see `update`).
+   */
   setFade(opacity: number): void {
     const o = Math.min(1, Math.max(0, opacity));
     this.opacity.value = o;
     this.object.visible = o > 0;
+    this.updateLayerVisibility();
   }
 
   /** Sets the size scale about the nebula centre (1 for the nebula profile). */
@@ -546,17 +560,22 @@ export class Nebula {
 
   /**
    * Churns the clouds to `time` seconds and sets each layer's near-camera fade from the current
-   * `object.position` and scale; a layer whose fade is 0 is not drawn. Allocates nothing.
+   * `object.position` and scale. A layer whose encounter fade × near fade is below NEBULA_MIN_ALPHA
+   * is not drawn: every one of its fragments would be discarded anyway. Allocates nothing.
    */
   update(time: number): void {
     this.time.value = time * this.params.churn;
     const position = this.object.position;
     const scale = this.object.scale.x;
     for (const layer of this.layers) {
-      const fade = nebulaLayerFade(nebulaLayerPlaneDistance(position, scale, layer.placement));
-      layer.fade.value = fade;
-      layer.mesh.visible = fade > 0;
+      layer.fade.value = nebulaLayerFade(nebulaLayerPlaneDistance(position, scale, layer.placement));
     }
+    this.updateLayerVisibility();
+  }
+
+  private updateLayerVisibility(): void {
+    const opacity = this.opacity.value;
+    for (const layer of this.layers) layer.mesh.visible = opacity * layer.fade.value >= NEBULA_MIN_ALPHA;
   }
 
   /** Frees the layer materials and drops this nebula's reference to the shared plane. Idempotent. */

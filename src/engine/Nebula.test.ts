@@ -9,6 +9,7 @@ import {
   NEBULA_DESPAWN_DISTANCE,
   NEBULA_ENCOUNTER_DISTANCE,
   NEBULA_FADE_OUT_DISTANCE,
+  NEBULA_MIN_ALPHA,
   NEBULA_NEAR_FADE_DISTANCE,
   NEBULA_NEAR_FADE_MIN_DISTANCE,
   NEBULA_NOISE_OFFSET_RANGE,
@@ -94,6 +95,21 @@ describe('nebula config', () => {
     expect(NEBULA_NEAR_FADE_MIN_DISTANCE).toBeGreaterThan(0);
     expect(NEBULA_NEAR_FADE_DISTANCE).toBeGreaterThan(0);
   });
+
+  it('NEBULA_MIN_ALPHA is too small for a skipped fragment to change any 8-bit channel', () => {
+    // sRGB transfer (linearToOutputTexel), as the layer shader applies it before premultiplying.
+    const srgb = (x: number) => (x <= 0.0031308 ? 12.92 * x : 1.055 * x ** (1 / 2.4) - 0.055);
+    const r = NEBULA_RANGES;
+    // Largest values in the layer fragment shader: the gas colour is a palette colour (at most 1)
+    // times the layer intensity; the glow is the filaments (at most 0.08 × the intensity) plus the
+    // core glow. The cover (the output alpha before the fades) is at most 1.
+    const intensity = r.intensity[1] * r.layerIntensityJitter[1];
+    const rgb = srgb(intensity) + srgb(0.08 * intensity + r.core[1]);
+    // A fragment adds rgb × a and removes at most (destination × cover × a) ≤ a from each channel.
+    const largestChange = Math.max(rgb, 1) * NEBULA_MIN_ALPHA;
+    expect(largestChange).toBeLessThan(0.5 / 255);
+    expect(NEBULA_MIN_ALPHA).toBeGreaterThan(0);
+  });
 });
 
 describe('nebulaParams', () => {
@@ -120,6 +136,7 @@ describe('nebulaParams', () => {
       expect(Number.isInteger(p.octaves)).toBe(true);
       expectWithin(p.warp, r.warp, `${label}: warp`);
       expectWithin(p.coverage, r.coverage, `${label}: coverage`);
+      expectWithin(p.intensity, r.intensity, `${label}: intensity`);
       expectWithin(p.absorption, r.absorption, `${label}: absorption`);
       expectWithin(p.core, r.core, `${label}: core`);
       expectWithin(p.churn, r.churn, `${label}: churn`);
@@ -140,7 +157,7 @@ describe('nebulaParams', () => {
         expect(Math.abs(layer.tilt[1]), `${l}: tilt y`).toBeLessThanOrEqual(r.tilt[1]);
         expectWithin(layer.roll, [0, 2 * Math.PI], `${l}: roll`);
         for (const o of layer.noiseOffset) expectWithin(o, NEBULA_NOISE_OFFSET_RANGE, `${l}: noise offset`);
-        expectWithin(layer.intensity, [r.intensity[0] * 0.75, r.intensity[1] * 1.1], `${l}: intensity`);
+        expectWithin(layer.intensity / p.intensity, r.layerIntensityJitter, `${l}: intensity jitter`);
         expectWithin(layer.colorShift, [0, 1], `${l}: colour shift`);
         expectWithin(layer.core, [0, p.core], `${l}: core`);
       }
@@ -290,6 +307,36 @@ describe('Nebula', () => {
       expect(layer.mesh.visible).toBe(true);
     }
     expect(materialsOf(nebula)[0]!.uniforms.uTime!.value).toBeCloseTo(12 * params.churn, 12);
+    nebula.dispose();
+  });
+
+  it('does not draw a layer whose encounter fade × near fade is below NEBULA_MIN_ALPHA', () => {
+    const nebula = new Nebula(nebulaParams(SEEDS[4]!), DEFAULT_NEBULA_FRAME);
+    nebula.object.position.set(0, 0, -NEBULA_ENCOUNTER_DISTANCE);
+    nebula.update(0);
+    // Every near fade is 1 here, so the encounter fade alone decides; setFade applies it at once.
+    nebula.setFade(NEBULA_MIN_ALPHA * 0.99);
+    expect(nebula.object.visible).toBe(true);
+    for (const layer of nebula.layers) expect(layer.mesh.visible).toBe(false);
+    nebula.setFade(NEBULA_MIN_ALPHA);
+    for (const layer of nebula.layers) expect(layer.mesh.visible).toBe(true);
+
+    // A faint layer near fade: drawn at full encounter fade, hidden once the product drops below.
+    const first = nebula.layers[0]!.placement;
+    const n = first.normal;
+    // Distance from layer 0's plane where its near fade is about 4 × NEBULA_MIN_ALPHA.
+    let d = NEBULA_NEAR_FADE_MIN_DISTANCE;
+    while (nebulaLayerFade(d) < 4 * NEBULA_MIN_ALPHA) d += 0.01;
+    nebula.object.position.set(-first.center.x - d * n.x, -first.center.y - d * n.y, -first.center.z - d * n.z);
+    nebula.setFade(1);
+    nebula.update(0);
+    expect(nebula.layers[0]!.fade.value).toBeGreaterThanOrEqual(4 * NEBULA_MIN_ALPHA);
+    expect(nebula.layers[0]!.fade.value).toBeLessThan(5 * NEBULA_MIN_ALPHA);
+    expect(nebula.layers[0]!.mesh.visible).toBe(true);
+    nebula.setFade(0.2);
+    expect(nebula.layers[0]!.mesh.visible).toBe(false);
+    nebula.update(0);
+    expect(nebula.layers[0]!.mesh.visible).toBe(false);
     nebula.dispose();
   });
 
