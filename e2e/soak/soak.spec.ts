@@ -1,19 +1,22 @@
 /**
  * Long-run soak (docs/PLAN.md section 5, "Stable rendering across tab switches and long runs",
  * section 9 Phase 1/3 "Done when" and section 10): travel with a short encounter interval for
- * SOAK_MINUTES (default 30), through many planet and nebula encounters, and sample every
- * SOAK_SAMPLE_SECONDS (default 30).
+ * SOAK_MINUTES (default 30), through many planet and nebula encounters, and sample them.
  *
- * Each sample is taken at CRUISE with no encounter object (the next one after the sample time), so
- * every sample sees the same scene: the used JS heap after a forced GC, the renderer's resource
- * counts, and the frame-time statistics of the window since the previous sample. The run fails on
+ * Each sample is taken at CRUISE with no encounter object, so every sample sees the same scene: the
+ * used JS heap after a forced GC, the renderer's resource counts, and the frame-time statistics of
+ * the window since the previous sample. A sample is due SOAK_SAMPLE_SECONDS (default 30) after the
+ * previous one, but is taken at the first CRUISE from then on, so samples are spaced by the later
+ * of SOAK_SAMPLE_SECONDS and the end of the encounter in progress: in practice about one per
+ * encounter cycle (about 60–70 s under SwiftShader). The run fails on
  *
  * - heap growth: last sample minus first above SOAK_HEAP_GROWTH_LIMIT_BYTES;
  * - frame-time degradation: the p95 frame interval at CRUISE late in the run (every CRUISE frame of
  *   the last third of the samples) above the early value (the first third) × SOAK_FRAME_TIME_FACTOR
  *   (+ SOAK_FRAME_TIME_SLACK_MS); likewise the p95 frame work time. Software rendering (SwiftShader)
  *   makes absolute frame rates meaningless, so only late versus early counts, and CRUISE frames are
- *   compared because every CRUISE draws the same scene at the same speed;
+ *   compared because every CRUISE draws the same scene at the same speed. Each third must pool at
+ *   least SOAK_MIN_COMPARED_FRAMES frames, so a comparison too thin to mean anything fails;
  * - resource-count drift: geometries, textures, programs or render calls at CRUISE differing
  *   between any two samples;
  * - a stall in the frame that creates an encounter object or first draws it (more main-thread work
@@ -26,12 +29,9 @@
  */
 import { writeFileSync } from 'node:fs';
 import { expect, test, type Page } from '@playwright/test';
-import type { E2EHookSnapshot } from '../../src/e2eHook';
 import {
   frameTimeStats,
-  heapAfterGc,
   installFrameSampler,
-  takeFrameWindow,
   type EncounterMark,
   type FrameTimeStats,
   type FrameWindow,
@@ -69,6 +69,12 @@ const SOAK_ENCOUNTER_INTERVAL_SECONDS = envNumber('SOAK_ENCOUNTER_INTERVAL', 5);
 const VIEWPORT = { width: 480, height: 270 };
 /** Longest wait for the next CRUISE when a sample is due (an encounter in progress). */
 const CRUISE_WAIT_MS = 240_000;
+/**
+ * Fewest CRUISE frames (interval and work, each) the early and the late third must each pool. A
+ * 3-minute run's thirds are one window each, of about 50 frames under SwiftShader (one cruise of
+ * 4–6 s), so this leaves room for a slower runner while still failing a comparison of a few frames.
+ */
+const SOAK_MIN_COMPARED_FRAMES = 30;
 
 interface Sample {
   /** Minutes since the soak started. */
@@ -97,41 +103,81 @@ function collectErrors(page: Page): string[] {
   return errors;
 }
 
-function snapshot(page: Page): Promise<E2EHookSnapshot> {
-  return page.evaluate(() => window.__elsewhere!.snapshot());
-}
-
 /** Waits until the engine is at CRUISE with no encounter object in the scene. */
-async function waitForCruise(page: Page): Promise<void> {
+async function waitForCruise(page: Page, timeout: number): Promise<void> {
   await page.waitForFunction(
     () => {
       const p = window.__elsewhere!.probe();
       return p.state === 'CRUISE' && p.encounterIndex < 0;
     },
     undefined,
-    { timeout: CRUISE_WAIT_MS, polling: 100 },
+    { timeout, polling: 100 },
   );
 }
 
+/** What one in-page reading returns (see `readSample`). */
+interface PageReading {
+  window: FrameWindow;
+  heap: number | null;
+  encounters: number;
+  frames: number;
+  resources: Sample['resources'];
+}
+
+/**
+ * One reading, in a single synchronous evaluate so no engine frame runs between its parts: the
+ * state check, the frame window, a forced GC and the heap after it, and the renderer's counts.
+ * `null` (and nothing taken) when the engine is not at CRUISE with no encounter object, e.g. the
+ * next encounter started between the wait and this call.
+ */
+function readSample(page: Page): Promise<PageReading | null> {
+  return page.evaluate(() => {
+    const hook = window.__elsewhere!;
+    const p = hook.probe();
+    if (p.state !== 'CRUISE' || p.encounterIndex >= 0) return null;
+    // The window first, so the GC below falls outside it (and the sampler skips its interval).
+    const frameWindow = window.__frameSampler!.take();
+    const w = window as unknown as { gc?: () => void };
+    const memory = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
+    let heap: number | null = null;
+    if (typeof w.gc === 'function' && memory) {
+      w.gc();
+      w.gc();
+      window.__frameSampler!.skip(2);
+      heap = memory.usedJSHeapSize;
+    }
+    const s = hook.snapshot();
+    return {
+      window: frameWindow,
+      heap,
+      encounters: s.autopilot.encounterCount,
+      frames: s.frames,
+      resources: {
+        geometries: s.renderer.geometries,
+        textures: s.renderer.textures,
+        programs: s.renderer.programs,
+        calls: s.renderer.calls,
+      },
+    };
+  });
+}
+
+/** Waits for the next CRUISE with no encounter object and samples it (retrying if an encounter wins the race). */
 async function takeSample(page: Page, startedAt: number): Promise<Sample> {
-  await waitForCruise(page);
-  // The window first, so the GC below falls outside it (and the sampler skips its interval).
-  const window = await takeFrameWindow(page);
-  const heap = await heapAfterGc(page);
-  const s = await snapshot(page);
-  expect(s.autopilot.state, 'still at CRUISE while sampling').toBe('CRUISE');
+  const deadline = Date.now() + CRUISE_WAIT_MS;
+  let reading: PageReading | null = null;
+  while (reading === null) {
+    await waitForCruise(page, Math.max(1, deadline - Date.now()));
+    reading = await readSample(page);
+  }
+  const { window, heap } = reading;
   const encounter = { interval: frameTimeStats(window.encounter.interval), work: frameTimeStats(window.encounter.work) };
   return {
     atMin: (Date.now() - startedAt) / 60_000,
-    encounters: s.autopilot.encounterCount,
-    frames: s.frames,
+    encounters: reading.encounters,
+    frames: reading.frames,
     heap,
-    resources: {
-      geometries: s.renderer.geometries,
-      textures: s.renderer.textures,
-      programs: s.renderer.programs,
-      calls: s.renderer.calls,
-    },
+    resources: reading.resources,
     cruise: { interval: frameTimeStats(window.cruise.interval), work: frameTimeStats(window.cruise.work) },
     encounter,
     marks: window.marks.map((mark) => ({
@@ -201,7 +247,8 @@ test(`soak: ${SOAK_MINUTES} min, heap, frame time and GPU resources stay stable`
   startedAt = Date.now();
   samples[0]!.atMin = 0;
 
-  // Then a sample every SOAK_SAMPLE_SECONDS (each at the next CRUISE), until the run is over.
+  // Then a sample due every SOAK_SAMPLE_SECONDS, each taken at the first CRUISE after it is due (so
+  // the spacing is the later of the two: about one encounter cycle), until the run is over.
   let lastAt = startedAt;
   while (Date.now() - startedAt < durationMs) {
     const due = Math.min(lastAt + SOAK_SAMPLE_SECONDS * 1000, startedAt + durationMs);
@@ -276,8 +323,11 @@ test(`soak: ${SOAK_MINUTES} min, heap, frame time and GPU resources stay stable`
     test.info().annotations.push({ type: 'heap growth', description: 'skipped: gc() or performance.memory unavailable' });
   }
   // Frame time late in the run is not worse than early on, beyond the factor.
-  expect(interval.early, 'cruise frames early in the run').not.toBeNull();
-  expect(interval.late, 'cruise frames late in the run').not.toBeNull();
+  // Each side pools enough frames for its p95 to mean something.
+  for (const [name, pair] of [['interval', interval], ['work', work]] as const) {
+    expect(pair.early?.n ?? 0, `cruise frame ${name}s early in the run`).toBeGreaterThanOrEqual(SOAK_MIN_COMPARED_FRAMES);
+    expect(pair.late?.n ?? 0, `cruise frame ${name}s late in the run`).toBeGreaterThanOrEqual(SOAK_MIN_COMPARED_FRAMES);
+  }
   expect(interval.late!.p95, 'cruise p95 frame interval, late vs early (ms)').toBeLessThanOrEqual(
     interval.early!.p95 * SOAK_FRAME_TIME_FACTOR + SOAK_FRAME_TIME_SLACK_MS,
   );
@@ -286,10 +336,12 @@ test(`soak: ${SOAK_MINUTES} min, heap, frame time and GPU resources stay stable`
   );
   // No encounter stalls the frame that creates its object or first draws it (a shader compile).
   expect(summary.firstVisibleFrame.encounters, 'encounters with frame marks').toBeGreaterThan(0);
-  expect(summary.firstVisibleFrame.worstCreateWorkMs ?? 0, 'object-creating frame work (ms)').toBeLessThan(
+  expect(summary.firstVisibleFrame.worstCreateWorkMs, 'object-creating frame work (ms)').not.toBeNull();
+  expect(summary.firstVisibleFrame.worstVisibleWorkMs, 'first visible frame work (ms)').not.toBeNull();
+  expect(summary.firstVisibleFrame.worstCreateWorkMs!, 'object-creating frame work (ms)').toBeLessThan(
     SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS,
   );
-  expect(summary.firstVisibleFrame.worstVisibleWorkMs ?? 0, 'first visible frame work (ms)').toBeLessThan(
+  expect(summary.firstVisibleFrame.worstVisibleWorkMs!, 'first visible frame work (ms)').toBeLessThan(
     SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS,
   );
   // No frame moves the ship further than its speed allows.

@@ -228,20 +228,3 @@ export async function installFrameSampler(page: Page, capacity = 16_384): Promis
 export function takeFrameWindow(page: Page): Promise<FrameWindow> {
   return page.evaluate(() => window.__frameSampler!.take());
 }
-
-/**
- * Used JS heap in bytes after a full GC (Chromium launched with `--js-flags=--expose-gc` and
- * `--enable-precise-memory-info`), or `null` without gc() or performance.memory. The frame interval
- * spanning the GC is left out of the sampler's statistics.
- */
-export function heapAfterGc(page: Page): Promise<number | null> {
-  return page.evaluate(() => {
-    const w = window as unknown as { gc?: () => void };
-    const memory = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
-    if (typeof w.gc !== 'function' || !memory) return null;
-    w.gc();
-    w.gc();
-    window.__frameSampler?.skip(2);
-    return memory.usedJSHeapSize;
-  });
-}
