@@ -9,11 +9,13 @@
  *
  * `e2eEngineOptions` reads e2e-only engine overrides from the page URL (also absent from the
  * production build): `?encounterInterval=<seconds>` shortens (or, with a huge value, effectively
- * disables) the encounter interval so tests run quickly.
+ * disables) the encounter interval so tests run quickly, and `?encounterKind=planet|nebula` makes
+ * every encounter that kind.
  */
 import { Vector3 } from 'three';
 import type { Engine, EngineOptions } from './engine/Engine';
-import type { TravelState } from './engine/Autopilot';
+import type { EncounterKind, TravelState } from './engine/Autopilot';
+import { nebulaLayerPlaneDistance } from './engine/Nebula';
 import type { PlanetType } from './engine/Planet';
 import { hidePlanetPreview, showPlanetPreview, type PlanetPreviewInfo } from './e2ePlanetPreview';
 
@@ -64,8 +66,10 @@ export interface E2EHookSnapshot {
     interval: number;
     /** Planned closest distance between the path and the planet centre, or `null` with no encounter. */
     closestDistance: number | null;
+    /** Kind of the encounter in progress, or `null` in CRUISE. */
+    kind: EncounterKind | null;
   };
-  /** Objects in the scene besides the starfield (the planets). */
+  /** Objects in the scene besides the starfield (the encounter planet or nebula). */
   planets: number;
   /** The encounter planet as last placed for rendering, or `null`. */
   planet: {
@@ -85,6 +89,25 @@ export interface E2EHookSnapshot {
     distance: number;
     /** Planet centre in normalised device coordinates (x, y in [-1, 1] on screen, z < 1 in front). */
     ndc: { x: number; y: number; z: number };
+  } | null;
+  /** The encounter nebula as last placed for rendering, or `null`. */
+  nebula: {
+    index: number;
+    seed: number;
+    family: string;
+    /** Core radius in world units. */
+    radius: number;
+    /** Encounter opacity uniform. */
+    opacity: number;
+    visible: boolean;
+    /** Render position: nebula centre relative to the ship (camera at the origin). */
+    position: { x: number; y: number; z: number };
+    /** Distance from the camera to the nebula centre. */
+    distance: number;
+    /** Nebula centre in normalised device coordinates. */
+    ndc: { x: number; y: number; z: number };
+    /** Per layer: distance from the camera to its plane, its near-camera fade, and whether it is drawn. */
+    layers: { planeDistance: number; fade: number; visible: boolean }[];
   } | null;
 }
 
@@ -109,10 +132,15 @@ declare global {
 }
 
 /** Reads the e2e-only engine overrides from a URL query string (see the module comment). */
-export function e2eEngineOptions(search: string): Pick<EngineOptions, 'encounterInterval'> {
-  const raw = new URLSearchParams(search).get('encounterInterval');
+export function e2eEngineOptions(search: string): Pick<EngineOptions, 'encounterInterval' | 'encounterKind'> {
+  const query = new URLSearchParams(search);
+  const raw = query.get('encounterInterval');
   const interval = raw === null ? Number.NaN : Number(raw);
-  return interval >= 0 ? { encounterInterval: interval } : {};
+  const kind = query.get('encounterKind');
+  return {
+    ...(interval >= 0 ? { encounterInterval: interval } : {}),
+    ...(kind === 'planet' || kind === 'nebula' ? { encounterKind: kind } : {}),
+  };
 }
 
 const ndc = new Vector3();
@@ -139,6 +167,28 @@ export function installE2EHook(engine: Engine): void {
           position: { x: p.x, y: p.y, z: p.z },
           distance: p.length(),
           ndc: { x: ndc.x, y: ndc.y, z: ndc.z },
+        };
+      }
+      const nebula = engine.getNebula();
+      let nebulaView: E2EHookSnapshot['nebula'] = null;
+      if (nebula !== null && autopilot.encounter !== null) {
+        const p = nebula.object.position;
+        ndc.copy(p).project(engine.getCamera());
+        nebulaView = {
+          index: autopilot.encounter.index,
+          seed: nebula.params.seed,
+          family: nebula.params.family,
+          radius: nebula.params.radius,
+          opacity: nebula.opacity.value,
+          visible: nebula.object.visible,
+          position: { x: p.x, y: p.y, z: p.z },
+          distance: p.length(),
+          ndc: { x: ndc.x, y: ndc.y, z: ndc.z },
+          layers: nebula.layers.map((layer) => ({
+            planeDistance: nebulaLayerPlaneDistance(p, nebula.object.scale.x, layer.placement),
+            fade: layer.fade.value,
+            visible: layer.mesh.visible,
+          })),
         };
       }
       return {
@@ -172,9 +222,11 @@ export function installE2EHook(engine: Engine): void {
           driftRate: autopilot.driftRate,
           interval: engine.getEncounterInterval(),
           closestDistance: autopilot.encounter?.plan.closestDistance ?? null,
+          kind: autopilot.encounter?.kind ?? null,
         },
         planets: engine.getPlanetCount(),
         planet: planetView,
+        nebula: nebulaView,
       };
     },
     pause: () => engine.pause(),

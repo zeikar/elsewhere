@@ -44,7 +44,7 @@ npm test            # unit tests (Vitest)
 npm run test:e2e    # end-to-end tests (Playwright, Chromium)
 ```
 
-Before the first e2e run, install the browser with `npx playwright install chromium`. The e2e suite builds the site in e2e mode into `dist-e2e/` and runs against `vite preview`. In that build only, `?encounterInterval=<seconds>` overrides the encounter interval so planet encounters come quickly.
+Before the first e2e run, install the browser with `npx playwright install chromium`. The e2e suite builds the site in e2e mode into `dist-e2e/` and runs against `vite preview`. In that build only, `?encounterInterval=<seconds>` overrides the encounter interval so encounters come quickly, and `?encounterKind=planet` or `?encounterKind=nebula` makes every encounter that kind.
 
 After `npm run build`, two checks guard the production build:
 

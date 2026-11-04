@@ -267,6 +267,111 @@ export const PLANET_ENCOUNTER_LIGHT = { behind: 0.6, inward: 0.6, up: 0.3 } as c
 export const PLANET_SPHERE_SEGMENTS = [96, 64] as const;
 
 /*
+ * Nebulae (docs/PLAN.md section 6, Nebulae (Phase 3)): layered, soft-blended planes shaded with a
+ * cheap fBm fragment shader. An encounter is a planet or a nebula, chosen from the encounter's
+ * appearance seed `hash(ENCOUNTER_BASE_SEED, index)`. Nebula encounters use the same planned-path
+ * maths as planets (`planEncounter`), with their own distance, side offset, speed and fade curves.
+ *
+ * A nebula's `radius` (the encounter radius, used for the clearance) is its core radius: every
+ * layer's centre lies within NEBULA_RANGES.layerOffset × radius of the axis through the nebula
+ * centre along the planned path, so the path, `radius × NEBULA_SIDE_OFFSET_FACTOR` from that axis,
+ * never crosses the bright core. The layers' soft outskirts (half-size NEBULA_RANGES.layerSize ×
+ * radius) reach across the path, so the ship flies through faint wisps; each layer fades out as the
+ * camera nears its plane (NEBULA_NEAR_FADE_*), so passing through never pops.
+ */
+
+/** Share of encounters that are nebulae; the rest are planets. */
+export const ENCOUNTER_NEBULA_SHARE = 0.35;
+
+/** Bounds the nebula share over any 1,000 consecutive encounter indices must stay within. */
+export const ENCOUNTER_NEBULA_SHARE_BOUNDS = [0.3, 0.4] as const;
+
+/**
+ * `D` for nebulae: the nebula centre is placed this far ahead, which is also the spawn distance.
+ * Further than for planets, since a nebula is much larger; the farthest layer stays well inside
+ * CAMERA_FAR.
+ */
+export const NEBULA_ENCOUNTER_DISTANCE = 2600;
+
+/** `k` for nebulae: the path passes `radius × k` from the nebula centre (see the section comment). */
+export const NEBULA_SIDE_OFFSET_FACTOR = 1.7;
+
+/**
+ * Nebula speed profile (see the planet one above): a gentler slowdown with a higher minimum speed, so
+ * the wisps keep streaming past while the ship drifts through them.
+ */
+export const NEBULA_MIN_SPEED = 24;
+export const NEBULA_SLOWDOWN_DISTANCE = 1200;
+export const NEBULA_MIN_SPEED_DISTANCE = 120;
+export const NEBULA_SPEEDUP_DISTANCE = 600;
+
+/**
+ * Nebula fade (see the planet one above). A nebula does not grow from a dot (its spawn scale is 1):
+ * it is far beyond the star cube when it spawns and fades in from opacity 0. It ends shortly after
+ * every layer is behind the camera.
+ */
+export const NEBULA_FADE_IN_DISTANCE = 1400;
+export const NEBULA_FADE_OUT_DISTANCE = 700;
+export const NEBULA_DESPAWN_DISTANCE = 1400;
+
+/**
+ * Per-layer near-camera fade (like the stars' near fade): a layer's opacity eases (smoothstep) from 1
+ * at NEBULA_NEAR_FADE_MIN_DISTANCE + NEBULA_NEAR_FADE_DISTANCE from the camera to its plane down to 0
+ * at NEBULA_NEAR_FADE_MIN_DISTANCE, and the layer is not drawn closer than that.
+ */
+export const NEBULA_NEAR_FADE_MIN_DISTANCE = 40;
+export const NEBULA_NEAR_FADE_DISTANCE = 360;
+
+/**
+ * Smallest nebula layer alpha that is drawn. A fragment whose combined alpha (encounter fade × near
+ * fade × edge-on fade) is below this is discarded before any noise is evaluated, and a layer whose
+ * encounter fade × near fade is below it is not drawn at all. Even the brightest possible fragment
+ * then changes an 8-bit channel by under half a step, so skipping it leaves every pixel as it was
+ * (no edge where the cut-off falls, no pop when a layer is hidden). Checked in Nebula.test.ts.
+ */
+export const NEBULA_MIN_ALPHA = 1 / 1024;
+
+/**
+ * Parameter ranges for `nebulaParams(seed)` in engine/Nebula.ts (inclusive `[min, max]` pairs).
+ * Lengths given "in radii" are multiples of the nebula's core radius.
+ */
+export const NEBULA_RANGES = {
+  /** Core radius in world units (the encounter radius). */
+  radius: [240, 360],
+  /** Number of layers (an integer). */
+  layerCount: [5, 7],
+  /** Layer half-size (half the side of its square), in radii. */
+  layerSize: [1.9, 2.8],
+  /** Largest distance of a layer centre from the nebula's axis, in radii. */
+  layerOffset: [0.2, 0.5],
+  /** Half the depth (along the path) the layers are spread over, in radii. */
+  depthSpread: [1.0, 1.5],
+  /** Largest tilt of a layer away from facing the path, in radians. */
+  tilt: [0.05, 0.22],
+  /** Base frequency of the cloud noise across a layer (a layer spans [-1, 1]). */
+  noiseScale: [1.3, 2.2],
+  /** Cloud noise octaves (an integer). */
+  octaves: [4, 5],
+  /** Domain-warp strength: higher gives more swirled, filamentary clouds. */
+  warp: [0.5, 1.1],
+  /** How much of each layer is cloud: higher fills more of it. */
+  coverage: [0.45, 0.75],
+  /** Brightness of the nebula's gas colour. */
+  intensity: [0.55, 0.85],
+  /** Per-layer factor on that brightness, so the layers differ a little (layer intensity = intensity × this). */
+  layerIntensityJitter: [0.75, 1.1],
+  /** How much a layer's densest gas covers what is behind it (the rest of its light is glow). */
+  absorption: [0.45, 0.7],
+  /** Brightness of the glowing core at the nebula centre. */
+  core: [0.015, 0.04],
+  /** Speed at which the clouds slowly churn, in noise units per second. */
+  churn: [0.004, 0.012],
+} as const;
+
+/** Range for each component of a layer's noise-domain offset. */
+export const NEBULA_NOISE_OFFSET_RANGE = [-100, 100] as const;
+
+/*
  * Reduced motion (docs/PLAN.md section 7): under `prefers-reduced-motion: reduce`, travel starts at a
  * slower speed level with shorter streaks. The user can still raise the speed from there.
  */

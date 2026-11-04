@@ -14,6 +14,8 @@ import {
 import {
   DEFAULT_AUTOPILOT_PARAMS,
   createTravel,
+  encounterKind,
+  encounterProfile,
   setCruiseSpeed,
   stepTravel,
   updateAutopilot,
@@ -32,9 +34,11 @@ import {
 import {
   EncounterView,
   encounterLightDirection,
+  encounterNebulaParams,
   encounterPlanetParams,
   planetRenderPosition,
 } from './EncounterView';
+import { Nebula, disposeNebulaGeometry, nebulaGeometry, nebulaGeometryRefs, nebulaParams } from './Nebula';
 import { disposePlanetGeometry, planetGeometry, planetGeometryRefs, planetParams, type Planet } from './Planet';
 import { hash } from './seed';
 import { DEFAULT_SHIP_PARAMS, createShipState, headingAt, updateShip, type Vec3 } from './Ship';
@@ -45,15 +49,25 @@ const dist = (a: Vec3, b: Vec3) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 
 const CYCLE: TravelState[] = ['APPROACH', 'FLYBY', 'DEPARTURE', 'CRUISE'];
 
-/** Engine-like autopilot params: seeded planets, a short interval, cruise at speed level `level`. */
-function engineParams(level = SHIP_DEFAULT_SPEED_LEVEL, interval = 2): AutopilotParams {
-  const params: AutopilotParams = { ...DEFAULT_AUTOPILOT_PARAMS, interval, planetFor: planetParams };
+/**
+ * Engine-like autopilot params: seeded planets and nebulae, a short interval, cruise at speed level
+ * `level`. Planets only unless `nebulaShare` is given.
+ */
+function engineParams(level = SHIP_DEFAULT_SPEED_LEVEL, interval = 2, nebulaShare = 0): AutopilotParams {
+  const params: AutopilotParams = {
+    ...DEFAULT_AUTOPILOT_PARAMS,
+    interval,
+    planetFor: planetParams,
+    nebulaFor: nebulaParams,
+    nebulaShare,
+  };
   setCruiseSpeed(params, SHIP_SPEED_LEVELS[level]!);
   return params;
 }
 
 afterEach(() => {
   disposePlanetGeometry();
+  disposeNebulaGeometry();
 });
 
 describe('planetRenderPosition (floating origin)', () => {
@@ -136,6 +150,7 @@ describe('encounterPlanetParams', () => {
     }
     const encounter = autopilot.encounter!;
     expect(encounter).not.toBeNull();
+    if (encounter.kind !== 'planet') throw new Error('expected a planet encounter');
     expect(encounterPlanetParams(encounter)).toEqual(planetParams(hash(ENCOUNTER_BASE_SEED, 0)));
 
     const mismatched = { ...encounter, plan: { ...encounter.plan, radius: 33 } };
@@ -150,7 +165,8 @@ function frame(travel: Travel, view: EncounterView, dt: number) {
   const before = travel.autopilot.state;
   stepTravel(travel, dt);
   view.sync(travel.autopilot);
-  view.place(travel.autopilot, travel.ship, travel.autopilotParams.profile);
+  const kind = travel.autopilot.encounter?.kind ?? 'planet';
+  view.place(travel.autopilot, travel.ship, encounterProfile(travel.autopilotParams, kind));
   return { from: before, to: travel.autopilot.state };
 }
 
@@ -176,7 +192,7 @@ describe('EncounterView', () => {
         planets.add(planet);
         createdAt = travel.autopilot.state;
         expect(from).toBe('CRUISE');
-        expect(encounterPlanetParams(encounter!)).toEqual(planet.params);
+        expect(encounter?.kind === 'planet' && encounterPlanetParams(encounter)).toEqual(planet.params);
         // Starts invisible, at opacity 0.
         expect(planet.object.visible).toBe(false);
         planet.object.traverse((o) => {
@@ -232,7 +248,102 @@ describe('EncounterView', () => {
   });
 });
 
-/** A fake `PlanetCompiler` whose promises the test settles by hand. */
+describe('EncounterView with nebulae', () => {
+  it('creates the nebula as APPROACH starts, places it relative to the ship, and frees it as DEPARTURE ends', () => {
+    const scene = new Scene();
+    const view = new EncounterView(scene);
+    const travel = createTravel(engineParams(2, 1, 1), DEFAULT_SHIP_PARAMS);
+    const transitions: TravelState[] = [];
+    const nebulae = new Set<Nebula>();
+    let disposedMaterials = 0;
+    let geometryDisposed = 0;
+    let checks = 0;
+    for (let i = 0; i < 50_000 && transitions.filter((t) => t === 'CRUISE').length < 2; i++) {
+      const { from, to } = frame(travel, view, 1 / 30);
+      if (from !== to) transitions.push(to);
+      const nebula = view.getNebula();
+      const encounter = travel.autopilot.encounter;
+      expect(view.getPlanet()).toBeNull();
+      expect(scene.children.length).toBe(encounter === null ? 0 : 1);
+      expect(nebula === null).toBe(encounter === null);
+      if (nebula === null || encounter === null) continue;
+      expect(view.getObject()).toBe(nebula);
+      if (!nebulae.has(nebula)) {
+        nebulae.add(nebula);
+        expect(from).toBe('CRUISE');
+        expect(to).toBe('APPROACH');
+        expect(encounter.kind === 'nebula' && encounterNebulaParams(encounter)).toEqual(nebula.params);
+        for (const layer of nebula.layers) layer.mesh.material.addEventListener('dispose', () => disposedMaterials++);
+        nebulaGeometry().addEventListener('dispose', () => geometryDisposed++);
+      }
+      // Floating origin: the render position is nebula centre - ship; the fade is the autopilot's.
+      const c = encounter.plan.center;
+      const s = travel.ship.position;
+      expect(dist(nebula.object.position, { x: c.x - s.x, y: c.y - s.y, z: c.z - s.z })).toBeLessThan(1e-6);
+      expect(nebula.opacity.value).toBeCloseTo(travel.autopilot.fade, 12);
+      expect(nebula.object.visible).toBe(travel.autopilot.fade > 0);
+      expect(nebula.object.scale.x).toBe(1);
+      checks++;
+    }
+    expect(transitions).toEqual([...CYCLE, ...CYCLE]);
+    expect(nebulae.size).toBe(2);
+    expect(checks).toBeGreaterThan(100);
+    const layerCount = [...nebulae].reduce((sum, n) => sum + n.layers.length, 0);
+    expect(disposedMaterials).toBe(layerCount);
+    expect(geometryDisposed).toBe(2);
+    expect(nebulaGeometryRefs()).toBe(0);
+    expect(scene.children).toHaveLength(0);
+  });
+
+  it('keeps a new nebula hidden until its compile settles', async () => {
+    const scene = new Scene();
+    const { calls, compile } = fakeCompiler();
+    const view = new EncounterView(scene, compile);
+    const travel = createTravel(engineParams(1, 0.5, 1), DEFAULT_SHIP_PARAMS);
+    runUntil(travel, view, () => view.getNebula() !== null);
+    const nebula = view.getNebula()!;
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.object).toBe(nebula.object);
+    runUntil(travel, view, () => travel.autopilot.fade > 0.05);
+    expect(nebula.object.visible).toBe(false);
+    expect(nebula.opacity.value).toBe(0);
+    calls[0]!.resolve();
+    await flush();
+    frame(travel, view, 0.05);
+    expect(nebula.object.visible).toBe(true);
+    expect(nebula.opacity.value).toBeCloseTo(travel.autopilot.fade, 12);
+    view.dispose();
+    expect(nebulaGeometryRefs()).toBe(0);
+  });
+
+  it('with the default share, each encounter gets the object of its kind, and all are freed', () => {
+    const scene = new Scene();
+    const view = new EncounterView(scene);
+    const travel = createTravel(engineParams(2, 1, DEFAULT_AUTOPILOT_PARAMS.nebulaShare), DEFAULT_SHIP_PARAMS);
+    const kinds: string[] = [];
+    let last: unknown = null;
+    for (let i = 0; i < 200_000 && travel.autopilot.encounterCount < 5; i++) {
+      frame(travel, view, 1 / 20);
+      const current = view.getObject();
+      const encounter = travel.autopilot.encounter;
+      if (current !== null && current !== last) {
+        last = current;
+        kinds.push(current instanceof Nebula ? 'nebula' : 'planet');
+        expect(kinds.at(-1)).toBe(encounter!.kind);
+      }
+    }
+    expect(kinds.slice(0, 4)).toEqual(
+      [0, 1, 2, 3].map((i) => encounterKind(hash(ENCOUNTER_BASE_SEED, i), DEFAULT_AUTOPILOT_PARAMS.nebulaShare)),
+    );
+    expect(new Set(kinds)).toEqual(new Set(['planet', 'nebula']));
+    view.dispose();
+    expect(planetGeometryRefs()).toBe(0);
+    expect(nebulaGeometryRefs()).toBe(0);
+    expect(scene.children).toHaveLength(0);
+  });
+});
+
+/** A fake `EncounterCompiler` whose promises the test settles by hand. */
 function fakeCompiler() {
   const calls: { object: Object3D; inScene: boolean; resolve: () => void; reject: (reason: unknown) => void }[] = [];
   const compile = (object: Object3D) =>

@@ -23,6 +23,11 @@
  * cruise, plans the encounter along the now still heading, holds it through APPROACH and FLYBY, and
  * restarts the clock gradually in DEPARTURE. The heading continues from where it stopped, so it
  * never jumps, and the ship flies the planned straight line past the planet.
+ *
+ * Kinds (docs/PLAN.md section 6, Nebulae): each encounter is a planet or a nebula, chosen from its
+ * appearance seed `hash(baseSeed, index)` (`encounterKind`). Both are planned with `planEncounter`
+ * and held the same way; a nebula uses its own `D`, side offset and speed and fade profile
+ * (`AutopilotParams.nebula`), and its encounter radius is its core radius (see config.ts, Nebulae).
  */
 import {
   ENCOUNTER_BASE_SEED,
@@ -31,8 +36,19 @@ import {
   ENCOUNTER_FLYBY_DISTANCE,
   ENCOUNTER_INTERVAL_SECONDS,
   ENCOUNTER_MIN_SPEED_FLOOR,
+  ENCOUNTER_NEBULA_SHARE,
   ENCOUNTER_PLANET_RADIUS,
   ENCOUNTER_SIDE_OFFSET_FACTOR,
+  NEBULA_DESPAWN_DISTANCE,
+  NEBULA_ENCOUNTER_DISTANCE,
+  NEBULA_FADE_IN_DISTANCE,
+  NEBULA_FADE_OUT_DISTANCE,
+  NEBULA_MIN_SPEED,
+  NEBULA_MIN_SPEED_DISTANCE,
+  NEBULA_RANGES,
+  NEBULA_SIDE_OFFSET_FACTOR,
+  NEBULA_SLOWDOWN_DISTANCE,
+  NEBULA_SPEEDUP_DISTANCE,
   SHIP_DEFAULT_SPEED_LEVEL,
   SHIP_SPEED_LEVELS,
 } from '../config';
@@ -51,6 +67,9 @@ import { clampDt, createShipState, updateShip, type ShipParams, type ShipState }
 
 export type TravelState = 'CRUISE' | 'APPROACH' | 'FLYBY' | 'DEPARTURE';
 
+/** What an encounter meets. */
+export type EncounterKind = 'planet' | 'nebula';
+
 /**
  * The planet met in an encounter. Only the radius for now; seeded planet parameters (type,
  * palette, …) extend this and replace `defaultPlanet` through `AutopilotParams.planetFor`.
@@ -65,16 +84,64 @@ export function defaultPlanet(_seed: number): PlanetSpec {
   return { radius: ENCOUNTER_PLANET_RADIUS };
 }
 
-export interface ActiveEncounter {
+/**
+ * The nebula met in an encounter. Only the core radius here (the encounter radius, see config.ts,
+ * Nebulae); `nebulaParams` in Nebula.ts extends it and plugs in through `AutopilotParams.nebulaFor`.
+ */
+export interface NebulaSpec {
+  /** Core radius in world units. */
+  radius: number;
+}
+
+/** Placeholder nebula choice: every nebula has the middle of the configured core radius range. */
+export function defaultNebula(_seed: number): NebulaSpec {
+  return { radius: (NEBULA_RANGES.radius[0] + NEBULA_RANGES.radius[1]) / 2 };
+}
+
+interface ActiveEncounterBase {
   /** Encounter index, counted from 0 since load. */
   index: number;
   /** Appearance seed: `hash(baseSeed, index)`. */
   seed: number;
-  /** The planet chosen for this seed. */
-  planet: PlanetSpec;
-  /** Planned path and planet position (`plan.radius` is `planet.radius`). */
+  /** Planned path and object position (`plan.radius` is the planet's or the nebula's radius). */
   plan: Encounter;
 }
+
+export interface PlanetEncounter extends ActiveEncounterBase {
+  kind: 'planet';
+  /** The planet chosen for this seed. */
+  planet: PlanetSpec;
+}
+
+export interface NebulaEncounter extends ActiveEncounterBase {
+  kind: 'nebula';
+  /** The nebula chosen for this seed. */
+  nebula: NebulaSpec;
+}
+
+export type ActiveEncounter = PlanetEncounter | NebulaEncounter;
+
+/** How a kind of encounter is planned and flown. */
+export interface EncounterKindParams {
+  /** `D`: how far ahead the object is placed, which is also the spawn distance. */
+  encounterDistance: number;
+  /** `k`: the closest approach to the object's centre is `radius × k`. */
+  sideOffsetFactor: number;
+  /** Speed and fade profile; its despawn distance also ends DEPARTURE. */
+  profile: Readonly<EncounterProfile>;
+}
+
+/** The nebula speed and fade profile, tuned for the default cruise speed. */
+export const NEBULA_ENCOUNTER_PROFILE: Readonly<EncounterProfile> = {
+  minSpeed: NEBULA_MIN_SPEED,
+  slowdownDistance: NEBULA_SLOWDOWN_DISTANCE,
+  minSpeedDistance: NEBULA_MIN_SPEED_DISTANCE,
+  speedupDistance: NEBULA_SPEEDUP_DISTANCE,
+  fadeInDistance: NEBULA_FADE_IN_DISTANCE,
+  spawnScale: 1,
+  fadeOutDistance: NEBULA_FADE_OUT_DISTANCE,
+  despawnDistance: NEBULA_DESPAWN_DISTANCE,
+};
 
 export interface AutopilotParams {
   /** Speed outside encounters, in world units per second; the encounter speed profile scales from it. */
@@ -85,16 +152,22 @@ export interface AutopilotParams {
   driftSettleTime: number;
   /** Remaining distance at which APPROACH becomes FLYBY. */
   flybyDistance: number;
-  /** `D`: how far ahead the planet is placed, which is also the spawn distance. */
+  /** `D` for planets: how far ahead the planet is placed, which is also the spawn distance. */
   encounterDistance: number;
-  /** `k`: the closest approach to the planet centre is `radius × k`. */
+  /** `k` for planets: the closest approach to the planet centre is `radius × k`. */
   sideOffsetFactor: number;
-  /** Speed and fade profile; its despawn distance also ends DEPARTURE. */
+  /** Planet speed and fade profile; its despawn distance also ends DEPARTURE. */
   profile: Readonly<EncounterProfile>;
   /** Base seed for encounter appearance seeds. */
   baseSeed: number;
-  /** Chooses the planet for an encounter seed. Called once when each encounter starts. */
+  /** Chooses the planet for an encounter seed. Called once when each planet encounter starts. */
   planetFor: (seed: number) => PlanetSpec;
+  /** Share of encounters that are nebulae, in [0, 1] (0: planets only, 1: nebulae only). */
+  nebulaShare: number;
+  /** How nebula encounters are planned and flown. */
+  nebula: Readonly<EncounterKindParams>;
+  /** Chooses the nebula for an encounter seed. Called once when each nebula encounter starts. */
+  nebulaFor: (seed: number) => NebulaSpec;
 }
 
 export const DEFAULT_AUTOPILOT_PARAMS: Readonly<AutopilotParams> = {
@@ -107,6 +180,13 @@ export const DEFAULT_AUTOPILOT_PARAMS: Readonly<AutopilotParams> = {
   profile: DEFAULT_ENCOUNTER_PROFILE,
   baseSeed: ENCOUNTER_BASE_SEED,
   planetFor: defaultPlanet,
+  nebulaShare: ENCOUNTER_NEBULA_SHARE,
+  nebula: {
+    encounterDistance: NEBULA_ENCOUNTER_DISTANCE,
+    sideOffsetFactor: NEBULA_SIDE_OFFSET_FACTOR,
+    profile: NEBULA_ENCOUNTER_PROFILE,
+  },
+  nebulaFor: defaultNebula,
 };
 
 export interface AutopilotState {
@@ -132,6 +212,22 @@ export interface AutopilotState {
 
 /** Salt for the side-angle hash, so it is independent of other values drawn from the same seed. */
 const SIDE_ANGLE_SALT = 0x51de;
+
+/** Salt for the kind hash, independent of the side angle and of the seeded appearance. */
+const KIND_SALT = 0x6b1d;
+
+/**
+ * The kind of the encounter with appearance seed `seed` (`hash(baseSeed, index)`): a nebula with
+ * probability `nebulaShare`, otherwise a planet. Pure and deterministic.
+ */
+export function encounterKind(seed: number, nebulaShare: number): EncounterKind {
+  return hashUnit(seed, KIND_SALT) < nebulaShare ? 'nebula' : 'planet';
+}
+
+/** The speed and fade profile in use for an encounter of `kind`. */
+export function encounterProfile(params: Readonly<AutopilotParams>, kind: EncounterKind): Readonly<EncounterProfile> {
+  return kind === 'nebula' ? params.nebula.profile : params.profile;
+}
 
 /**
  * Drift rate after `cruiseTime` seconds of cruise: 1, easing (smoothstep) to 0 over the last
@@ -187,7 +283,6 @@ export function updateAutopilot(
   out: AutopilotState = createAutopilotState(params),
 ): AutopilotState {
   const dt = clampDt(rawDt);
-  const { profile } = params;
   let travel = state.state;
   let cruiseTime = state.cruiseTime;
   let encounterCount = state.encounterCount;
@@ -198,17 +293,18 @@ export function updateAutopilot(
     if (cruiseTime >= params.interval) {
       const index = encounterCount;
       const seed = hash(params.baseSeed, index);
-      const planet = params.planetFor(seed);
       const sideAngle = 2 * Math.PI * hashUnit(seed, SIDE_ANGLE_SALT);
-      const plan = planEncounter(
-        ship.position,
-        ship.heading,
-        planet.radius,
-        params.encounterDistance,
-        params.sideOffsetFactor,
-        sideAngle,
-      );
-      encounter = { index, seed, planet, plan };
+      if (encounterKind(seed, params.nebulaShare) === 'nebula') {
+        const nebula = params.nebulaFor(seed);
+        const { encounterDistance, sideOffsetFactor } = params.nebula;
+        const plan = planEncounter(ship.position, ship.heading, nebula.radius, encounterDistance, sideOffsetFactor, sideAngle);
+        encounter = { kind: 'nebula', index, seed, nebula, plan };
+      } else {
+        const planet = params.planetFor(seed);
+        const { encounterDistance, sideOffsetFactor } = params;
+        const plan = planEncounter(ship.position, ship.heading, planet.radius, encounterDistance, sideOffsetFactor, sideAngle);
+        encounter = { kind: 'planet', index, seed, planet, plan };
+      }
       encounterCount = index + 1;
       // How late this encounter starts. The plan stays at the ship's actual position; the next CRUISE
       // is shortened by this instead.
@@ -219,6 +315,7 @@ export function updateAutopilot(
 
   let remaining = Number.POSITIVE_INFINITY;
   if (encounter !== null) {
+    const profile = encounterProfile(params, encounter.kind);
     remaining = encounterRemaining(encounter.plan, ship.position);
     // Fall through, so a step that crosses several thresholds still ends in the right state.
     if (travel === 'APPROACH' && remaining <= params.flybyDistance) travel = 'FLYBY';
@@ -243,6 +340,7 @@ export function updateAutopilot(
     out.targetSpeed = params.cruiseSpeed;
     out.driftRate = cruiseDriftRate(cruiseTime, params);
   } else {
+    const profile = encounterProfile(params, encounter.kind);
     out.fade = encounterOpacity(encounter.plan, remaining, profile);
     out.targetSpeed = encounterTargetSpeed(remaining, params.cruiseSpeed, profile);
     out.driftRate = travel === 'DEPARTURE' ? smoothstep(0, -profile.despawnDistance, remaining) : 0;
@@ -259,7 +357,8 @@ export function updateAutopilot(
  *
  * The scaled minimum speed is floored at ENCOUNTER_MIN_SPEED_FLOOR, so the slowest levels (the
  * reduced-motion start) slow down proportionally less instead of crawling through the flyby; it is
- * also capped at the cruise speed, so an encounter never speeds the ship up.
+ * also capped at the cruise speed, so an encounter never speeds the ship up. Planet and nebula
+ * profiles are both scaled this way.
  */
 export function setCruiseSpeed(
   params: AutopilotParams,
@@ -267,9 +366,13 @@ export function setCruiseSpeed(
   base: Readonly<AutopilotParams> = DEFAULT_AUTOPILOT_PARAMS,
 ): void {
   const factor = base.cruiseSpeed > 0 ? cruiseSpeed / base.cruiseSpeed : 1;
-  const minSpeed = Math.min(cruiseSpeed, Math.max(base.profile.minSpeed * factor, ENCOUNTER_MIN_SPEED_FLOOR));
+  const scaled = (profile: Readonly<EncounterProfile>): EncounterProfile => ({
+    ...profile,
+    minSpeed: Math.min(cruiseSpeed, Math.max(profile.minSpeed * factor, ENCOUNTER_MIN_SPEED_FLOOR)),
+  });
   params.cruiseSpeed = cruiseSpeed;
-  params.profile = { ...base.profile, minSpeed };
+  params.profile = scaled(base.profile);
+  params.nebula = { ...params.nebula, profile: scaled(base.nebula.profile) };
 }
 
 /** Everything the simulation step advances: the ship, the autopilot and the params they feed each other. */
