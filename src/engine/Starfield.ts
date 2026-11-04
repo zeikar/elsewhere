@@ -13,6 +13,10 @@
  *   large travel coordinates never reach the GPU and nothing is uploaded or allocated per frame.
  * - Stars fade out near the cube boundary and right in front of the camera, so wrapping never makes
  *   a star pop in or out.
+ * - Each star is drawn at its head's depth with depth testing on and depth writes off, so it never
+ *   hides anything but is hidden by depth-writing scenery in front of it. Objects that should hide the stars
+ *   behind them (planet surfaces) write depth and draw before the starfield (a lower renderOrder than
+ *   STARFIELD_RENDER_ORDER); additive glows draw after it.
  *
  * The CPU-side maths is exported as pure functions (with TS mirrors of the shader's wrap and fade)
  * so it can be tested without WebGL.
@@ -324,6 +328,12 @@ void main() {
 // Starfield
 // ---------------------------------------------------------------------------------------------
 
+/**
+ * The starfield's render order. Depth-writing objects that should hide the stars behind them use a
+ * lower value, so their depth is in the buffer when the stars are depth-tested.
+ */
+export const STARFIELD_RENDER_ORDER = 0;
+
 export interface StarfieldUniforms {
   [name: string]: { value: unknown };
   uOffset: { value: Vector3 };
@@ -388,11 +398,13 @@ export class Starfield {
       fragmentShader,
       transparent: true,
       blending: AdditiveBlending,
-      depthTest: false,
+      // Tested against depth written earlier in the frame (planet surfaces), never written.
+      depthTest: true,
       depthWrite: false,
     });
 
     this.mesh = new Mesh(geometry, material);
+    this.mesh.renderOrder = STARFIELD_RENDER_ORDER;
     // Positions are wrapped in the shader, so the geometry's bounds mean nothing.
     this.mesh.frustumCulled = false;
   }
