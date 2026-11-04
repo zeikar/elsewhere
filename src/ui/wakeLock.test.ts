@@ -37,6 +37,20 @@ function setup(visibility: DocumentVisibilityState = 'visible') {
   return { request, document, navigator, sentinels };
 }
 
+/** A request whose settlement each test controls, to reproduce triggers while it is in flight. */
+function setupDeferred() {
+  const settlers: { resolve(lock: WakeLockSentinelLike): void; reject(err: unknown): void }[] = [];
+  const request = vi.fn(
+    (_type: 'screen') =>
+      new Promise<WakeLockSentinelLike>((resolve, reject) => {
+        settlers.push({ resolve, reject });
+      }),
+  );
+  const document = new FakeDocument();
+  const navigator = { wakeLock: { request } };
+  return { request, document, navigator, settlers };
+}
+
 /** Lets pending request/release promises settle. */
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
@@ -204,5 +218,79 @@ describe('createWakeLock', () => {
     expect(() => controller!.setActive(true)).not.toThrow();
     await flush();
     expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries once when the tab became visible again while a request was in flight and it is rejected', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { request, document, navigator, settlers } = setupDeferred();
+    controller = createWakeLock({ navigator, document });
+    controller.setActive(true);
+    expect(request).toHaveBeenCalledTimes(1);
+
+    // Hidden, then visible again while the first request is still in flight.
+    document.setVisibility('hidden');
+    document.setVisibility('visible');
+    expect(request).toHaveBeenCalledTimes(1);
+
+    settlers[0]!.reject(new Error('NotAllowedError'));
+    await flush();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledTimes(2);
+
+    settlers[1]!.resolve(new FakeSentinel());
+    await flush();
+    expect(controller.isHeld()).toBe(true);
+  });
+
+  it('retries once when a request in flight during hidden/visible settles with an already-released lock', async () => {
+    const { request, document, navigator, settlers } = setupDeferred();
+    controller = createWakeLock({ navigator, document });
+    controller.setActive(true);
+    expect(request).toHaveBeenCalledTimes(1);
+
+    document.setVisibility('hidden');
+    document.setVisibility('visible');
+    expect(request).toHaveBeenCalledTimes(1);
+
+    const stale = new FakeSentinel();
+    stale.browserRelease();
+    settlers[0]!.resolve(stale);
+    await flush();
+    expect(controller.isHeld()).toBe(false);
+    expect(request).toHaveBeenCalledTimes(2);
+
+    settlers[1]!.resolve(new FakeSentinel());
+    await flush();
+    expect(controller.isHeld()).toBe(true);
+  });
+
+  it('does not keep retrying when the retry is denied too', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { request, document, navigator, settlers } = setupDeferred();
+    controller = createWakeLock({ navigator, document });
+    controller.setActive(true);
+    document.setVisibility('hidden');
+    document.setVisibility('visible');
+
+    settlers[0]!.reject(new Error('NotAllowedError'));
+    await flush();
+    expect(request).toHaveBeenCalledTimes(2);
+
+    settlers[1]!.reject(new Error('NotAllowedError'));
+    await flush();
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(controller.isHeld()).toBe(false);
+  });
+
+  it('does not retry a request that settles without a lock when no trigger was skipped', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { request, document, navigator, settlers } = setupDeferred();
+    controller = createWakeLock({ navigator, document });
+    controller.setActive(true);
+    settlers[0]!.reject(new Error('NotAllowedError'));
+    await flush();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledTimes(1);
   });
 });

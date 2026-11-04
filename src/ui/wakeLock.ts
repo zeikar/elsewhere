@@ -59,6 +59,11 @@ export function createWakeLock(options: WakeLockOptions = {}): WakeLockControlle
   let sentinel: WakeLockSentinelLike | null = null;
   /** Set while a request is in flight, so overlapping triggers never request twice. */
   let pending = false;
+  /**
+   * Set when a trigger was skipped because a request was in flight. If that request then settles
+   * without a usable lock, it is retried once; a permanent denial therefore cannot loop.
+   */
+  let retryAfterSettle = false;
 
   const wanted = (): boolean => active && !disposed && doc.visibilityState === 'visible';
 
@@ -82,8 +87,19 @@ export function createWakeLock(options: WakeLockOptions = {}): WakeLockControlle
     }
   }
 
+  /** Called when a request settles without leaving a usable lock: retries once if a trigger was skipped. */
+  function retryIfSkipped(): void {
+    const retry = retryAfterSettle;
+    retryAfterSettle = false;
+    if (retry && wanted()) request();
+  }
+
   function request(): void {
-    if (!api || pending || !wanted()) return;
+    if (!api || !wanted()) return;
+    if (pending) {
+      retryAfterSettle = true;
+      return;
+    }
     if (sentinel !== null && sentinel.released !== true) return;
     sentinel = null;
     pending = true;
@@ -98,7 +114,11 @@ export function createWakeLock(options: WakeLockOptions = {}): WakeLockControlle
     promise.then(
       (lock) => {
         pending = false;
-        if (lock.released === true) return;
+        if (lock.released === true) {
+          retryIfSkipped();
+          return;
+        }
+        retryAfterSettle = false;
         sentinel = lock;
         lock.addEventListener('release', onRelease);
         // Paused, hidden or disposed while the request was in flight.
@@ -107,6 +127,7 @@ export function createWakeLock(options: WakeLockOptions = {}): WakeLockControlle
       (err: unknown) => {
         pending = false;
         warn('request', err);
+        retryIfSkipped();
       },
     );
   }
