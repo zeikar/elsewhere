@@ -16,7 +16,15 @@ import {
   PLANET_ROTATION_PHASE_RANGE,
 } from '../config';
 import { DEFAULT_AUTOPILOT_PARAMS, createAutopilotState, updateAutopilot } from './Autopilot';
-import { Planet, disposePlanetGeometry, planetGeometry, planetParams, type PlanetParams, type Rgb } from './Planet';
+import {
+  Planet,
+  disposePlanetGeometry,
+  planetGeometry,
+  planetGeometryRefs,
+  planetParams,
+  type PlanetParams,
+  type Rgb,
+} from './Planet';
 import { hash } from './seed';
 import { createShipState } from './Ship';
 import { STARFIELD_RENDER_ORDER, Starfield } from './Starfield';
@@ -186,11 +194,15 @@ describe('Planet', () => {
     planet.dispose();
   });
 
-  it('dispose() frees its materials and textures but never the shared geometry', () => {
+  it('dispose() frees its materials and textures, and only the last live planet frees the shared geometry', () => {
     const geometry = planetGeometry();
     const geometryDispose = vi.spyOn(geometry, 'dispose');
+    // A planet kept alive throughout holds the shared geometry while the others come and go.
+    const keeper = new Planet(firstOfType('gas'));
+    expect(planetGeometryRefs()).toBe(1);
     for (const type of ['rocky', 'gas'] as const) {
       const planet = new Planet(firstOfType(type));
+      expect(planetGeometryRefs()).toBe(2);
       const materials = materialsOf(planet);
       const materialSpies = materials.map((m) => vi.spyOn(m, 'dispose'));
       const textures = materials.flatMap((m) =>
@@ -207,23 +219,26 @@ describe('Planet', () => {
 
       planet.dispose();
       for (const spy of [...materialSpies, ...textureSpies]) expect(spy).toHaveBeenCalledTimes(1);
-      // Disposing twice is harmless.
+      // Disposing twice is harmless and drops the reference only once.
       planet.dispose();
       for (const spy of materialSpies) expect(spy).toHaveBeenCalledTimes(1);
+      expect(planetGeometryRefs()).toBe(1);
     }
+    // Still held by the keeper: neither the planets nor the teardown free it.
+    disposePlanetGeometry();
     expect(geometryDispose).not.toHaveBeenCalled();
-    // A planet created after others were disposed still shares the same geometry.
-    const later = new Planet(firstOfType('rocky'));
     expect(planetGeometry()).toBe(geometry);
-    later.dispose();
-    expect(geometryDispose).not.toHaveBeenCalled();
 
-    // The module-level teardown frees it, once, and the next planet gets a fresh one.
+    // The last live planet frees it, once, and the next planet gets a fresh one.
+    keeper.dispose();
+    expect(planetGeometryRefs()).toBe(0);
+    expect(geometryDispose).toHaveBeenCalledTimes(1);
+    keeper.dispose();
     disposePlanetGeometry();
     expect(geometryDispose).toHaveBeenCalledTimes(1);
-    disposePlanetGeometry();
-    expect(geometryDispose).toHaveBeenCalledTimes(1);
+    const later = new Planet(firstOfType('rocky'));
     expect(planetGeometry()).not.toBe(geometry);
+    later.dispose();
   });
 
   it('dispose() removes the planet from its parent', () => {

@@ -1,8 +1,8 @@
 /**
  * E2E-only planet preview, used through the test hook (src/e2eHook.ts) and absent from the
- * production build. Planets are not part of the engine's frame loop yet, so this draws one planet
- * on its own full-viewport canvas laid over the scene, with its own renderer and a camera at the
- * origin looking down -Z, like the engine's. The planet sits at a fixed position relative to the
+ * production build. The engine draws encounter planets wherever the encounter puts them; this
+ * instead draws one chosen planet, framed the same every time, on its own full-viewport canvas laid
+ * over the scene, with its own renderer and a camera at the origin looking down -Z, like the engine's. The planet sits at a fixed position relative to the
  * camera, scaled by its radius so every planet is framed the same, and is drawn once at a fixed
  * rotation time so screenshots are repeatable.
  */

@@ -1,7 +1,7 @@
 import './style.css';
 import { initialSpeedSettings } from './config';
 import { Engine } from './engine/Engine';
-import { installE2EHook } from './e2eHook';
+import { e2eEngineOptions, installE2EHook } from './e2eHook';
 import { createControls } from './ui/controls';
 import { createWakeLock } from './ui/wakeLock';
 
@@ -15,7 +15,11 @@ document.body.append(canvas);
 const prefersReducedMotion =
   typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-const engine = new Engine(canvas, initialSpeedSettings(prefersReducedMotion));
+const engine = new Engine(canvas, {
+  ...initialSpeedSettings(prefersReducedMotion),
+  // e2e-only overrides from the URL (e.g. a short encounter interval); dropped from production builds.
+  ...(import.meta.env.MODE === 'e2e' ? e2eEngineOptions(window.location.search) : {}),
+});
 engine.start();
 createControls(engine);
 

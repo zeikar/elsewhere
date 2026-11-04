@@ -4,6 +4,12 @@
  * The engine owns the frame loop and knows nothing about the DOM UI; the UI talks to it only through
  * the small public API below. The camera always sits at the origin and only takes the ship heading
  * (floating origin). Nothing is allocated inside the frame loop.
+ *
+ * Each frame runs one simulation step (`stepTravel`: the ship, then the Autopilot, which sets the
+ * ship's target speed and drift rate), then the encounter view creates or disposes the encounter
+ * planet (compiling a new planet's shaders with `renderer.compileAsync` before it is first drawn),
+ * and the render places it relative to the ship. The starfield keeps running underneath.
+ * Pausing stops the simulation, so the encounter freezes with it.
  */
 import { PerspectiveCamera, SRGBColorSpace, Scene, Vector3, WebGLRenderer, type WebGLInfo } from 'three';
 import {
@@ -15,9 +21,20 @@ import {
   SHIP_DEFAULT_SPEED_LEVEL,
   SHIP_SPEED_LEVELS,
 } from '../config';
+import {
+  DEFAULT_AUTOPILOT_PARAMS,
+  createTravel,
+  setCruiseSpeed,
+  stepTravel,
+  type AutopilotParams,
+  type AutopilotState,
+  type Travel,
+} from './Autopilot';
+import { EncounterView } from './EncounterView';
 import { FrameClock } from './FrameClock';
 import { computeRenderSize } from './renderSize';
-import { DEFAULT_SHIP_PARAMS, createShipState, updateShip, type ShipParams, type ShipState } from './Ship';
+import { planetParams, type Planet } from './Planet';
+import { DEFAULT_SHIP_PARAMS, type ShipState } from './Ship';
 import { DEFAULT_STARFIELD_OPTIONS, Starfield } from './Starfield';
 
 export interface EngineOptions {
@@ -25,6 +42,8 @@ export interface EngineOptions {
   speedLevel?: number;
   /** Starfield streak time, in seconds. Default: STAR_STREAK_TIME_SECONDS. */
   streakTime?: number;
+  /** Encounter interval: seconds of cruise before each encounter. Default: ENCOUNTER_INTERVAL_SECONDS. */
+  encounterInterval?: number;
 }
 
 /** Called with the new paused state whenever pause() or resume() changes it. */
@@ -36,9 +55,10 @@ export class Engine {
   private readonly scene = new Scene();
   private readonly camera: PerspectiveCamera;
   private readonly clock = new FrameClock();
-  private readonly ship: ShipState;
-  private readonly shipParams: ShipParams;
+  /** Ship, autopilot and their params, advanced by `stepTravel`. */
+  private readonly travel: Travel;
   private readonly starfield: Starfield;
+  private readonly encounterView: EncounterView;
   private readonly pausedListeners = new Set<PausedChangeListener>();
   /** Scratch look-at target, reused every frame. */
   private readonly lookTarget = new Vector3();
@@ -66,9 +86,19 @@ export class Engine {
     this.camera = new PerspectiveCamera(CAMERA_FOV_DEG, 1, CAMERA_NEAR, CAMERA_FAR);
     this.camera.position.set(0, 0, 0);
     this.speedLevel = clampSpeedLevel(options.speedLevel ?? SHIP_DEFAULT_SPEED_LEVEL, SHIP_DEFAULT_SPEED_LEVEL);
-    this.shipParams = { ...DEFAULT_SHIP_PARAMS, targetSpeed: SHIP_SPEED_LEVELS[this.speedLevel] ?? 0 };
-    this.ship = createShipState({}, this.shipParams);
+    const interval = options.encounterInterval;
+    const autopilotParams: AutopilotParams = {
+      ...DEFAULT_AUTOPILOT_PARAMS,
+      interval: interval !== undefined && interval >= 0 ? interval : DEFAULT_AUTOPILOT_PARAMS.interval,
+      planetFor: planetParams,
+    };
+    setCruiseSpeed(autopilotParams, SHIP_SPEED_LEVELS[this.speedLevel] ?? 0);
+    this.travel = createTravel(autopilotParams, DEFAULT_SHIP_PARAMS);
     this.scene.add(this.starfield.mesh);
+    // Each new planet's shaders compile (in parallel where supported) before it is first drawn.
+    this.encounterView = new EncounterView(this.scene, (object) =>
+      this.renderer.compileAsync(object, this.camera, this.scene),
+    );
     this.applyHeading();
   }
 
@@ -101,6 +131,7 @@ export class Engine {
     this.dprQuery = null;
     document.removeEventListener('visibilitychange', this.onVisibilityChange);
     this.pausedListeners.clear();
+    this.encounterView.dispose();
     this.scene.remove(this.starfield.mesh);
     this.starfield.dispose();
     this.renderer.dispose();
@@ -134,11 +165,15 @@ export class Engine {
     };
   }
 
-  /** Sets the speed level, an index into SHIP_SPEED_LEVELS (clamped); the ship eases toward it. */
+  /**
+   * Sets the speed level, an index into SHIP_SPEED_LEVELS (clamped). It sets the autopilot's cruise
+   * speed and scales its encounter speed profile with it (`setCruiseSpeed`) rather than overriding
+   * it; the ship eases toward the new target from the next step.
+   */
   setSpeed(level: number): void {
     const clamped = clampSpeedLevel(level, this.speedLevel);
     this.speedLevel = clamped;
-    this.shipParams.targetSpeed = SHIP_SPEED_LEVELS[clamped] ?? 0;
+    setCruiseSpeed(this.travel.autopilotParams, SHIP_SPEED_LEVELS[clamped] ?? 0);
   }
 
   /** Current speed level (index into SHIP_SPEED_LEVELS). */
@@ -162,7 +197,34 @@ export class Engine {
 
   /** Live ship state (read-only view; do not modify). */
   getShip(): Readonly<ShipState> {
-    return this.ship;
+    return this.travel.ship;
+  }
+
+  /** Live autopilot state (read-only view; do not modify). */
+  getAutopilot(): Readonly<AutopilotState> {
+    return this.travel.autopilot;
+  }
+
+  /** Encounter interval in use, in seconds. */
+  getEncounterInterval(): number {
+    return this.travel.autopilotParams.interval;
+  }
+
+  /** The current encounter's planet, or `null` outside encounters (read-only view; do not modify). */
+  getPlanet(): Planet | null {
+    return this.encounterView.getPlanet();
+  }
+
+  /** Number of objects in the scene besides the starfield: the planets. */
+  getPlanetCount(): number {
+    let count = 0;
+    for (const child of this.scene.children) if (child !== this.starfield.mesh) count++;
+    return count;
+  }
+
+  /** The camera (read-only view; do not modify). */
+  getCamera(): PerspectiveCamera {
+    return this.camera;
   }
 
   getCameraAspect(): number {
@@ -189,7 +251,8 @@ export class Engine {
     if (this.paused || !this.running) return;
     this.requestFrame();
     const dt = this.clock.tick(now);
-    updateShip(this.ship, dt, this.shipParams, this.ship);
+    stepTravel(this.travel, dt);
+    this.encounterView.sync(this.travel.autopilot);
     this.frameCount++;
     this.render();
   };
@@ -237,14 +300,16 @@ export class Engine {
   };
 
   private render(): void {
+    const { ship, autopilot, autopilotParams } = this.travel;
     this.applyHeading();
-    this.starfield.update(this.ship);
+    this.starfield.update(ship);
+    this.encounterView.place(autopilot, ship, autopilotParams.profile);
     this.renderer.render(this.scene, this.camera);
   }
 
   /** Camera stays at the origin and looks along the ship heading. */
   private applyHeading(): void {
-    const h = this.ship.heading;
+    const h = this.travel.ship.heading;
     this.lookTarget.set(h.x, h.y, h.z);
     this.camera.lookAt(this.lookTarget);
   }

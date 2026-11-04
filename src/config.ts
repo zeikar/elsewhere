@@ -151,6 +151,13 @@ export const ENCOUNTER_CLEARANCE_MARGIN = 0.25;
  * (SHIP_SPEED_TAU_SECONDS), so the slowdown spans several time constants even at the top speed.
  */
 export const ENCOUNTER_MIN_SPEED = 15;
+/**
+ * Lowest encounter minimum speed (units per second) at any speed level. `setCruiseSpeed` scales
+ * ENCOUNTER_MIN_SPEED with the cruise speed, which would make it 5 at the slowest level (the
+ * reduced-motion start): one encounter would take about 250 s, about 48 s of it in FLYBY. With this
+ * floor it takes about 195 s, about 27 s in FLYBY.
+ */
+export const ENCOUNTER_MIN_SPEED_FLOOR = 10;
 export const ENCOUNTER_SLOWDOWN_DISTANCE = 800;
 export const ENCOUNTER_MIN_SPEED_DISTANCE = 40;
 export const ENCOUNTER_SPEEDUP_DISTANCE = 800;
@@ -246,6 +253,15 @@ export const PLANET_NOISE_OFFSET_RANGE = [-100, 100] as const;
  * its lit face with the terminator to one side.
  */
 export const PLANET_LIGHT_DIRECTION = { x: 0.8, y: 0.3, z: 0.45 } as const;
+
+/**
+ * Direction toward the light during an encounter, in the encounter's own frame, so every planet is
+ * lit the same way whatever the heading was when it was planned. `behind`: toward where the ship
+ * came from (against the planned direction), so the approaching planet shows a lit face. `inward`:
+ * from the planet toward the path, so the face turned to the ship at the closest approach is lit
+ * too. `up`: along the third axis of the frame. Normalised when applied.
+ */
+export const PLANET_ENCOUNTER_LIGHT = { behind: 0.6, inward: 0.6, up: 0.3 } as const;
 
 /** Width and height segments of the shared planet sphere geometry. */
 export const PLANET_SPHERE_SEGMENTS = [96, 64] as const;
