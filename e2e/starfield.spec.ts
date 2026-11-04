@@ -14,6 +14,10 @@ const SOAK_SAMPLES = 11;
 /** Largest allowed JS heap growth (after a forced GC) between warm-up and the end of the soak. */
 const SOAK_HEAP_GROWTH_LIMIT_BYTES = 4 * 1024 * 1024;
 
+// SwiftShader renders at only a few fps, so the tests here routinely take 15+ s; leave headroom
+// over Playwright's 30 s default. (The soak test sets its own, longer timeout.)
+test.describe.configure({ timeout: 60_000 });
+
 function collectErrors(page: Page): string[] {
   const errors: string[] = [];
   page.on('console', (msg) => {
