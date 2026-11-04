@@ -20,8 +20,15 @@ export default defineConfig({
       use: {
         ...devices['Desktop Chrome'],
         launchOptions: {
-          // Headless WebGL through SwiftShader.
-          args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--use-gl=angle'],
+          // Headless WebGL through SwiftShader. gc() and unquantised performance.memory are for the
+          // soak test's heap check.
+          args: [
+            '--use-angle=swiftshader',
+            '--enable-unsafe-swiftshader',
+            '--use-gl=angle',
+            '--js-flags=--expose-gc',
+            '--enable-precise-memory-info',
+          ],
         },
       },
     },

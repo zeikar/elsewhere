@@ -28,6 +28,14 @@ export interface E2EHookSnapshot {
     frame: number;
     geometries: number;
     textures: number;
+    /** Compiled shader programs. */
+    programs: number;
+  };
+  starfield: {
+    /** DPR uniform. */
+    dpr: number;
+    /** Base star width uniform, in device pixels. */
+    pixelSize: number;
   };
 }
 
@@ -67,7 +75,9 @@ export function installE2EHook(engine: Engine): void {
           frame: info.render.frame,
           geometries: info.memory.geometries,
           textures: info.memory.textures,
+          programs: info.programs?.length ?? 0,
         },
+        starfield: engine.getStarfieldSizing(),
       };
     },
     pause: () => engine.pause(),
