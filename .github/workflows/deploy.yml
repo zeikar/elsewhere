@@ -20,6 +20,10 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Read-only. configure-pages reads the Pages site config, which needs pages: read.
+    permissions:
+      contents: read
+      pages: read
     steps:
       - uses: actions/checkout@v7
 
@@ -47,7 +51,7 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
-    # Only this job gets the Pages and OIDC token scopes; the build job (which runs npm ci) does not.
+    # Only this job gets the Pages write and OIDC token scopes; the build job (which runs npm ci) does not.
     permissions:
       pages: write
       id-token: write
