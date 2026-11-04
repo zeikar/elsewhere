@@ -47,13 +47,16 @@ async function revealControls(page: Page): Promise<void> {
 
 /**
  * Clicks a control button on the shown UI, retrying until `pressed` reports the press took effect.
- * Each attempt first checks `pressed`, so a retry never presses twice: click() can throw after its
- * press has landed (its timeout also covers waiting for navigations after the click), and that
- * attempt must not be repeated. Playwright only clicks when the button is the hit target, so an
- * attempt that finds the UI hidden (the canvas intercepts the pointer) presses nothing; the click
- * timeout therefore need not fit inside the hide delay.
+ * `pressed` must report any change the press makes, not only the expected one, so a press with the
+ * wrong effect ends the retries and the caller's own assertion catches it. Each attempt first checks
+ * `pressed`, so a retry never presses twice: click() can throw after its press has landed (its
+ * timeout also covers waiting for navigations after the click), and that attempt must not be
+ * repeated. Playwright only clicks when the button is the hit target, so an attempt that finds the
+ * UI hidden (the canvas intercepts the pointer) presses nothing; the click timeout therefore need
+ * not fit inside the hide delay.
  */
 async function clickControl(page: Page, button: Locator, pressed: () => Promise<boolean>): Promise<void> {
+  expect(await pressed(), 'already pressed before the click').toBe(false);
   await expect(async () => {
     if (await pressed()) return;
     await revealControls(page);
@@ -192,7 +195,7 @@ test('the buttons pause, resume and cycle the speed', async ({ page }) => {
 
   const before = (await snapshot(page)).speed;
   const speedButton = controls.getByRole('button', { name: /^Speed/ });
-  await clickControl(page, speedButton, async () => (await snapshot(page)).speed === before + 1);
+  await clickControl(page, speedButton, async () => (await snapshot(page)).speed !== before);
   expect((await snapshot(page)).speed).toBe(before + 1);
 
   // The clicked button keeps focus; Space must still mean pause, not a second click on it. If the
