@@ -8,7 +8,19 @@ Inspired by the Windows Starfield screensaver. Built with Vite, TypeScript and T
 
 **Live:** <https://zeikar.dev/elsewhere/>
 
-**Status:** Phase 1 (starfield). The design and the phased roadmap are in [docs/PLAN.md](docs/PLAN.md).
+**Status:** MVP complete. Every required feature in [docs/PLAN.md](docs/PLAN.md) section 5 is built, and each item of its verification checklist (section 10) is mapped to a test or a manual step in [docs/VERIFICATION.md](docs/VERIFICATION.md).
+
+## Features
+
+- **Autopilot from the first frame.** Travel starts as soon as the page opens, with no interaction. The heading drifts slowly, and the ship eases between speeds.
+- **A starfield with depth.** 12,000 stars, each an instanced quad, stream past as streaks whose length follows the speed. Star sizes scale with the device pixel ratio (capped at 2), so stars stay crisp on Retina screens. They wrap around the camera and fade near the edges, so none ever pops in or out.
+- **Planet and nebula encounters.** About every 40 s (each cruise is seeded-jittered around that), something appears in the distance as a faint dot. The ship slows as it approaches, passes alongside, and speeds back up into deep space. The first planet appears within 30 to 60 s of load.
+  - Seeded rocky and gas planets, drawn from palette families such as terran, desert, volcanic, jovian and neptunian, with procedural surfaces, lighting and atmospheric glow.
+  - Seeded nebulae made of layered, soft-blended planes, in palette families such as emission, reflection, oxygen and planetary.
+  - About a third of encounters are nebulae, and never more than three of the same kind come in a row. The path is planned beside each object, so it never passes through a planet or a nebula's bright core. The ship may drift through a nebula's faint outer wisps, and each layer fades out as the camera nears it.
+- **Floating origin.** The camera stays at the origin and the travel position is kept on the CPU in float64, so nothing jitters, however long the journey.
+- **Stable over time.** Tab switches stop the clock, so stars don't teleport on return. Every encounter frees its GPU resources, and a soak test checks that heap, frame time and resource counts stay level.
+- **Out of the way.** The controls and the cursor hide after 2.5 s without input. A Screen Wake Lock keeps the screen on while travelling, where the browser supports it. With `prefers-reduced-motion: reduce`, travel starts slower with shorter streaks.
 
 ## Controls
 
@@ -42,6 +54,7 @@ npm run preview   # serve dist/ locally
 ```sh
 npm test            # unit tests (Vitest)
 npm run test:e2e    # end-to-end tests (Playwright, Chromium)
+npm run typecheck   # type check the app and the e2e suite
 ```
 
 Before the first e2e run, install the browser with `npx playwright install chromium`. The e2e suite builds the site in e2e mode into `dist-e2e/` and runs against `vite preview`. In that build only, `?encounterInterval=<seconds>` overrides the mean encounter interval (each cruise is still seeded-jittered around it) so encounters come quickly, and `?encounterKind=planet` or `?encounterKind=nebula` makes every encounter that kind.
@@ -61,6 +74,17 @@ After `npm run build`, two checks guard the production build:
 npm run check:base   # asset paths resolve under /elsewhere/
 npm run check:hook   # the e2e test hook is not in the production build
 ```
+
+[docs/VERIFICATION.md](docs/VERIFICATION.md) maps each item of the PLAN.md section 10 checklist to the tests above, or to a manual step where automation can't cover it, such as the screen staying on with a real device. `npm test` checks that every file and test title cited there exists.
+
+## Known issues and limitations
+
+- **Fullscreen on iPhone:** Safari on iPhone has no Fullscreen API for pages, so the Fullscreen button is hidden there and F does nothing.
+- **Mobile:** Phones and tablets work (tap shows the controls), but performance is tuned for desktop. Expect lower frame rates and more battery use on mobile.
+- **Nebulae are the main GPU cost:** During a nebula encounter, large soft-blended layers cover much of the screen, so a weak GPU may drop frames there. Quality presets and adaptive resolution are an Optional item in PLAN.md section 5, and are not built.
+- **Screen Wake Lock:** Where the browser doesn't support it, the screen follows the device's own sleep settings. A failed request is logged to the console.
+- **Soak length:** CI runs the soak for 3 minutes, under SwiftShader (software rendering), so its frame times say nothing absolute about real hardware. The 30-minute run is started by hand from the Soak workflow ([.github/workflows/soak.yml](.github/workflows/soak.yml)).
+- **Not built yet:** Everything listed as Optional in PLAN.md section 5: ringed and icy planets, quality presets, a shareable seed in the URL, and sound. Ideas that came up while building it are in [IDEAS.md](IDEAS.md).
 
 ## Deployment
 
