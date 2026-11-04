@@ -14,3 +14,78 @@ canvas {
   /* Use the dynamic viewport where supported so mobile browser chrome doesn't cause scrolling. */
   height: 100dvh;
 }
+
+/* Controls (src/ui/controls.ts): small and quiet, so the screen stays the star. */
+.controls {
+  position: fixed;
+  left: 50%;
+  bottom: max(24px, env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  display: flex;
+  gap: 8px;
+  font: 500 13px/1 system-ui, -apple-system, 'Segoe UI', sans-serif;
+  letter-spacing: 0.02em;
+  opacity: 1;
+  transition: opacity 0.3s ease;
+}
+
+.controls.is-hidden {
+  opacity: 0;
+  visibility: hidden;
+  /* Fade out first, then drop out of hit-testing and the accessibility tree. */
+  transition:
+    opacity 0.6s ease,
+    visibility 0s linear 0.6s;
+}
+
+.controls__button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 0 14px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.45);
+  color: rgba(255, 255, 255, 0.78);
+  font: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  backdrop-filter: blur(6px);
+  transition:
+    color 0.15s ease,
+    border-color 0.15s ease,
+    background-color 0.15s ease;
+}
+
+.controls__button[hidden] {
+  display: none;
+}
+
+.controls__button:hover {
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.36);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.controls__button:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.7);
+  outline-offset: 2px;
+}
+
+.controls__pips {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.controls__pips i {
+  width: 4px;
+  height: 10px;
+  border-radius: 1px;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.controls__pips i.is-on {
+  background: rgba(255, 255, 255, 0.85);
+}
