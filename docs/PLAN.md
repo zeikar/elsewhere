@@ -47,21 +47,21 @@ Travel states: `CRUISE → APPROACH → FLYBY → DEPARTURE → CRUISE`
 
 ### Required
 
-- [ ] Full-viewport Three.js canvas
-- [ ] High-DPI support (with a DPR cap) and resize handling
-- [ ] 3D starfield with depth
-- [ ] Star streaks whose length follows speed
-- [ ] Automatic forward motion, smooth turns, acceleration and deceleration
-- [ ] Floating-origin coordinates (section 6)
-- [ ] Seeded planet appearance (at least rocky and gas)
-- [ ] Planet approach and flyby
-- [ ] Simplified nebulae (layered planes or a cheap shader)
-- [ ] Smooth return to cruise after an encounter
-- [ ] Pause / Resume, Fullscreen, Speed setting
-- [ ] UI and cursor auto-hide and reveal
-- [ ] Keep the screen awake while travelling (Screen Wake Lock)
-- [ ] Respect `prefers-reduced-motion`
-- [ ] Stable rendering across tab switches and long runs
+- [x] Full-viewport Three.js canvas
+- [x] High-DPI support (with a DPR cap) and resize handling
+- [x] 3D starfield with depth
+- [x] Star streaks whose length follows speed
+- [x] Automatic forward motion, smooth turns, acceleration and deceleration
+- [x] Floating-origin coordinates (section 6)
+- [x] Seeded planet appearance (at least rocky and gas)
+- [x] Planet approach and flyby
+- [x] Simplified nebulae (layered planes or a cheap shader)
+- [x] Smooth return to cruise after an encounter
+- [x] Pause / Resume, Fullscreen, Speed setting
+- [x] UI and cursor auto-hide and reveal
+- [x] Keep the screen awake while travelling (Screen Wake Lock)
+- [x] Respect `prefers-reduced-motion`
+- [x] Stable rendering across tab switches and long runs
 
 ### Optional (after the MVP)
 
