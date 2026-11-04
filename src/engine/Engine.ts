@@ -7,8 +7,8 @@
  *
  * Each frame runs one simulation step (`stepTravel`: the ship, then the Autopilot, which sets the
  * ship's target speed and drift rate), then the encounter view creates or disposes the encounter
- * planet (compiling a new planet's shaders with `renderer.compileAsync` before it is first drawn),
- * and the render places it relative to the ship. The starfield keeps running underneath.
+ * object, a planet or a nebula (compiling its shaders with `renderer.compileAsync` before it is first
+ * drawn), and the render places it relative to the ship. The starfield keeps running underneath.
  * Pausing stops the simulation, so the encounter freezes with it.
  */
 import { PerspectiveCamera, SRGBColorSpace, Scene, Vector3, WebGLRenderer, type WebGLInfo } from 'three';
@@ -24,14 +24,17 @@ import {
 import {
   DEFAULT_AUTOPILOT_PARAMS,
   createTravel,
+  encounterProfile,
   setCruiseSpeed,
   stepTravel,
   type AutopilotParams,
   type AutopilotState,
+  type EncounterKind,
   type Travel,
 } from './Autopilot';
 import { EncounterView } from './EncounterView';
 import { FrameClock } from './FrameClock';
+import { nebulaParams, type Nebula } from './Nebula';
 import { computeRenderSize } from './renderSize';
 import { planetParams, type Planet } from './Planet';
 import { DEFAULT_SHIP_PARAMS, type ShipState } from './Ship';
@@ -44,6 +47,8 @@ export interface EngineOptions {
   streakTime?: number;
   /** Encounter interval: seconds of cruise before each encounter. Default: ENCOUNTER_INTERVAL_SECONDS. */
   encounterInterval?: number;
+  /** Makes every encounter this kind (the seeded mix of planets and nebulae otherwise). */
+  encounterKind?: EncounterKind;
 }
 
 /** Called with the new paused state whenever pause() or resume() changes it. */
@@ -87,15 +92,18 @@ export class Engine {
     this.camera.position.set(0, 0, 0);
     this.speedLevel = clampSpeedLevel(options.speedLevel ?? SHIP_DEFAULT_SPEED_LEVEL, SHIP_DEFAULT_SPEED_LEVEL);
     const interval = options.encounterInterval;
+    const kind = options.encounterKind;
     const autopilotParams: AutopilotParams = {
       ...DEFAULT_AUTOPILOT_PARAMS,
       interval: interval !== undefined && interval >= 0 ? interval : DEFAULT_AUTOPILOT_PARAMS.interval,
       planetFor: planetParams,
+      nebulaFor: nebulaParams,
+      nebulaShare: kind === undefined ? DEFAULT_AUTOPILOT_PARAMS.nebulaShare : kind === 'nebula' ? 1 : 0,
     };
     setCruiseSpeed(autopilotParams, SHIP_SPEED_LEVELS[this.speedLevel] ?? 0);
     this.travel = createTravel(autopilotParams, DEFAULT_SHIP_PARAMS);
     this.scene.add(this.starfield.mesh);
-    // Each new planet's shaders compile (in parallel where supported) before it is first drawn.
+    // Each new encounter object's shaders compile (in parallel where supported) before it is first drawn.
     this.encounterView = new EncounterView(this.scene, (object) =>
       this.renderer.compileAsync(object, this.camera, this.scene),
     );
@@ -210,12 +218,17 @@ export class Engine {
     return this.travel.autopilotParams.interval;
   }
 
-  /** The current encounter's planet, or `null` outside encounters (read-only view; do not modify). */
+  /** The current encounter's planet, or `null` outside planet encounters (read-only view; do not modify). */
   getPlanet(): Planet | null {
     return this.encounterView.getPlanet();
   }
 
-  /** Number of objects in the scene besides the starfield: the planets. */
+  /** The current encounter's nebula, or `null` outside nebula encounters (read-only view; do not modify). */
+  getNebula(): Nebula | null {
+    return this.encounterView.getNebula();
+  }
+
+  /** Number of objects in the scene besides the starfield: the encounter objects (planets or nebulae). */
   getPlanetCount(): number {
     let count = 0;
     for (const child of this.scene.children) if (child !== this.starfield.mesh) count++;
@@ -303,7 +316,8 @@ export class Engine {
     const { ship, autopilot, autopilotParams } = this.travel;
     this.applyHeading();
     this.starfield.update(ship);
-    this.encounterView.place(autopilot, ship, autopilotParams.profile);
+    const kind = autopilot.encounter?.kind ?? 'planet';
+    this.encounterView.place(autopilot, ship, encounterProfile(autopilotParams, kind));
     this.renderer.render(this.scene, this.camera);
   }
 

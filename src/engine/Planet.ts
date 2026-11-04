@@ -320,9 +320,9 @@ export function planetParams(seed: number): PlanetParams {
  * 3D simplex noise: "webgl-noise" by Ian McEwan and Stefan Gustavson (Ashima Arts), MIT licence,
  * https://github.com/ashima/webgl-noise. Returns values in about [-1, 1]. snoiseGrad() also returns
  * the analytic gradient of the same function; snoise() drops it (the compiler removes the unused
- * gradient code).
+ * gradient code). Shared with the nebula layers (Nebula.ts).
  */
-const noiseChunk = /* glsl */ `
+export const noiseChunk = /* glsl */ `
 vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
 vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
 vec4 permute(vec4 x) { return mod289(((x * 34.0) + 1.0) * x); }

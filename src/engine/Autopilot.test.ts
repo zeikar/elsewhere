@@ -8,16 +8,27 @@ import {
   ENCOUNTER_DRIFT_SETTLE_SECONDS,
   ENCOUNTER_FLYBY_DISTANCE,
   ENCOUNTER_INTERVAL_SECONDS,
+  ENCOUNTER_MIN_SPEED_FLOOR,
+  ENCOUNTER_NEBULA_SHARE,
+  ENCOUNTER_NEBULA_SHARE_BOUNDS,
   ENCOUNTER_PLANET_RADIUS,
   ENCOUNTER_SIDE_OFFSET_FACTOR,
   ENCOUNTER_SLOWDOWN_DISTANCE,
+  NEBULA_DESPAWN_DISTANCE,
+  NEBULA_ENCOUNTER_DISTANCE,
+  NEBULA_MIN_SPEED,
+  NEBULA_SIDE_OFFSET_FACTOR,
   SHIP_MAX_TURN_RATE_RAD_PER_S,
   SHIP_SPEED_LEVELS,
 } from '../config';
 import {
   DEFAULT_AUTOPILOT_PARAMS,
+  NEBULA_ENCOUNTER_PROFILE,
   createAutopilotState,
+  defaultNebula,
   defaultPlanet,
+  encounterKind,
+  setCruiseSpeed,
   updateAutopilot,
   type AutopilotParams,
   type AutopilotState,
@@ -107,6 +118,9 @@ const afterEncounters = (n: number) => (_a: Readonly<AutopilotState>, transition
 
 const CYCLE: TravelState[] = ['APPROACH', 'FLYBY', 'DEPARTURE', 'CRUISE'];
 
+/** The default params with every encounter a planet. */
+const PLANETS_ONLY: Readonly<AutopilotParams> = { ...DEFAULT_AUTOPILOT_PARAMS, nebulaShare: 0 };
+
 describe('autopilot config', () => {
   it('the thresholds are consistent', () => {
     expect(ENCOUNTER_INTERVAL_SECONDS).toBeGreaterThan(0);
@@ -126,6 +140,46 @@ describe('autopilot config', () => {
     expect(DEFAULT_AUTOPILOT_PARAMS.profile.despawnDistance).toBe(ENCOUNTER_DESPAWN_DISTANCE);
     expect(DEFAULT_AUTOPILOT_PARAMS.baseSeed).toBe(ENCOUNTER_BASE_SEED);
     expect(defaultPlanet(123).radius).toBe(ENCOUNTER_PLANET_RADIUS);
+    expect(DEFAULT_AUTOPILOT_PARAMS.nebulaShare).toBe(ENCOUNTER_NEBULA_SHARE);
+    expect(DEFAULT_AUTOPILOT_PARAMS.nebula.encounterDistance).toBe(NEBULA_ENCOUNTER_DISTANCE);
+    expect(DEFAULT_AUTOPILOT_PARAMS.nebula.sideOffsetFactor).toBe(NEBULA_SIDE_OFFSET_FACTOR);
+    expect(DEFAULT_AUTOPILOT_PARAMS.nebula.profile).toBe(NEBULA_ENCOUNTER_PROFILE);
+    expect(NEBULA_ENCOUNTER_PROFILE.despawnDistance).toBe(NEBULA_DESPAWN_DISTANCE);
+    expect(NEBULA_ENCOUNTER_PROFILE.spawnScale).toBe(1);
+    expect(defaultNebula(123).radius).toBeGreaterThan(0);
+    const [low, high] = ENCOUNTER_NEBULA_SHARE_BOUNDS;
+    expect(ENCOUNTER_NEBULA_SHARE).toBeGreaterThan(low);
+    expect(ENCOUNTER_NEBULA_SHARE).toBeLessThan(high);
+    expect(low).toBeGreaterThan(0);
+    expect(high).toBeLessThan(1);
+  });
+});
+
+describe('encounterKind', () => {
+  it('is deterministic, and over 1,000 encounter indices both kinds occur at shares within the configured bounds', () => {
+    const [low, high] = ENCOUNTER_NEBULA_SHARE_BOUNDS;
+    for (const baseSeed of [ENCOUNTER_BASE_SEED, 1, 0xdeadbeef, 0x12345678, 2024]) {
+      let nebulae = 0;
+      for (let i = 0; i < 1000; i++) {
+        const seed = hash(baseSeed, i);
+        const kind = encounterKind(seed, ENCOUNTER_NEBULA_SHARE);
+        expect(encounterKind(seed, ENCOUNTER_NEBULA_SHARE)).toBe(kind);
+        if (kind === 'nebula') nebulae++;
+      }
+      const share = nebulae / 1000;
+      expect(share, `base seed ${baseSeed}`).toBeGreaterThanOrEqual(low);
+      expect(share, `base seed ${baseSeed}`).toBeLessThanOrEqual(high);
+      expect(1 - share, `base seed ${baseSeed}: planets`).toBeGreaterThan(0);
+    }
+  });
+
+  it('a share of 0 gives only planets and 1 only nebulae; the first default encounter is a planet', () => {
+    for (let i = 0; i < 200; i++) {
+      const seed = hash(ENCOUNTER_BASE_SEED, i);
+      expect(encounterKind(seed, 0)).toBe('planet');
+      expect(encounterKind(seed, 1)).toBe('nebula');
+    }
+    expect(encounterKind(hash(ENCOUNTER_BASE_SEED, 0), ENCOUNTER_NEBULA_SHARE)).toBe('planet');
   });
 });
 
@@ -168,7 +222,7 @@ describe('updateAutopilot', () => {
   it('plans the encounter along the ship heading with the next index and seed', () => {
     const ship = createShipState({ time: 77, speed: 60, position: { x: 1e6, y: -3e5, z: 2e7 } });
     const state = { ...createAutopilotState(), cruiseTime: ENCOUNTER_INTERVAL_SECONDS, encounterCount: 4 };
-    const next = updateAutopilot(state, ship, 1 / 60);
+    const next = updateAutopilot(state, ship, 1 / 60, PLANETS_ONLY);
     expect(next.state).toBe('APPROACH');
     expect(next.encounterCount).toBe(5);
     // The encounter starts one frame late; that lateness is kept for the next cruise.
@@ -176,7 +230,8 @@ describe('updateAutopilot', () => {
     const encounter = next.encounter!;
     expect(encounter.index).toBe(4);
     expect(encounter.seed).toBe(hash(ENCOUNTER_BASE_SEED, 4));
-    expect(encounter.planet.radius).toBe(ENCOUNTER_PLANET_RADIUS);
+    expect(encounter.kind).toBe('planet');
+    expect(encounter.kind === 'planet' && encounter.planet.radius).toBe(ENCOUNTER_PLANET_RADIUS);
     expect(encounter.plan.radius).toBe(ENCOUNTER_PLANET_RADIUS);
     expect(encounter.plan.origin).toEqual(ship.position);
     expect(angleBetween(encounter.plan.direction, ship.heading)).toBeLessThan(1e-12);
@@ -190,7 +245,7 @@ describe('updateAutopilot', () => {
   it('uses the planet chosen for the seed (hook for seeded planets)', () => {
     const seen: number[] = [];
     const params: AutopilotParams = {
-      ...DEFAULT_AUTOPILOT_PARAMS,
+      ...PLANETS_ONLY,
       planetFor: (seed) => {
         seen.push(seed);
         return { radius: 333 };
@@ -201,6 +256,119 @@ describe('updateAutopilot', () => {
     expect(seen).toEqual([hash(ENCOUNTER_BASE_SEED, 0)]);
     expect(next.encounter!.plan.radius).toBe(333);
     expect(next.encounter!.plan.closestDistance).toBe(333 * ENCOUNTER_SIDE_OFFSET_FACTOR);
+  });
+});
+
+describe('nebula encounters', () => {
+  const NEBULAE_ONLY: Readonly<AutopilotParams> = { ...DEFAULT_AUTOPILOT_PARAMS, nebulaShare: 1 };
+
+  it('plan a nebula with its own D and side offset, chosen for the seed', () => {
+    const seen: number[] = [];
+    const params: AutopilotParams = {
+      ...NEBULAE_ONLY,
+      planetFor: () => {
+        throw new Error('planetFor called for a nebula');
+      },
+      nebulaFor: (seed) => {
+        seen.push(seed);
+        return { radius: 250 };
+      },
+    };
+    const ship = createShipState({ speed: 60, position: { x: -4e8, y: 2e3, z: 7e9 } });
+    const state = { ...createAutopilotState(params), cruiseTime: ENCOUNTER_INTERVAL_SECONDS, encounterCount: 2 };
+    const next = updateAutopilot(state, ship, 1 / 60, params);
+    expect(next.state).toBe('APPROACH');
+    const encounter = next.encounter!;
+    expect(encounter.kind).toBe('nebula');
+    expect(encounter.kind === 'nebula' && encounter.nebula).toEqual({ radius: 250 });
+    expect(seen).toEqual([hash(ENCOUNTER_BASE_SEED, 2)]);
+    expect(encounter.plan.radius).toBe(250);
+    expect(encounter.plan.closestDistance).toBe(250 * NEBULA_SIDE_OFFSET_FACTOR);
+    expect(encounter.plan.spawnDistance).toBe(NEBULA_ENCOUNTER_DISTANCE);
+    expect(next.remaining).toBeCloseTo(NEBULA_ENCOUNTER_DISTANCE, 6);
+    expect(next.fade).toBe(0);
+    expect(next.targetSpeed).toBe(DEFAULT_AUTOPILOT_PARAMS.cruiseSpeed);
+  });
+
+  it.each(SHIP_SPEED_LEVELS.flatMap((cruiseSpeed) => [1 / 60, 1 / 120].map((dt) => ({ cruiseSpeed, dt }))))(
+    'go through the full state sequence and return to cruise speed (cruise $cruiseSpeed, dt $dt)',
+    ({ cruiseSpeed, dt }) => {
+      const params: AutopilotParams = { ...NEBULAE_ONLY };
+      setCruiseSpeed(params, cruiseSpeed);
+      let worstFadeStep = 0;
+      let worstHeldAngle = 0;
+      let slowest = Number.POSITIVE_INFINITY;
+      let minClearance = Number.POSITIVE_INFINITY;
+      const rel = { x: 0, y: 0, z: 0 };
+      let end: { shipSpeed: number; targetSpeed: number; fade: number; driftRate: number } | null = null;
+      const { transitions } = simulate(dt, {
+        params,
+        until: afterEncounters(1),
+        onFrame: ({ ship, prevAutopilot, autopilot }) => {
+          worstFadeStep = Math.max(worstFadeStep, Math.abs(autopilot.fade - prevAutopilot.fade));
+          const encounter = autopilot.encounter;
+          if (encounter !== null) {
+            expect(encounter.kind).toBe('nebula');
+            slowest = Math.min(slowest, ship.speed);
+            minClearance = Math.min(minClearance, len(encounterOffset(encounter.plan, ship.position, rel)));
+            if (autopilot.state === 'APPROACH' || autopilot.state === 'FLYBY') {
+              worstHeldAngle = Math.max(worstHeldAngle, angleBetween(ship.heading, encounter.plan.direction));
+            }
+          }
+          if (autopilot.state === 'CRUISE' && prevAutopilot.state === 'DEPARTURE') {
+            end = { shipSpeed: ship.speed, targetSpeed: autopilot.targetSpeed, fade: autopilot.fade, driftRate: autopilot.driftRate };
+          }
+        },
+      });
+      expect(transitions.map((t) => t.to)).toEqual(CYCLE);
+      expect(transitions.map((t) => t.encounterIndex)).toEqual([0, 0, 0, 0]);
+      // Slows for the nebula (to the scaled minimum, floored), and is back at cruise speed by the end.
+      const minSpeed = Math.min(cruiseSpeed, Math.max(NEBULA_MIN_SPEED * (cruiseSpeed / DEFAULT_AUTOPILOT_PARAMS.cruiseSpeed), ENCOUNTER_MIN_SPEED_FLOOR));
+      expect(slowest).toBeLessThan(minSpeed * 1.25);
+      expect(end).not.toBeNull();
+      expect(end!.targetSpeed).toBe(cruiseSpeed);
+      // Within 2% of it (within 1% at the default speed; the top speed covers the margin after the
+      // speed-up in fewer time constants, as it does for planets).
+      const tolerance = cruiseSpeed === DEFAULT_AUTOPILOT_PARAMS.cruiseSpeed ? 0.01 : 0.02;
+      expect(Math.abs(end!.shipSpeed - cruiseSpeed) / cruiseSpeed).toBeLessThan(tolerance);
+      expect(end!.fade).toBe(0);
+      expect(end!.driftRate).toBe(1);
+      // Heading held, fades gradual, and clear of the core.
+      expect(worstHeldAngle).toBe(0);
+      expect(worstFadeStep).toBeLessThan(0.02);
+      const radius = defaultNebula(0).radius;
+      expect(minClearance).toBeCloseTo(radius * NEBULA_SIDE_OFFSET_FACTOR, 3);
+    },
+  );
+
+  it('with the default share, planets and nebulae alternate by seed, each through the full cycle', () => {
+    const kinds: string[] = [];
+    const { transitions } = simulate(1 / 60, {
+      until: afterEncounters(6),
+      maxSeconds: 4000,
+      onFrame: ({ prevAutopilot, autopilot }) => {
+        if (autopilot.state === 'APPROACH' && prevAutopilot.state === 'CRUISE') kinds.push(autopilot.encounter!.kind);
+      },
+    });
+    expect(transitions.map((t) => t.to)).toEqual(Array.from({ length: 6 }, () => CYCLE).flat());
+    expect(kinds).toEqual(
+      Array.from({ length: 6 }, (_, i) => encounterKind(hash(ENCOUNTER_BASE_SEED, i), ENCOUNTER_NEBULA_SHARE)),
+    );
+    expect(new Set(kinds)).toEqual(new Set(['planet', 'nebula']));
+  });
+
+  it('setCruiseSpeed scales the nebula profile like the planet one and keeps its distances', () => {
+    for (const speed of SHIP_SPEED_LEVELS) {
+      const params: AutopilotParams = { ...DEFAULT_AUTOPILOT_PARAMS };
+      setCruiseSpeed(params, speed);
+      const factor = speed / DEFAULT_AUTOPILOT_PARAMS.cruiseSpeed;
+      expect({ ...params.nebula.profile, minSpeed: 0 }).toEqual({ ...NEBULA_ENCOUNTER_PROFILE, minSpeed: 0 });
+      expect(params.nebula.profile.minSpeed).toBeCloseTo(
+        Math.min(speed, Math.max(NEBULA_MIN_SPEED * factor, ENCOUNTER_MIN_SPEED_FLOOR)),
+        12,
+      );
+      expect(params.nebula.encounterDistance).toBe(NEBULA_ENCOUNTER_DISTANCE);
+    }
   });
 });
 
@@ -255,7 +423,7 @@ describe('autopilot simulation', () => {
         const rel0 = { x: 0, y: 0, z: 0 };
         const rel1 = { x: 0, y: 0, z: 0 };
         simulate(dt, {
-          params: { cruiseSpeed, planetFor: () => ({ radius }) },
+          params: { cruiseSpeed, nebulaShare: 0, planetFor: () => ({ radius }) },
           until: afterEncounters(1),
           onFrame: ({ prev, ship, prevAutopilot, autopilot }) => {
             // No camera jump: per-frame displacement within speed × 0.1 s (and within the exact bound).

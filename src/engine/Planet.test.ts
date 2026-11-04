@@ -144,14 +144,14 @@ describe('planetParams', () => {
   });
 
   it('plugs into the autopilot as planetFor: the encounter uses the seeded radius', () => {
-    const params = { ...DEFAULT_AUTOPILOT_PARAMS, interval: 1, driftSettleTime: 0.5, planetFor: planetParams };
+    const params = { ...DEFAULT_AUTOPILOT_PARAMS, interval: 1, driftSettleTime: 0.5, nebulaShare: 0, planetFor: planetParams };
     const ship = createShipState();
     let state = createAutopilotState(params);
     for (let i = 0; i < 20 && state.encounter === null; i++) state = updateAutopilot(state, ship, 0.1, params);
     const encounter = state.encounter!;
     expect(encounter).not.toBeNull();
     const expected = planetParams(hash(ENCOUNTER_BASE_SEED, 0));
-    expect(encounter.planet).toEqual(expected);
+    expect(encounter.kind === 'planet' && encounter.planet).toEqual(expected);
     expect(encounter.plan.radius).toBe(expected.radius);
     expect(encounter.plan.closestDistance).toBeCloseTo(expected.radius * ENCOUNTER_SIDE_OFFSET_FACTOR, 9);
   });

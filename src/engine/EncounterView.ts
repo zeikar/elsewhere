@@ -1,33 +1,37 @@
 /**
- * Encounter view: puts the Autopilot's encounter planet into the scene (docs/PLAN.md section 6,
- * floating origin, Planets and Performance).
+ * Encounter view: puts the Autopilot's encounter object, a planet or a nebula, into the scene
+ * (docs/PLAN.md section 6, floating origin, Planets, Nebulae and Performance).
  *
- * - Lifecycle: the planet is created when an encounter starts (the step that enters APPROACH) and
- *   disposed once it ends (DEPARTURE back to CRUISE). The shared planet geometry is reference-counted
- *   by `Planet`, so it is freed with the last live planet and GPU memory returns to its
- *   pre-encounter baseline.
- * - Shader warm-up: disposing a planet frees its shader programs, so each new planet's programs are
- *   compiled again. The view hands the new planet to a `compile` function (the engine passes
+ * - Both kinds sit behind one small interface (`EncounterObject`: a root object, fade, size scale,
+ *   per-frame update and dispose), so the lifecycle, warm-up and placement below are shared.
+ * - Lifecycle: the object is created when an encounter starts (the step that enters APPROACH) and
+ *   disposed once it ends (DEPARTURE back to CRUISE). The shared planet sphere and nebula plane are
+ *   reference-counted by `Planet` and `Nebula`, so each is freed with the last live object holding it
+ *   and GPU memory returns to its pre-encounter baseline.
+ * - Shader warm-up: disposing an object frees its shader programs, so each new object's programs are
+ *   compiled again. The view hands the new object to a `compile` function (the engine passes
  *   `renderer.compileAsync`, which compiles in parallel where `KHR_parallel_shader_compile` is
  *   available) and keeps it hidden, at fade 0, until that settles, so the first frame that draws it
- *   does not stall on compilation. A failed compile falls back to showing the planet anyway.
- * - Placement (floating origin): each frame the planet's render position is `planet - ship`, computed
- *   in float64 on the CPU from the encounter plan and written into the planet's preallocated
+ *   does not stall on compilation. A failed compile falls back to showing the object anyway.
+ * - Placement (floating origin): each frame the object's render position is `centre - ship`, computed
+ *   in float64 on the CPU from the encounter plan and written into its preallocated
  *   `object.position`. Large absolute coordinates never reach the GPU.
- * - Opacity and size follow the encounter fade curves; the rotation follows simulation time, so it
- *   freezes with the simulation while paused.
+ * - Opacity and size follow the encounter fade curves; `update` takes the simulation time (the
+ *   planet's rotation, the nebula's churn and per-layer near fade), so it freezes while paused.
  *
- * Nothing is allocated per frame; creating a planet (once per encounter) allocates its materials.
+ * Nothing is allocated per frame; creating an object (once per encounter) allocates its materials.
  */
 import type { Object3D, Vector3 } from 'three';
 import { PLANET_ENCOUNTER_LIGHT } from '../config';
-import type { ActiveEncounter, AutopilotState } from './Autopilot';
+import type { AutopilotState, NebulaEncounter, PlanetEncounter } from './Autopilot';
 import { encounterOffset, encounterScale, type Encounter, type EncounterProfile } from './encounter';
+import { Nebula, nebulaParams, type NebulaParams } from './Nebula';
 import { Planet, planetParams, type PlanetParams } from './Planet';
 import type { ShipState, Vec3 } from './Ship';
 
 /**
- * Writes the planet's render position, `planet centre - ship position`, into `out` and returns it.
+ * Writes the encounter object's render position, `centre - ship position`, into `out` and returns
+ * it (planets and nebulae alike).
  *
  * The difference is taken in float64 from the encounter plan (see `encounterOffset`), so it stays
  * small (within the encounter distances) and exact even with ship positions around 1e12, and the
@@ -65,81 +69,128 @@ export function encounterLightDirection(plan: Readonly<Encounter>, out: Vec3): V
  * Seeded planet parameters for an encounter. The drawn radius is always the planned one, so the
  * clearance the plan guarantees (`radius × k`) holds whatever chose the planet.
  */
-export function encounterPlanetParams(encounter: Readonly<ActiveEncounter>): PlanetParams {
+export function encounterPlanetParams(encounter: Readonly<PlanetEncounter>): PlanetParams {
   const params = planetParams(encounter.seed);
   return params.radius === encounter.plan.radius ? params : { ...params, radius: encounter.plan.radius };
 }
 
 /**
- * Prepares a new planet's shaders before it is first drawn (the engine passes
- * `(object) => renderer.compileAsync(object, camera, scene)`). The planet stays hidden until the
+ * Seeded nebula parameters for an encounter, with the planned core radius (as for planets, so the
+ * planned clearance holds whatever chose the nebula). A different radius scales the whole layout.
+ */
+export function encounterNebulaParams(encounter: Readonly<NebulaEncounter>): NebulaParams {
+  const params = nebulaParams(encounter.seed);
+  const radius = encounter.plan.radius;
+  if (params.radius === radius) return params;
+  const k = radius / params.radius;
+  return {
+    ...params,
+    radius,
+    layers: params.layers.map((layer) => ({
+      ...layer,
+      offset: [layer.offset[0] * k, layer.offset[1] * k, layer.offset[2] * k] as const,
+      halfSize: layer.halfSize * k,
+    })),
+  };
+}
+
+/** What the view needs from an encounter object; `Planet` and `Nebula` both provide it. */
+export interface EncounterObject {
+  /** Root object in the scene; its position is the object's centre relative to the ship. */
+  readonly object: Object3D;
+  /** Encounter opacity in [0, 1]; at 0 nothing is drawn. */
+  setFade(opacity: number): void;
+  /** Encounter size scale. */
+  setScale(scale: number): void;
+  /** Per-frame update at the ship's simulation time, after the position, fade and scale are set. */
+  update(time: number): void;
+  dispose(): void;
+}
+
+/**
+ * Prepares a new encounter object's shaders before it is first drawn (the engine passes
+ * `(object) => renderer.compileAsync(object, camera, scene)`). The object stays hidden until the
  * returned promise settles.
  */
-export type PlanetCompiler = (object: Object3D) => PromiseLike<unknown>;
+export type EncounterCompiler = (object: Object3D) => PromiseLike<unknown>;
 
 export class EncounterView {
   private readonly scene: Object3D;
-  private readonly compile: PlanetCompiler | null;
-  private planet: Planet | null = null;
-  /** Encounter index of `planet`. */
+  private readonly compile: EncounterCompiler | null;
+  private current: EncounterObject | null = null;
+  /** Encounter index of `current`. */
   private index = -1;
-  /** Whether `planet`'s shaders are ready, so it may be drawn (always true without a compiler). */
+  /** Whether `current`'s shaders are ready, so it may be drawn (always true without a compiler). */
   private ready = false;
   /** Scratch light direction, reused for every planet. */
   private readonly light: Vec3 = { x: 0, y: 0, z: 0 };
 
-  constructor(scene: Object3D, compile: PlanetCompiler | null = null) {
+  constructor(scene: Object3D, compile: EncounterCompiler | null = null) {
     this.scene = scene;
     this.compile = compile;
   }
 
+  /** The current encounter object, planet or nebula, or `null` (read-only view; do not modify). */
+  getObject(): EncounterObject | null {
+    return this.current;
+  }
+
   /** The planet of the current encounter, or `null` (read-only view; do not modify). */
   getPlanet(): Planet | null {
-    return this.planet;
+    return this.current instanceof Planet ? this.current : null;
+  }
+
+  /** The nebula of the current encounter, or `null` (read-only view; do not modify). */
+  getNebula(): Nebula | null {
+    return this.current instanceof Nebula ? this.current : null;
   }
 
   /**
-   * Creates the planet when an encounter starts and disposes it once the encounter ends (or is
-   * replaced by another). Call after each simulation step.
+   * Creates the planet or nebula when an encounter starts and disposes it once the encounter ends
+   * (or is replaced by another). Call after each simulation step.
    */
   sync(autopilot: Readonly<AutopilotState>): void {
     const encounter = autopilot.encounter;
-    if (this.planet !== null && (encounter === null || encounter.index !== this.index)) this.release();
-    if (encounter === null || this.planet !== null) return;
-    const planet = new Planet(encounterPlanetParams(encounter), encounterLightDirection(encounter.plan, this.light));
-    planet.setFade(0);
-    this.planet = planet;
+    if (this.current !== null && (encounter === null || encounter.index !== this.index)) this.release();
+    if (encounter === null || this.current !== null) return;
+    const created: EncounterObject =
+      encounter.kind === 'nebula'
+        ? new Nebula(encounterNebulaParams(encounter), encounter.plan)
+        : new Planet(encounterPlanetParams(encounter), encounterLightDirection(encounter.plan, this.light));
+    created.setFade(0);
+    this.current = created;
     this.index = encounter.index;
-    this.scene.add(planet.object);
-    this.warmUp(planet);
+    this.scene.add(created.object);
+    this.warmUp(created);
   }
 
   /**
-   * Places the planet relative to the ship (floating origin) and applies the encounter's fade, size
-   * scale and the rotation at the ship's simulation time. Allocates nothing; call before each render.
+   * Places the object relative to the ship (floating origin) and applies the encounter's fade, size
+   * scale and the update at the ship's simulation time. `profile` is the encounter's own profile
+   * (`encounterProfile(params, kind)`). Allocates nothing; call before each render.
    */
   place(autopilot: Readonly<AutopilotState>, ship: Readonly<ShipState>, profile: Readonly<EncounterProfile>): void {
-    const planet = this.planet;
+    const current = this.current;
     const encounter = autopilot.encounter;
-    if (planet === null || encounter === null || encounter.index !== this.index) return;
-    planetRenderPosition(encounter.plan, ship.position, planet.object.position);
+    if (current === null || encounter === null || encounter.index !== this.index) return;
+    planetRenderPosition(encounter.plan, ship.position, current.object.position);
     // Hidden until its shaders are ready (the fade is still about 1e-4 by then).
-    planet.setFade(this.ready ? autopilot.fade : 0);
-    planet.setScale(encounterScale(encounter.plan, autopilot.remaining, profile));
-    planet.update(ship.time);
+    current.setFade(this.ready ? autopilot.fade : 0);
+    current.setScale(encounterScale(encounter.plan, autopilot.remaining, profile));
+    current.update(ship.time);
   }
 
-  /** Disposes the planet, if any (which frees the shared geometry once no planet holds it). */
+  /** Disposes the object, if any (which frees its shared geometry once nothing holds it). */
   dispose(): void {
     this.release();
   }
 
   /**
-   * Starts compiling `planet`'s shaders and marks it ready once that settles, whether it succeeds
+   * Starts compiling `object`'s shaders and marks it ready once that settles, whether it succeeds
    * or fails (a failure only means the first frame may compile synchronously, as without warm-up).
-   * A planet released meanwhile is left alone: only the current planet is ever marked ready.
+   * An object released meanwhile is left alone: only the current object is ever marked ready.
    */
-  private warmUp(planet: Planet): void {
+  private warmUp(object: EncounterObject): void {
     const compile = this.compile;
     if (compile === null) {
       this.ready = true;
@@ -147,11 +198,11 @@ export class EncounterView {
     }
     this.ready = false;
     const settle = (): void => {
-      if (this.planet === planet) this.ready = true;
+      if (this.current === object) this.ready = true;
     };
     let pending: PromiseLike<unknown>;
     try {
-      pending = compile(planet.object);
+      pending = compile(object.object);
     } catch {
       settle();
       return;
@@ -160,9 +211,9 @@ export class EncounterView {
   }
 
   private release(): void {
-    if (this.planet === null) return;
-    this.planet.dispose();
-    this.planet = null;
+    if (this.current === null) return;
+    this.current.dispose();
+    this.current = null;
     this.index = -1;
     this.ready = false;
   }
