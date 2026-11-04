@@ -65,7 +65,7 @@ Each automated check is written as `file` — `test title`, using the title as i
 - `src/engine/EncounterView.test.ts` — `keeps a new planet hidden until its compile settles, then follows the fade`
 - `src/engine/EncounterView.test.ts` — `keeps a new nebula hidden until its compile settles`
 - `e2e/encounter.spec.ts` — `three encounters run CRUISE → APPROACH → FLYBY → DEPARTURE → CRUISE and free their GPU resources`
-- Manual: watch a few encounters, either on the live site (the first planet appears within about a minute) or on the e2e build with a short interval (`npm run build:e2e && npx vite preview --outDir dist-e2e`, then open `/elsewhere/?encounterInterval=5`). Stars, planets and nebulae should fade in and out with no visible pop. Smoothness on screen is a visual judgement.
+- Manual: watch a few encounters, either on the live site (the first planet appears within about a minute) or on the e2e build with a short interval (`npm run build:e2e && npx vite preview --outDir dist-e2e`, then open `/elsewhere/?encounterInterval=5`). Stars, planets and nebulae should fade in and out with no visible pop. Smoothness on screen is a visual judgement. The `Starfield.test.ts` checks above test `starFade` in `src/engine/Starfield.ts`, the TypeScript mirror of the shader's star fade, so the GLSL that actually runs on the GPU is covered only by this manual step.
 
 ## 7. Fullscreen, pause, speed change and keyboard shortcuts work.
 
@@ -113,7 +113,7 @@ Each automated check is written as `file` — `test title`, using the title as i
 ## 12. After 30 minutes, memory and FPS have not degraded noticeably.
 
 - `e2e/soak/soak.spec.ts` — `soak: ${SOAK_MINUTES} min, heap, frame time and GPU resources stay stable`
-- `.github/workflows/ci.yml` (the `soak` job runs the soak for 3 minutes on every push and pull request)
+- `.github/workflows/ci.yml` (the `soak` job runs the soak for 3 minutes on every pull request and on every push to `main`)
 - `.github/workflows/soak.yml` (the full run, started by hand, 30 minutes by default)
 - `e2e/acceleratedEncounters.spec.ts` — `ten encounters, accelerated with a fake clock, leave the GPU resources at their baseline every time`
 - `e2e/starfield.spec.ts` — `soak: GPU resources stay constant and the JS heap does not grow`

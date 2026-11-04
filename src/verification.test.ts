@@ -41,8 +41,10 @@ function checklistItems(plan: string): string[] {
 }
 
 const HEADING = /^## (\d+)\. (.+)$/;
-/** "- `path`", optionally followed by " — `test title`". */
-const REF = /^- `([^`]+)`(?: — `([^`]+)`)?/;
+/** "- `path`", optionally followed by " — `test title`" or by " (a note)", and nothing else. */
+const REF = /^- `([^`]+)`(?: — `([^`]+)`| \(.+\))?$/;
+/** Any bullet, in any form or indent, so a wrong form lands in `unparsed` instead of being skipped. */
+const LIST_LINE = /^\s*[-*+] /;
 const MANUAL = /^- Manual: \S/;
 
 /** The numbered sections of VERIFICATION.md with their references and manual steps. */
@@ -56,7 +58,7 @@ function parseMapping(markdown: string): MappedItem[] {
       if (current) items.push(current);
       continue;
     }
-    if (current === null || !line.startsWith('- ')) continue;
+    if (current === null || !LIST_LINE.test(line)) continue;
     const ref = REF.exec(line);
     if (ref) current.refs.push({ path: ref[1]!, title: ref[2] ?? null });
     else if (MANUAL.test(line)) current.manualSteps++;
@@ -100,6 +102,24 @@ describe('verification mapping parser', () => {
         unparsed: ['- a stray line'],
       },
     ]);
+  });
+
+  it('puts a reference with a mistyped separator in unparsed instead of dropping its title', () => {
+    const markdown = ['## 1. First.', '- `src/a.test.ts` - `no such test`', '- `src/a.test.ts` -- `no such test`', '- `src/a.test.ts` trailing text'].join('\n');
+    expect(parseMapping(markdown)).toEqual([
+      {
+        number: 1,
+        text: 'First.',
+        refs: [],
+        manualSteps: 0,
+        unparsed: ['- `src/a.test.ts` - `no such test`', '- `src/a.test.ts` -- `no such test`', '- `src/a.test.ts` trailing text'],
+      },
+    ]);
+  });
+
+  it('puts other bullet forms and indented bullets in unparsed', () => {
+    const markdown = ['## 1. First.', '* `src/a.test.ts` — `does a`', '+ Manual: look at it.', '  - `src/a.test.ts` — `does a`'].join('\n');
+    expect(parseMapping(markdown)[0]?.unparsed).toEqual(['* `src/a.test.ts` — `does a`', '+ Manual: look at it.', '  - `src/a.test.ts` — `does a`']);
   });
 
   it('matches a title only as a whole string literal', () => {
