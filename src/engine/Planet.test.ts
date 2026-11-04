@@ -2,13 +2,13 @@ import { Mesh, type ShaderMaterial, Texture } from 'three';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CAMERA_FAR,
+  CAMERA_FOV_DEG,
   ENCOUNTER_BASE_SEED,
   ENCOUNTER_CLEARANCE_MARGIN,
   ENCOUNTER_DISTANCE,
   ENCOUNTER_PLANET_RADIUS,
   ENCOUNTER_SIDE_OFFSET_FACTOR,
   ENCOUNTER_SLOWDOWN_DISTANCE,
-  ENCOUNTER_SPAWN_SCALE,
   PLANET_GAS_RANGES,
   PLANET_GAS_SHARE,
   PLANET_NOISE_OFFSET_RANGE,
@@ -68,14 +68,47 @@ describe('planet config', () => {
   });
 
   it('radii fit the encounter plan: far inside the spawn distance and the far plane', () => {
-    // At spawn the planet is a distant dot: its spawn-scaled angular radius is under about 1°.
-    expect((ENCOUNTER_SPAWN_SCALE * maxRadius) / ENCOUNTER_DISTANCE).toBeLessThan(0.018);
     // Its whole sphere starts beyond the slowdown, so the encounter starts at cruise speed.
     expect(ENCOUNTER_DISTANCE - maxRadius).toBeGreaterThan(ENCOUNTER_SLOWDOWN_DISTANCE);
     expect(ENCOUNTER_DISTANCE + maxRadius * (ENCOUNTER_SIDE_OFFSET_FACTOR + 1)).toBeLessThan(CAMERA_FAR);
     // The placeholder radius the autopilot uses today lies inside the seeded range.
     expect(ENCOUNTER_PLANET_RADIUS).toBeGreaterThanOrEqual(minRadius);
     expect(ENCOUNTER_PLANET_RADIUS).toBeLessThanOrEqual(maxRadius);
+  });
+
+  it('at spawn, at full size, a median-radius planet spans at most 3% of the view height and the largest at most 5%', () => {
+    // Median radius of the seeded draw: a planet is gas with probability PLANET_GAS_SHARE, and its
+    // radius is uniform over its type's range. Found by bisection on the mixture's CDF.
+    const uniformCdf = ([min, max]: readonly [number, number], r: number) => Math.min(1, Math.max(0, (r - min) / (max - min)));
+    const cdf = (r: number) =>
+      (1 - PLANET_GAS_SHARE) * uniformCdf(PLANET_ROCKY_RANGES.radius, r) + PLANET_GAS_SHARE * uniformCdf(PLANET_GAS_RANGES.radius, r);
+    let low = minRadius;
+    let high = maxRadius;
+    for (let i = 0; i < 60; i++) {
+      const mid = (low + high) / 2;
+      if (cdf(mid) < 0.5) low = mid;
+      else high = mid;
+    }
+    const medianRadius = (low + high) / 2;
+    // The seeded draw agrees with that median.
+    const drawn = SEEDS.map((seed) => planetParams(seed).radius).sort((a, b) => a - b);
+    expect(Math.abs(drawn[drawn.length / 2]! - medianRadius) / medianRadius).toBeLessThan(0.05);
+
+    /**
+     * Projected diameter, as a fraction of the view height, of a planet of radius `r` at spawn: its
+     * centre is D ahead and r × k to the side, it is drawn at its full radius (the size scale is 1
+     * throughout), and the side offset is taken as vertical, the worst case for the height.
+     */
+    const spawnDiameter = (r: number) => {
+      const centre = Math.hypot(ENCOUNTER_DISTANCE, r * ENCOUNTER_SIDE_OFFSET_FACTOR);
+      const half = Math.asin(r / centre);
+      const offAxis = Math.atan2(r * ENCOUNTER_SIDE_OFFSET_FACTOR, ENCOUNTER_DISTANCE);
+      const tanHalfFov = Math.tan(((CAMERA_FOV_DEG / 2) * Math.PI) / 180);
+      return (Math.tan(offAxis + half) - Math.tan(offAxis - half)) / (2 * tanHalfFov);
+    };
+    // About 32 px at 1080p for the median radius, about 54 px for the largest.
+    expect(spawnDiameter(medianRadius)).toBeLessThanOrEqual(0.03);
+    expect(spawnDiameter(maxRadius)).toBeLessThanOrEqual(0.05);
   });
 
   it('the atmosphere shell stays inside the guaranteed clearance, so the camera never enters it', () => {

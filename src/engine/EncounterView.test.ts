@@ -211,10 +211,12 @@ describe('EncounterView', () => {
         const c = encounter.plan.center;
         const s = travel.ship.position;
         expect(dist(p, { x: c.x - s.x, y: c.y - s.y, z: c.z - s.z })).toBeLessThan(1e-6);
-        // Opacity and scale follow the fade curves.
+        // Opacity follows the fade curve, and the planet keeps its world size (its full radius)
+        // from spawn to despawn, so only perspective changes its size on screen.
         const remaining = travel.autopilot.remaining;
         expect(planet.uniforms.uOpacity.value).toBeCloseTo(encounterOpacity(encounter.plan, remaining), 12);
-        expect(planet.object.scale.x).toBeCloseTo(planet.params.radius * encounterScale(encounter.plan, remaining), 9);
+        expect(encounterScale(encounter.plan, remaining)).toBe(1);
+        expect(planet.object.scale.toArray()).toEqual([planet.params.radius, planet.params.radius, planet.params.radius]);
         expect(planet.object.visible).toBe(travel.autopilot.fade > 0);
         fadeChecks++;
       }
@@ -551,10 +553,10 @@ describe('the travel step', () => {
       // Fades in and out gradually: no frame changes the opacity by more than 2%.
       expect(worstFadeStep).toBeGreaterThan(0);
       expect(worstFadeStep).toBeLessThan(0.02);
-      // Slows to the floor, not below it, so it does not crawl: one encounter takes about 195 s
-      // (about 250 s with the unfloored minimum of 5).
+      // Slows to the floor, not below it, so it does not crawl: one encounter takes about 235 s
+      // (about 290 s with the unfloored minimum of 5).
       expect(slowest).toBeCloseTo(ENCOUNTER_MIN_SPEED_FLOOR, 9);
-      expect(endedAt - startedAt).toBeLessThan(210);
+      expect(endedAt - startedAt).toBeLessThan(250);
     },
   );
 

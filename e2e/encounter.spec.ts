@@ -17,7 +17,7 @@ const APP_PATH = '/elsewhere/';
 /** A pixel counts as lit when its brightest channel is above this (0–255). */
 const LIT_THRESHOLD = 16;
 
-// A full encounter is about 30–80 s of simulated travel, and SwiftShader renders well under 10 fps,
+// A full encounter is about 35–95 s of simulated travel, and SwiftShader renders well under 10 fps,
 // where the dt cap makes simulated time run slower than real time. Each test sets its own, long
 // timeout; this is the floor for the file.
 test.describe.configure({ timeout: 300_000 });
