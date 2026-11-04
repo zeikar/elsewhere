@@ -97,3 +97,28 @@ export const STAR_MAX_STREAK_PX = 360;
 
 /** Seed for the star layout, so every run starts from the same sky. */
 export const STAR_SEED = 0x5eed_57a2;
+
+/*
+ * Reduced motion (docs/PLAN.md section 7): under `prefers-reduced-motion: reduce`, travel starts at a
+ * slower speed level with shorter streaks. The user can still raise the speed from there.
+ */
+
+/** Index into SHIP_SPEED_LEVELS used when travel starts with reduced motion. */
+export const REDUCED_MOTION_SPEED_LEVEL = 0;
+
+/** Streak time, in seconds, with reduced motion (see STAR_STREAK_TIME_SECONDS). */
+export const REDUCED_MOTION_STREAK_TIME_SECONDS = 0.03;
+
+export interface InitialSpeedSettings {
+  /** Index into SHIP_SPEED_LEVELS that travel starts at. */
+  speedLevel: number;
+  /** Starfield streak time, in seconds. */
+  streakTime: number;
+}
+
+/** Starting speed level and streak time, depending on whether the user prefers reduced motion. */
+export function initialSpeedSettings(prefersReducedMotion: boolean): InitialSpeedSettings {
+  return prefersReducedMotion
+    ? { speedLevel: REDUCED_MOTION_SPEED_LEVEL, streakTime: REDUCED_MOTION_STREAK_TIME_SECONDS }
+    : { speedLevel: SHIP_DEFAULT_SPEED_LEVEL, streakTime: STAR_STREAK_TIME_SECONDS };
+}
