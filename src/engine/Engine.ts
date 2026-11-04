@@ -30,10 +30,13 @@ export class Engine {
   /** Scratch look-at target, reused every frame. */
   private readonly lookTarget = new Vector3();
   private resizeObserver: ResizeObserver | null = null;
+  /** Matches only the current devicePixelRatio; re-registered after each change. */
+  private dprQuery: MediaQueryList | null = null;
 
   private speedLevel: number = SHIP_DEFAULT_SPEED_LEVEL;
   private paused = false;
   private running = false;
+  private disposed = false;
   private rafId = 0;
   private frameCount = 0;
   private appliedDpr = 1;
@@ -50,15 +53,16 @@ export class Engine {
     this.applyHeading();
   }
 
-  /** Attaches resize and visibility handling and starts travelling. Call once. */
+  /** Attaches resize and visibility handling and starts travelling. Call once; no-op after dispose(). */
   start(): void {
-    if (this.running) return;
+    if (this.running || this.disposed) return;
     this.running = true;
     window.addEventListener('resize', this.resize);
     if (typeof ResizeObserver !== 'undefined') {
       this.resizeObserver = new ResizeObserver(this.resize);
       this.resizeObserver.observe(this.canvas);
     }
+    this.watchDpr();
     document.addEventListener('visibilitychange', this.onVisibilityChange);
     if (document.visibilityState === 'hidden') this.clock.hide();
     this.resize();
@@ -67,11 +71,15 @@ export class Engine {
 
   /** Stops the loop, detaches listeners and releases GPU resources. */
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
     this.running = false;
     this.cancelFrame();
     window.removeEventListener('resize', this.resize);
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
+    this.dprQuery?.removeEventListener('change', this.onDprChange);
+    this.dprQuery = null;
     document.removeEventListener('visibilitychange', this.onVisibilityChange);
     this.renderer.dispose();
   }
@@ -83,7 +91,7 @@ export class Engine {
   }
 
   resume(): void {
-    if (!this.paused) return;
+    if (!this.paused || this.disposed) return;
     this.paused = false;
     // Forget the reference time so the paused duration never becomes a step.
     this.clock.reset();
@@ -156,6 +164,25 @@ export class Engine {
     this.camera.updateProjectionMatrix();
     // Setting the canvas size clears it; redraw now so a paused view stays correct.
     this.render();
+  };
+
+  /**
+   * A devicePixelRatio change alone (e.g. moving the window to a monitor with another scale factor)
+   * may fire neither `resize` nor the ResizeObserver, so watch a media query that matches only the
+   * current ratio. It stops matching once the ratio changes, so it is replaced after each change.
+   */
+  private watchDpr(): void {
+    this.dprQuery?.removeEventListener('change', this.onDprChange);
+    this.dprQuery = null;
+    if (typeof window.matchMedia !== 'function') return;
+    this.dprQuery = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+    this.dprQuery.addEventListener('change', this.onDprChange);
+  }
+
+  private readonly onDprChange = (): void => {
+    if (this.disposed) return;
+    this.watchDpr();
+    this.resize();
   };
 
   private readonly onVisibilityChange = (): void => {

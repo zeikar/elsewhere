@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import type { E2EHookSnapshot } from '../src/e2eHook';
-import { DT_CAP_SECONDS, SHIP_SPEED_LEVELS } from '../src/config';
+import { DT_CAP_SECONDS } from '../src/config';
 
 const APP_PATH = '/elsewhere/';
 
@@ -122,14 +122,15 @@ test('pause() stops the simulation and resume() restarts it without a jump', asy
   expect(resumed.frames).toBeGreaterThan(stillPaused.frames);
 
   // The 1 s pause must not turn into a step: across the resume, the ship moves no further than one
-  // capped frame at the fastest speed, and simulation time advances by at most one capped frame.
-  const maxSpeed = Math.max(...SHIP_SPEED_LEVELS);
+  // capped frame at its current speed, and simulation time advances by at most one capped frame.
+  // Speed eases monotonically within a frame, so the larger end-point speed bounds the step.
+  const speed = Math.max(stillPaused.ship.speed, resumed.ship.speed);
   const jump = Math.hypot(
     resumed.ship.position.x - stillPaused.ship.position.x,
     resumed.ship.position.y - stillPaused.ship.position.y,
     resumed.ship.position.z - stillPaused.ship.position.z,
   );
-  expect(jump).toBeLessThanOrEqual(maxSpeed * DT_CAP_SECONDS);
+  expect(jump).toBeLessThanOrEqual(speed * DT_CAP_SECONDS + 1e-6);
   expect(resumed.ship.time - stillPaused.ship.time).toBeLessThanOrEqual(DT_CAP_SECONDS + 1e-9);
 
   // And it keeps travelling afterwards.
@@ -137,5 +138,50 @@ test('pause() stops the simulation and resume() restarts it without a jump', asy
   const later = await snapshot(page);
   expect(later.frames).toBeGreaterThan(resumed.frames);
   expect(later.ship.distance).toBeGreaterThan(resumed.ship.distance);
+  expect(errors).toEqual([]);
+});
+
+test('a hidden tab stops the clock and returning to it does not jump', async ({ page }) => {
+  const errors = collectErrors(page);
+  await openApp(page);
+  // Let the ship get under way.
+  await page.waitForTimeout(500);
+
+  // Headless pages never really go hidden, so stub visibilityState and dispatch the events.
+  const hidden = await page.evaluate(() => {
+    let state: DocumentVisibilityState = 'hidden';
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state });
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => state === 'hidden' });
+    (window as unknown as { __setVisibility: (s: DocumentVisibilityState) => void }).__setVisibility = (s) => {
+      state = s;
+      document.dispatchEvent(new Event('visibilitychange'));
+    };
+    document.dispatchEvent(new Event('visibilitychange'));
+    return window.__elsewhere!.snapshot();
+  });
+
+  // requestAnimationFrame keeps running in the stubbed-hidden page, but no simulation time passes.
+  await page.waitForTimeout(1000);
+  const stillHidden = await snapshot(page);
+  expect(stillHidden.frames).toBeGreaterThan(hidden.frames);
+  expect(stillHidden.ship.time).toBe(hidden.ship.time);
+
+  // Back to visible, then sample after the first two engine frames.
+  const visible = await page.evaluate(async () => {
+    const nextFrame = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    (window as unknown as { __setVisibility: (s: DocumentVisibilityState) => void }).__setVisibility('visible');
+    await nextFrame();
+    await nextFrame();
+    return window.__elsewhere!.snapshot();
+  });
+  expect(visible.frames).toBeGreaterThan(stillHidden.frames);
+  // The 1 s hidden period must not become a step: at most one capped frame of simulation time.
+  expect(visible.ship.time - hidden.ship.time).toBeLessThanOrEqual(DT_CAP_SECONDS + 1e-9);
+
+  // And it keeps travelling afterwards.
+  await page.waitForTimeout(500);
+  const later = await snapshot(page);
+  expect(later.ship.time).toBeGreaterThan(visible.ship.time);
+  expect(later.ship.distance).toBeGreaterThan(visible.ship.distance);
   expect(errors).toEqual([]);
 });
