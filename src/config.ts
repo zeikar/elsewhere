@@ -105,6 +105,26 @@ export const STAR_SEED = 0x5eed_57a2;
  * passing. Values are first tunings until the autopilot and planets land.
  */
 
+/**
+ * Encounter interval (docs/PLAN.md section 9, Phase 2): seconds of cruise before each encounter
+ * starts, counted from load and again from the end of each encounter. With the default speed the
+ * first planet appears as a distant dot this long after load, inside the 30–60 s the plan asks for.
+ */
+export const ENCOUNTER_INTERVAL_SECONDS = 40;
+
+/**
+ * Over the last this many seconds of the cruise, the heading drift eases to a stop, so the heading
+ * is already still when the encounter is planned and stays held through APPROACH and FLYBY. It
+ * resumes gradually in DEPARTURE, continuing from where it stopped.
+ */
+export const ENCOUNTER_DRIFT_SETTLE_SECONDS = 5;
+
+/** Remaining distance to the closest approach at which APPROACH becomes FLYBY. */
+export const ENCOUNTER_FLYBY_DISTANCE = 300;
+
+/** Planet radius in world units. A fixed placeholder until seeded planet parameters land. */
+export const ENCOUNTER_PLANET_RADIUS = 120;
+
 /** Base seed for encounter appearance: encounter `i` uses `hash(ENCOUNTER_BASE_SEED, i)`. */
 export const ENCOUNTER_BASE_SEED = 0x91a7_e7a5;
 
