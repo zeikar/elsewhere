@@ -42,10 +42,12 @@ import {
   Vector3,
 } from 'three';
 import {
+  PLANET_ATMOSPHERE_TINT,
   PLANET_GAS_RANGES,
   PLANET_GAS_SHARE,
   PLANET_LIGHT_DIRECTION,
   PLANET_NOISE_OFFSET_RANGE,
+  PLANET_PALETTE_TINT,
   PLANET_ROCKY_RANGES,
   PLANET_ROTATION_PHASE_RANGE,
   PLANET_SPHERE_SEGMENTS,
@@ -136,7 +138,8 @@ type Hex4 = readonly [number, number, number, number];
 interface RockyFamily {
   name: string;
   palette: Hex4;
-  atmosphere: number;
+  /** Atmosphere colours the family may have; each planet picks one (then tints it). */
+  atmospheres: readonly number[];
   /** Sub-ranges inside PLANET_ROCKY_RANGES. */
   seaLevel: Range;
   iceCap: Range;
@@ -148,14 +151,16 @@ interface RockyFamily {
 interface GasFamily {
   name: string;
   palette: Hex4;
-  atmosphere: number;
+  /** Atmosphere colours the family may have; each planet picks one (then tints it). */
+  atmospheres: readonly number[];
 }
 
+/** Rocky palette families (no icy worlds: those are optional per docs/PLAN.md section 5). */
 const ROCKY_FAMILIES: readonly RockyFamily[] = [
   {
     name: 'terran',
     palette: [0x123a66, 0x3e6a36, 0x80784a, 0xb9a88c],
-    atmosphere: 0x5c9cff,
+    atmospheres: [0x5c9cff, 0x6ab8f0, 0x8aa8ff],
     seaLevel: [-0.02, 0.08],
     iceCap: [0.12, 0.3],
     specular: [0.3, 0.5],
@@ -165,7 +170,7 @@ const ROCKY_FAMILIES: readonly RockyFamily[] = [
   {
     name: 'desert',
     palette: [0x5e2e1b, 0x8f4b2c, 0xc2723f, 0xe4b385],
-    atmosphere: 0xe8a27a,
+    atmospheres: [0xe8a27a, 0xf0c090],
     seaLevel: [-0.3, -0.16],
     iceCap: [0, 0.14],
     specular: [0, 0],
@@ -175,7 +180,7 @@ const ROCKY_FAMILIES: readonly RockyFamily[] = [
   {
     name: 'lunar',
     palette: [0x3b3936, 0x625e59, 0x8f8982, 0xc6c0b7],
-    atmosphere: 0xa8b0c0,
+    atmospheres: [0xa8b0c0],
     seaLevel: [-0.2, -0.06],
     iceCap: [0, 0],
     specular: [0, 0],
@@ -185,7 +190,7 @@ const ROCKY_FAMILIES: readonly RockyFamily[] = [
   {
     name: 'volcanic',
     palette: [0x2c120b, 0x2e2724, 0x51443c, 0x8c7768],
-    atmosphere: 0xff9a5c,
+    atmospheres: [0xff9a5c, 0xffc070],
     seaLevel: [-0.22, -0.1],
     iceCap: [0, 0],
     specular: [0, 0.1],
@@ -195,23 +200,73 @@ const ROCKY_FAMILIES: readonly RockyFamily[] = [
   {
     name: 'sulphur',
     palette: [0x6a5320, 0xa8873a, 0xd5bf70, 0xf0e5b2],
-    atmosphere: 0xf0d890,
+    atmospheres: [0xf0d890, 0xd8e0a0],
     seaLevel: [-0.25, -0.12],
     iceCap: [0, 0.08],
     specular: [0, 0],
     craters: [0, 0],
     atmosphereIntensity: [0.25, 0.55],
   },
+  // A water world: deep seas over most of the surface, scattered green-brown islands.
+  {
+    name: 'oceanic',
+    palette: [0x0a2a5e, 0x2f6448, 0x6c7c4c, 0xb4ae90],
+    atmospheres: [0x5aa0ff, 0x70d0f0],
+    seaLevel: [0.1, 0.2],
+    iceCap: [0.04, 0.18],
+    specular: [0.38, 0.5],
+    craters: [0, 0],
+    atmosphereIntensity: [0.95, 1.2],
+  },
+  // Rust-red iron oxide dust over dark basalt, with a thin, pale atmosphere.
+  {
+    name: 'ferric',
+    palette: [0x3a1a12, 0x7a3420, 0xa85a36, 0xd49c78],
+    atmospheres: [0xf0b494, 0xd8b0b8],
+    seaLevel: [-0.3, -0.18],
+    iceCap: [0.03, 0.14],
+    specular: [0, 0],
+    craters: [0.2, 0.45],
+    atmosphereIntensity: [0.15, 0.45],
+  },
+  // A jungle world: dark teal shallow seas, deep greens, ochre uplands.
+  {
+    name: 'verdant',
+    palette: [0x0c3a48, 0x1f5226, 0x4f7a2e, 0xa0a26a],
+    atmospheres: [0x8ad0ff, 0x9ae8c8],
+    seaLevel: [-0.12, 0.02],
+    iceCap: [0, 0.1],
+    specular: [0.15, 0.35],
+    craters: [0, 0],
+    atmosphereIntensity: [0.8, 1.1],
+  },
 ];
 
 const GAS_FAMILIES: readonly GasFamily[] = [
-  { name: 'jovian', palette: [0x9a6a46, 0xe6d6bc, 0xc49a6c, 0xb5502e], atmosphere: 0xf2d8b0 },
-  { name: 'saturnian', palette: [0xb3955a, 0xefe2bd, 0xd2bb85, 0xf6edd2], atmosphere: 0xf6e6be },
-  { name: 'neptunian', palette: [0x1f3c8a, 0x4f80d6, 0x9ec0f2, 0xe8f0ff], atmosphere: 0x7fb0ff },
-  { name: 'uranian', palette: [0x4d9caf, 0x9cd9e1, 0x6bbccb, 0xdaf4f6], atmosphere: 0xa8e8f0 },
-  { name: 'violet', palette: [0x4a2e6e, 0xa47fca, 0x7a5aa6, 0xe4cef2], atmosphere: 0xc9a8f0 },
-  { name: 'ember', palette: [0x4c1a10, 0xb2502c, 0xe08a4c, 0xffd08a], atmosphere: 0xff9a60 },
+  { name: 'jovian', palette: [0x9a6a46, 0xe6d6bc, 0xc49a6c, 0xb5502e], atmospheres: [0xf2d8b0, 0xe8c8a8] },
+  { name: 'saturnian', palette: [0xb3955a, 0xefe2bd, 0xd2bb85, 0xf6edd2], atmospheres: [0xf6e6be, 0xe8e0c8] },
+  { name: 'neptunian', palette: [0x1f3c8a, 0x4f80d6, 0x9ec0f2, 0xe8f0ff], atmospheres: [0x7fb0ff, 0x90c8ff] },
+  { name: 'uranian', palette: [0x4d9caf, 0x9cd9e1, 0x6bbccb, 0xdaf4f6], atmospheres: [0xa8e8f0, 0x98d8e8] },
+  { name: 'violet', palette: [0x4a2e6e, 0xa47fca, 0x7a5aa6, 0xe4cef2], atmospheres: [0xc9a8f0, 0xe0b0e8] },
+  { name: 'ember', palette: [0x4c1a10, 0xb2502c, 0xe08a4c, 0xffd08a], atmospheres: [0xff9a60, 0xffb878] },
+  { name: 'emerald', palette: [0x1c4a3a, 0x7cc0a0, 0x4a8c70, 0xd8f0e0], atmospheres: [0x9ae8c8, 0xb0f0e0] },
+  { name: 'rose', palette: [0x6a2c3a, 0xe2aaa8, 0xb86a72, 0xf6dcd0], atmospheres: [0xf0b8c0, 0xffd0c8] },
+  { name: 'umber', palette: [0x3a2414, 0x8c6a48, 0x6a4a2e, 0xcc9c68], atmospheres: [0xd8b090, 0xe8c8a0] },
 ];
+
+/** Names of the rocky and gas palette families, in draw order. */
+export const ROCKY_FAMILY_NAMES: readonly string[] = ROCKY_FAMILIES.map((f) => f.name);
+export const GAS_FAMILY_NAMES: readonly string[] = GAS_FAMILIES.map((f) => f.name);
+
+/** The rocky families' sub-ranges, so tests can check they lie inside PLANET_ROCKY_RANGES. */
+export const ROCKY_FAMILY_RANGES: readonly Readonly<Record<'seaLevel' | 'iceCap' | 'specular' | 'craters' | 'atmosphereIntensity', Range>>[] =
+  ROCKY_FAMILIES.map(({ seaLevel, iceCap, specular, craters, atmosphereIntensity }) => ({
+    seaLevel,
+    iceCap,
+    specular,
+    craters,
+    atmosphereIntensity,
+  }));
 
 /** Salt mixed into the seed so the parameter stream differs from other values drawn from the seed. */
 const PARAMS_SALT = 0x91a2e7;
@@ -236,13 +291,21 @@ function clamp01(x: number): number {
 
 /** The family palette with a small seeded tint and brightness shift, so no two planets match exactly. */
 function jitterPalette(palette: Hex4, random: () => number): [Rgb, Rgb, Rgb, Rgb] {
-  const tint = [1 + (random() - 0.5) * 0.12, 1 + (random() - 0.5) * 0.12, 1 + (random() - 0.5) * 0.12];
+  const t = 2 * PLANET_PALETTE_TINT;
+  const tint = [1 + (random() - 0.5) * t, 1 + (random() - 0.5) * t, 1 + (random() - 0.5) * t];
   const brightness = 0.92 + random() * 0.16;
   const shift = (hex: number): Rgb => {
     const [r, g, b] = hexToRgb(hex);
     return [clamp01(r * (tint[0] ?? 1) * brightness), clamp01(g * (tint[1] ?? 1) * brightness), clamp01(b * (tint[2] ?? 1) * brightness)];
   };
   return [shift(palette[0]), shift(palette[1]), shift(palette[2]), shift(palette[3])];
+}
+
+/** One of the family's atmosphere colours, with a seeded per-channel tint (PLANET_ATMOSPHERE_TINT). */
+function atmosphereColor(atmospheres: readonly number[], random: () => number): Rgb {
+  const [r, g, b] = hexToRgb(pick(atmospheres, random()));
+  const t = 2 * PLANET_ATMOSPHERE_TINT;
+  return [clamp01(r * (1 + (random() - 0.5) * t)), clamp01(g * (1 + (random() - 0.5) * t)), clamp01(b * (1 + (random() - 0.5) * t))];
 }
 
 /**
@@ -277,38 +340,51 @@ export function planetParams(seed: number): PlanetParams {
     // About a third of gas giants have no storm.
     const stormRoll = random();
     const stormSize = stormRoll < 0.35 ? 0 : lerp([g.stormSize[1] * 0.45, g.stormSize[1]], random());
+    const atmosphereIntensity = lerp(g.atmosphereIntensity, random());
+    const bandFrequency = lerp(g.bandFrequency, random());
+    const bandPhase = lerp(g.bandPhase, random());
+    const turbulence = lerp(g.turbulence, random());
+    const stormLatitude = lerp(g.stormLatitude, random());
+    const stormLongitude = lerp(g.stormLongitude, random());
     return {
       ...base,
       type,
       family: family.name,
       palette,
-      atmosphereColor: hexToRgb(family.atmosphere),
-      atmosphereIntensity: lerp(g.atmosphereIntensity, random()),
-      bandFrequency: lerp(g.bandFrequency, random()),
-      bandPhase: lerp(g.bandPhase, random()),
-      turbulence: lerp(g.turbulence, random()),
+      atmosphereColor: atmosphereColor(family.atmospheres, random),
+      atmosphereIntensity,
+      bandFrequency,
+      bandPhase,
+      turbulence,
       stormSize,
-      stormLatitude: lerp(g.stormLatitude, random()),
-      stormLongitude: lerp(g.stormLongitude, random()),
+      stormLatitude,
+      stormLongitude,
     };
   }
 
   const r = PLANET_ROCKY_RANGES;
   const family = pick(ROCKY_FAMILIES, random());
   const palette = jitterPalette(family.palette, random);
+  const atmosphereIntensity = lerp(family.atmosphereIntensity, random());
+  const warp = lerp(r.warp, random());
+  const seaLevel = lerp(family.seaLevel, random());
+  const iceCap = lerp(family.iceCap, random());
+  const specular = lerp(family.specular, random());
+  const relief = lerp(r.relief, random());
+  const craters = lerp(family.craters, random());
   return {
     ...base,
     type,
     family: family.name,
     palette,
-    atmosphereColor: hexToRgb(family.atmosphere),
-    atmosphereIntensity: lerp(family.atmosphereIntensity, random()),
-    warp: lerp(r.warp, random()),
-    seaLevel: lerp(family.seaLevel, random()),
-    iceCap: lerp(family.iceCap, random()),
-    specular: lerp(family.specular, random()),
-    relief: lerp(r.relief, random()),
-    craters: lerp(family.craters, random()),
+    atmosphereColor: atmosphereColor(family.atmospheres, random),
+    atmosphereIntensity,
+    warp,
+    seaLevel,
+    iceCap,
+    specular,
+    relief,
+    craters,
   };
 }
 

@@ -17,7 +17,10 @@ import {
 } from '../config';
 import { DEFAULT_AUTOPILOT_PARAMS, createAutopilotState, updateAutopilot } from './Autopilot';
 import {
+  GAS_FAMILY_NAMES,
   Planet,
+  ROCKY_FAMILY_NAMES,
+  ROCKY_FAMILY_RANGES,
   disposePlanetGeometry,
   planetGeometry,
   planetGeometryRefs,
@@ -108,9 +111,56 @@ describe('planetParams', () => {
     expect(gas / SEEDS.length).toBeCloseTo(PLANET_GAS_SHARE, 1);
   });
 
-  it('every palette family occurs', () => {
+  it('across 1,000 seeds every palette family of both types occurs', () => {
     const families = new Set(SEEDS.map((s) => `${planetParams(s).type}:${planetParams(s).family}`));
-    expect(families.size).toBeGreaterThanOrEqual(8);
+    const expected = [...ROCKY_FAMILY_NAMES.map((f) => `rocky:${f}`), ...GAS_FAMILY_NAMES.map((f) => `gas:${f}`)];
+    expect([...families].sort()).toEqual(expected.sort());
+    expect(ROCKY_FAMILY_NAMES.length).toBeGreaterThanOrEqual(8);
+    expect(GAS_FAMILY_NAMES.length).toBeGreaterThanOrEqual(9);
+    // No icy family (icy planets are optional, docs/PLAN.md section 5).
+    for (const name of [...ROCKY_FAMILY_NAMES, ...GAS_FAMILY_NAMES]) expect(name).not.toMatch(/ic[ye]/);
+  });
+
+  it("every rocky family's sub-ranges lie inside the configured rocky ranges", () => {
+    for (const [i, family] of ROCKY_FAMILY_RANGES.entries()) {
+      for (const [key, [min, max]] of Object.entries(family)) {
+        const range = PLANET_ROCKY_RANGES[key as keyof typeof family];
+        const label = `${ROCKY_FAMILY_NAMES[i]}: ${key}`;
+        expect(min, label).toBeLessThanOrEqual(max);
+        expect(min, label).toBeGreaterThanOrEqual(range[0]);
+        expect(max, label).toBeLessThanOrEqual(range[1]);
+      }
+    }
+  });
+
+  it('across 1,000 seeds the atmosphere colours vary within each family, and so do band counts and tilts', () => {
+    const colours = new Map<string, Set<string>>();
+    for (const seed of SEEDS) {
+      const p = planetParams(seed);
+      if (p.atmosphereIntensity === 0) continue;
+      const key = `${p.type}:${p.family}`;
+      if (!colours.has(key)) colours.set(key, new Set());
+      colours.get(key)!.add(p.atmosphereColor.map((c) => c.toFixed(3)).join(','));
+    }
+    for (const [family, set] of colours) expect(set.size, family).toBeGreaterThan(5);
+    // The seeded values spread across their configured ranges (not bunched in one corner).
+    const spread = (values: number[], [min, max]: readonly [number, number]) =>
+      (Math.max(...values) - Math.min(...values)) / (max - min);
+    const params = SEEDS.map((s) => planetParams(s));
+    const gas = params.filter((p) => p.type === 'gas');
+    const rocky = params.filter((p) => p.type === 'rocky');
+    expect(spread(gas.map((p) => (p.type === 'gas' ? p.bandFrequency : 0)), PLANET_GAS_RANGES.bandFrequency)).toBeGreaterThan(0.95);
+    expect(spread(gas.map((p) => p.radius), PLANET_GAS_RANGES.radius)).toBeGreaterThan(0.95);
+    expect(spread(rocky.map((p) => p.radius), PLANET_ROCKY_RANGES.radius)).toBeGreaterThan(0.95);
+    expect(spread(rocky.map((p) => p.noiseScale), PLANET_ROCKY_RANGES.noiseScale)).toBeGreaterThan(0.95);
+    for (const [list, ranges] of [
+      [gas, PLANET_GAS_RANGES],
+      [rocky, PLANET_ROCKY_RANGES],
+    ] as const) {
+      expect(spread(list.map((p) => p.axialTilt), ranges.axialTilt)).toBeGreaterThan(0.95);
+      expect(spread(list.map((p) => p.rotationSpeed), ranges.rotationSpeed)).toBeGreaterThan(0.95);
+      expect(spread(list.map((p) => p.atmosphereIntensity), ranges.atmosphereIntensity)).toBeGreaterThan(0.8);
+    }
   });
 
   it('across 1,000 seeds all numeric params lie within the configured ranges', () => {

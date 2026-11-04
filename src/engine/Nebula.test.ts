@@ -31,6 +31,7 @@ import { encounterOffset, planEncounter } from './encounter';
 import { EncounterView, encounterNebulaParams } from './EncounterView';
 import {
   DEFAULT_NEBULA_FRAME,
+  NEBULA_FAMILY_NAMES,
   NEBULA_RENDER_ORDER,
   Nebula,
   disposeNebulaGeometry,
@@ -115,14 +116,19 @@ describe('nebula config', () => {
 describe('nebulaParams', () => {
   it('is deterministic, and different seeds give different nebulae', () => {
     for (const seed of SEEDS.slice(0, 50)) expect(nebulaParams(seed)).toEqual(nebulaParams(seed));
-    const families = new Set(SEEDS.map((s) => nebulaParams(s).family));
-    expect(families.size).toBeGreaterThanOrEqual(5);
     expect(nebulaParams(SEEDS[0]!)).not.toEqual(nebulaParams(SEEDS[1]!));
+  });
+
+  it('across 1,000 seeds every palette family occurs', () => {
+    const families = new Set(SEEDS.map((s) => nebulaParams(s).family));
+    expect([...families].sort()).toEqual([...NEBULA_FAMILY_NAMES].sort());
+    expect(NEBULA_FAMILY_NAMES.length).toBeGreaterThanOrEqual(9);
   });
 
   it('keeps every value within the configured ranges over 1,000 seeds', () => {
     const r = NEBULA_RANGES;
     const counts = new Set<number>();
+    const elongations: number[] = [];
     for (const seed of SEEDS) {
       const p = nebulaParams(seed);
       const label = `seed ${seed}`;
@@ -140,6 +146,10 @@ describe('nebulaParams', () => {
       expectWithin(p.absorption, r.absorption, `${label}: absorption`);
       expectWithin(p.core, r.core, `${label}: core`);
       expectWithin(p.churn, r.churn, `${label}: churn`);
+      expectWithin(p.elongation, r.elongation, `${label}: elongation`);
+      expectWithin(p.orientation, r.orientation, `${label}: orientation`);
+      expectWithin(p.raggedness, r.raggedness, `${label}: raggedness`);
+      elongations.push(p.elongation);
       expect(p.palette).toHaveLength(4);
       p.palette.forEach((c, i) => expectRgb(c, `${label}: palette[${i}]`));
 
@@ -156,12 +166,17 @@ describe('nebulaParams', () => {
         expect(Math.abs(layer.tilt[0]), `${l}: tilt x`).toBeLessThanOrEqual(r.tilt[1]);
         expect(Math.abs(layer.tilt[1]), `${l}: tilt y`).toBeLessThanOrEqual(r.tilt[1]);
         expectWithin(layer.roll, [0, 2 * Math.PI], `${l}: roll`);
+        // Every layer is elongated along the nebula's one long axis.
+        expect(layer.orientation + layer.roll, `${l}: orientation`).toBeCloseTo(p.orientation, 12);
         for (const o of layer.noiseOffset) expectWithin(o, NEBULA_NOISE_OFFSET_RANGE, `${l}: noise offset`);
         expectWithin(layer.intensity / p.intensity, r.layerIntensityJitter, `${l}: intensity jitter`);
         expectWithin(layer.colorShift, [0, 1], `${l}: colour shift`);
         expectWithin(layer.core, [0, p.core], `${l}: core`);
       }
     }
+    // Shapes span the range, from round to clearly elongated.
+    expect(Math.min(...elongations)).toBeLessThan(r.elongation[0] + 0.05 * (r.elongation[1] - r.elongation[0]));
+    expect(Math.max(...elongations)).toBeGreaterThan(r.elongation[1] - 0.05 * (r.elongation[1] - r.elongation[0]));
     // Every layer count in the range occurs.
     expect([...counts].sort()).toEqual(
       Array.from({ length: r.layerCount[1] - r.layerCount[0] + 1 }, (_, i) => r.layerCount[0] + i),
@@ -262,6 +277,14 @@ describe('Nebula', () => {
       // The encounter fade and the churn time are shared; the near fade is per layer.
       expect(layer.mesh.material.uniforms.uOpacity).toBe(nebula.opacity);
       expect(layer.mesh.material.uniforms.uLayerFade).toBe(layer.fade);
+      // Shape: one elongation and raggedness, and each layer's long axis is the nebula's, unrolled.
+      const uniforms = layer.mesh.material.uniforms;
+      expect(uniforms.uElongation!.value).toBe(params.elongation);
+      expect(uniforms.uRaggedness!.value).toBe(params.raggedness);
+      const axis = uniforms.uLongAxis!.value as { x: number; y: number };
+      const angle = params.orientation - layer.mesh.rotation.z;
+      expect(axis.x).toBeCloseTo(Math.cos(angle), 9);
+      expect(axis.y).toBeCloseTo(Math.sin(angle), 9);
     }
     nebula.dispose();
   });
@@ -445,7 +468,7 @@ describe('nebula params for an encounter', () => {
     const seed = SEEDS[7]!;
     const seeded: NebulaParams = nebulaParams(seed);
     const plan = planEncounter({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: -1 }, seeded.radius * 2);
-    const scaled = encounterNebulaParams({ kind: 'nebula', index: 7, seed, nebula: { radius: plan.radius }, plan });
+    const scaled = encounterNebulaParams({ kind: 'nebula', index: 7, seed, side: 'right', nebula: { radius: plan.radius }, plan });
     expect(scaled.radius).toBe(plan.radius);
     for (const [i, layer] of scaled.layers.entries()) {
       const original = seeded.layers[i]!;
@@ -453,6 +476,6 @@ describe('nebula params for an encounter', () => {
       expect(layer.offset[2]).toBeCloseTo(original.offset[2] * 2, 9);
     }
     const same = planEncounter({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: -1 }, seeded.radius);
-    expect(encounterNebulaParams({ kind: 'nebula', index: 7, seed, nebula: seeded, plan: same })).toEqual(seeded);
+    expect(encounterNebulaParams({ kind: 'nebula', index: 7, seed, side: 'right', nebula: seeded, plan: same })).toEqual(seeded);
   });
 });
