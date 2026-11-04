@@ -271,8 +271,8 @@ test('three encounters run CRUISE → APPROACH → FLYBY → DEPARTURE → CRUIS
   const log = await travelLog(page);
   test.info().annotations.push({ type: 'travel log', description: JSON.stringify({ ...log, frameMs: undefined }) });
 
-  // The default seeded mix of kinds (the first three are planets with the default base seed; the
-  // nebula and variety specs cover nebulae). The full cycle, three times, each with its own index.
+  // The default seeded mix of kinds (a planet, a nebula, then a planet with the default base seed;
+  // the nebula and variety specs check nebulae). The full cycle, three times, each with its own index.
   expect(log.states.slice(0, 13).map((s) => [s.state, s.index])).toEqual([
     ['CRUISE', null],
     ...[0, 1, 2].flatMap((i) => [

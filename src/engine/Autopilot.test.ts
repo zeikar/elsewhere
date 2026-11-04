@@ -133,6 +133,16 @@ function simulate(
 const afterEncounters = (n: number) => (_a: Readonly<AutopilotState>, transitions: readonly Transition[]) =>
   transitions.filter((t) => t.to === 'CRUISE').length >= n;
 
+/**
+ * The planned direction is the heading at the start renormalized, so the acos of their dot product
+ * can be off by one rounding step (acos(1 - 2^-52) is about 2.1e-8 rad); the hold itself is exact.
+ */
+const HELD_ANGLE_TOLERANCE = 1e-7;
+
+/** Whether both frames hold the heading (APPROACH or FLYBY), so it must not change between them. */
+const holdsHeading = (a: Readonly<AutopilotState>, b: Readonly<AutopilotState>): boolean =>
+  (a.state === 'APPROACH' || a.state === 'FLYBY') && (b.state === 'APPROACH' || b.state === 'FLYBY');
+
 const CYCLE: TravelState[] = ['APPROACH', 'FLYBY', 'DEPARTURE', 'CRUISE'];
 
 /** The default params with every encounter a planet. */
@@ -251,6 +261,27 @@ describe('encounter schedule', () => {
       const uncapped = schedule.map((e) => encounterKind(e.seed, ENCOUNTER_NEBULA_SHARE));
       expect(longestRun(uncapped), `base seed ${baseSeed}: uncapped`).toBeGreaterThan(ENCOUNTER_MAX_SAME_KIND_RUN);
     }
+  });
+
+  it('over 50,000 encounters the nebula share is the configured share, within 0.01', () => {
+    // The standard error of the share over 50,000 encounters is about 0.002, so the 0.01 tolerance
+    // is about 5 standard errors: an uncompensated draw (a share of about 0.415) fails it.
+    for (const baseSeed of [ENCOUNTER_BASE_SEED, 0xdeadbeef]) {
+      const kinds = encounterSchedule({ ...DEFAULT_AUTOPILOT_PARAMS, baseSeed }, 50_000).map((e) => e.kind);
+      const share = kinds.filter((k) => k === 'nebula').length / kinds.length;
+      expect(Math.abs(share - ENCOUNTER_NEBULA_SHARE), `base seed ${baseSeed}: share ${share}`).toBeLessThan(0.01);
+      expect(longestRun(kinds), `base seed ${baseSeed}`).toBeLessThanOrEqual(ENCOUNTER_MAX_SAME_KIND_RUN);
+    }
+  });
+
+  it('the default opening: the first default encounter is a planet, within 30–60 s of load, then a nebula at index 1 or 2', () => {
+    // The base seed is the same on every load (the simulation test below checks the autopilot meets
+    // the schedule in order).
+    const [first, second, third] = encounterSchedule(DEFAULT_AUTOPILOT_PARAMS, 3);
+    expect(first!.kind).toBe('planet');
+    expect(first!.interval).toBeGreaterThanOrEqual(30);
+    expect(first!.interval).toBeLessThanOrEqual(60);
+    expect([second!.kind, third!.kind]).toContain('nebula');
   });
 
   it('nextEncounterKind keeps the draw until the run reaches the cap, then switches kind', () => {
@@ -445,8 +476,9 @@ describe('nebula encounters', () => {
       const { transitions } = simulate(dt, {
         params,
         until: afterEncounters(1),
-        onFrame: ({ ship, prevAutopilot, autopilot }) => {
+        onFrame: ({ prev, ship, prevAutopilot, autopilot }) => {
           worstFadeStep = Math.max(worstFadeStep, Math.abs(autopilot.fade - prevAutopilot.fade));
+          if (holdsHeading(prevAutopilot, autopilot)) expect(ship.heading).toEqual(prev.heading);
           const encounter = autopilot.encounter;
           if (encounter !== null) {
             expect(encounter.kind).toBe('nebula');
@@ -475,7 +507,7 @@ describe('nebula encounters', () => {
       expect(end!.fade).toBe(0);
       expect(end!.driftRate).toBe(1);
       // Heading held, fades gradual, and clear of the core.
-      expect(worstHeldAngle).toBe(0);
+      expect(worstHeldAngle).toBeLessThan(HELD_ANGLE_TOLERANCE);
       expect(worstFadeStep).toBeLessThan(0.02);
       const radius = defaultNebula(0).radius;
       expect(minClearance).toBeCloseTo(radius * NEBULA_SIDE_OFFSET_FACTOR, 3);
@@ -698,6 +730,7 @@ describe('autopilot simulation', () => {
             const negate = (v: Vec3): Vec3 => ({ x: -v.x, y: -v.y, z: -v.z });
             minClearance = Math.min(minClearance, originToSegment(negate(rel0), negate(rel1)));
 
+            if (holdsHeading(prevAutopilot, autopilot)) expect(ship.heading).toEqual(prev.heading);
             if (autopilot.state === 'APPROACH' || autopilot.state === 'FLYBY') {
               // The heading is held at the planned direction, so the ship stays on the planned line.
               const { origin, direction } = encounter.plan;
@@ -718,7 +751,7 @@ describe('autopilot simulation', () => {
         expect(minClearance).toBeCloseTo(radius * ENCOUNTER_SIDE_OFFSET_FACTOR, 3);
         expect(worstJump).toBeLessThanOrEqual(1 + 1e-9);
         expect(worstTurnRate).toBeLessThanOrEqual(SHIP_MAX_TURN_RATE_RAD_PER_S);
-        expect(worstHeldAngle).toBe(0);
+        expect(worstHeldAngle).toBeLessThan(HELD_ANGLE_TOLERANCE);
         expect(worstPathDeviation).toBeLessThan(1e-6);
         // Fades in and out gradually: no frame changes the opacity by more than 2%.
         expect(worstFadeStep).toBeLessThan(0.02);

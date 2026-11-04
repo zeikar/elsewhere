@@ -147,8 +147,12 @@ export const ENCOUNTER_FLYBY_DISTANCE = 300;
 /** Planet radius in world units. A fixed placeholder until seeded planet parameters land. */
 export const ENCOUNTER_PLANET_RADIUS = 120;
 
-/** Base seed for encounter appearance: encounter `i` uses `hash(ENCOUNTER_BASE_SEED, i)`. */
-export const ENCOUNTER_BASE_SEED = 0x91a7_e7a5;
+/**
+ * Base seed for encounter appearance: encounter `i` uses `hash(ENCOUNTER_BASE_SEED, i)`. It is the
+ * same on every load, so it is chosen for its opening: an oceanic planet first (within the 30–60 s
+ * of docs/PLAN.md section 9, Phase 2), then a nebula, then another planet and another nebula.
+ */
+export const ENCOUNTER_BASE_SEED = 0x91b3_a5ba;
 
 /**
  * `D`: the planet is placed this far ahead along the heading when the encounter starts, so it is
