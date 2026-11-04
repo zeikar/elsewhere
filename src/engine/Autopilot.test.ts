@@ -171,7 +171,8 @@ describe('updateAutopilot', () => {
     const next = updateAutopilot(state, ship, 1 / 60);
     expect(next.state).toBe('APPROACH');
     expect(next.encounterCount).toBe(5);
-    expect(next.cruiseTime).toBe(0);
+    // The encounter starts one frame late; that lateness is kept for the next cruise.
+    expect(next.cruiseTime).toBeCloseTo(1 / 60, 12);
     const encounter = next.encounter!;
     expect(encounter.index).toBe(4);
     expect(encounter.seed).toBe(hash(ENCOUNTER_BASE_SEED, 4));
@@ -227,11 +228,12 @@ describe('autopilot simulation', () => {
     const approaches = transitions.filter((t) => t.to === 'APPROACH');
     const cruises = transitions.filter((t) => t.to === 'CRUISE');
     expect(approaches).toHaveLength(2);
-    // From load, then from the end of the first encounter. Within one frame (plus rounding).
+    // From load, then from the end of the first encounter. Within one frame (plus rounding); the
+    // second cruise is shortened by the lateness carried over from the encounter, also under a frame.
     expect(approaches[0]!.time).toBeGreaterThanOrEqual(interval - 1e-9);
     expect(approaches[0]!.time).toBeLessThanOrEqual(interval + dt + 1e-9);
     const gap = approaches[1]!.time - cruises[0]!.time;
-    expect(gap).toBeGreaterThanOrEqual(interval - 1e-9);
+    expect(gap).toBeGreaterThanOrEqual(interval - dt - 1e-9);
     expect(gap).toBeLessThanOrEqual(interval + dt + 1e-9);
   });
 
@@ -317,14 +319,18 @@ describe('autopilot simulation', () => {
     }
   });
 
-  it('the timeline matches between dt = 1/60 and dt = 1/120', () => {
-    // Stated tolerance: 0.05 s. Each transition fires on the first frame past its threshold, so it
-    // lands up to one frame (1/60 s) after the exact time; everything else agrees far more closely.
-    const TIMELINE_TOLERANCE_S = 0.05;
-    const at60 = simulate(1 / 60, { until: afterEncounters(3) }).transitions;
-    const at120 = simulate(1 / 120, { until: afterEncounters(3) }).transitions;
+  // Stated tolerance: 0.05 s. Each transition fires on the first frame past its threshold, so it
+  // lands up to one frame (1/60 s) after the exact time. The autopilot carries that overshoot into
+  // the next phase, so the lateness never adds up across cycles; everything else agrees far more
+  // closely.
+  const TIMELINE_TOLERANCE_S = 0.05;
+
+  it.each([3, 15])('the timeline matches between dt = 1/60 and dt = 1/120 over %i encounters', (n) => {
+    const maxSeconds = 600 * n;
+    const at60 = simulate(1 / 60, { until: afterEncounters(n), maxSeconds }).transitions;
+    const at120 = simulate(1 / 120, { until: afterEncounters(n), maxSeconds }).transitions;
     expect(at60.map((t) => t.to)).toEqual(at120.map((t) => t.to));
-    expect(at60).toHaveLength(12);
+    expect(at60).toHaveLength(4 * n);
     for (let i = 0; i < at60.length; i++) {
       expect(Math.abs(at60[i]!.time - at120[i]!.time)).toBeLessThanOrEqual(TIMELINE_TOLERANCE_S);
     }

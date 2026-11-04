@@ -107,7 +107,10 @@ export const DEFAULT_AUTOPILOT_PARAMS: Readonly<AutopilotParams> = {
 
 export interface AutopilotState {
   state: TravelState;
-  /** Seconds spent in the current CRUISE; 0 outside CRUISE. */
+  /**
+   * Seconds spent in the current CRUISE. During an encounter it holds how late (under one frame) the
+   * encounter started, which the next CRUISE starts from, so the lateness never adds up over cycles.
+   */
   cruiseTime: number;
   /** Encounters started so far, which is also the index the next encounter gets. */
   encounterCount: number;
@@ -161,6 +164,9 @@ export function createAutopilotState(params: Readonly<AutopilotParams> = DEFAULT
  *
  * - CRUISE counts cruise time. Once it reaches `interval`, it plans an encounter along the ship's
  *   current heading with the next index and seed, and moves to APPROACH.
+ * - A transition fires on the first step past its threshold, up to one step late. That overshoot is
+ *   carried into the next CRUISE (the time past `interval`, plus the time since passing the despawn
+ *   distance), so the timeline does not depend on dt and does not drift over many encounters.
  * - APPROACH becomes FLYBY once the remaining distance is at most `flybyDistance`, FLYBY becomes
  *   DEPARTURE once the closest approach is passed (remaining ≤ 0), and DEPARTURE returns to CRUISE
  *   once the ship is the profile's despawn distance past it, where the fade has reached 0.
@@ -199,7 +205,9 @@ export function updateAutopilot(
       );
       encounter = { index, seed, planet, plan };
       encounterCount = index + 1;
-      cruiseTime = 0;
+      // How late this encounter starts. The plan stays at the ship's actual position; the next CRUISE
+      // is shortened by this instead.
+      cruiseTime = Math.min(cruiseTime - params.interval, dt);
       travel = 'APPROACH';
     }
   }
@@ -211,6 +219,9 @@ export function updateAutopilot(
     if (travel === 'APPROACH' && remaining <= params.flybyDistance) travel = 'FLYBY';
     if (travel === 'FLYBY' && remaining <= 0) travel = 'DEPARTURE';
     if (travel === 'DEPARTURE' && remaining <= -profile.despawnDistance) {
+      // Time since the ship passed the despawn distance, carried with the encounter's late start.
+      const past = ship.speed > 0 ? (-profile.despawnDistance - remaining) / ship.speed : 0;
+      cruiseTime += Math.min(past, dt);
       travel = 'CRUISE';
       encounter = null;
       remaining = Number.POSITIVE_INFINITY;
