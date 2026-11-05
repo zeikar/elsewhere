@@ -1,6 +1,8 @@
 import { PerspectiveCamera, Scene, type BufferGeometry, type Material, type Object3D, type ShaderMaterial } from 'three';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ENCOUNTER_BASE_SEED } from '../config';
+import { Asteroid, asteroidParams } from './Asteroid';
+import { Comet, cometParams } from './Comet';
 import { Nebula, disposeNebulaGeometry, nebulaGeometry, nebulaParams, nebulaProgramMaterials } from './Nebula';
 import { Planet, disposePlanetGeometry, planetGeometry, planetParams, planetProgramMaterials, ringGeometry } from './Planet';
 import { ProgramWarmup, holderGeometry, type ProgramCompiler } from './ProgramWarmup';
@@ -74,7 +76,7 @@ function planetSeeds(): { rocky: number; gas: number; ringedGas: number; ringedR
 }
 
 describe('encounter program holders', () => {
-  it('hold exactly the programs real planets and nebulae use', () => {
+  it('hold exactly the programs real planets, nebulae, asteroids and comets use', () => {
     const holders = new Set([...planetProgramMaterials(), ...nebulaProgramMaterials()].map(programSignature));
     expect(holders.size).toBe(4);
 
@@ -95,17 +97,32 @@ describe('encounter program holders', () => {
       for (const m of materialsOf(nebula.object)) used.add(programSignature(m));
       nebula.dispose();
     }
+    // Asteroids and comets need no program of their own either: rocks and nuclei draw with the rocky
+    // surface, a comet's coma and tails with the halo program.
+    const extra = new Set<string>();
+    for (let i = 0; i < 10; i++) {
+      for (const object of [new Asteroid(asteroidParams(hash(ENCOUNTER_BASE_SEED, 2000 + i))), new Comet(cometParams(hash(ENCOUNTER_BASE_SEED, 3000 + i)))]) {
+        for (const m of materialsOf(object.object)) extra.add(programSignature(m));
+        object.dispose();
+      }
+    }
+    for (const signature of extra) expect(holders.has(signature)).toBe(true);
+    expect(extra.size).toBe(2);
     // Every program an encounter draws with is held, and every holder is one an encounter uses.
     expect(used).toEqual(holders);
   });
 
-  it('use a geometry with the attributes of the planet sphere, the ring and the nebula plane, but no data', () => {
+  it('use a geometry with the attributes of the planet sphere, the ring, the nebula plane, a rock and a comet glow, but no data', () => {
     const holder = holderGeometry();
     expect(attributeLayout(holder)).toBe(attributeLayout(planetGeometry()));
     const ring = ringGeometry(1.4, 2.4);
     expect(attributeLayout(holder)).toBe(attributeLayout(ring));
     ring.dispose();
     expect(attributeLayout(holder)).toBe(attributeLayout(nebulaGeometry()));
+    const comet = new Comet(cometParams(1));
+    expect(attributeLayout(holder)).toBe(attributeLayout(comet.glow.geometry));
+    expect(attributeLayout(holder)).toBe(attributeLayout(comet.nucleus.geometry));
+    comet.dispose();
     for (const attribute of Object.values(holder.attributes)) expect(attribute.count).toBe(0);
     holder.dispose();
   });

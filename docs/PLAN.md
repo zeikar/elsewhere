@@ -73,6 +73,7 @@ Travel states: `CRUISE → APPROACH → FLYBY → DEPARTURE → CRUISE`
 Built in section 9 Phase 4, together with the rest of its list.
 
 - [x] More planet variety: ringed, icy, and so on
+- [x] Asteroids and comets
 - [x] Shareable seed in the URL
 
 ### Optional (after the MVP)
@@ -137,8 +138,8 @@ Travelling forward forever makes positions grow until float32 precision on the G
 ### Variety (Phase 4)
 
 - **Trip seed:** Each load picks a random base seed unless the URL already carries one, and writes the seed in use to the URL, so a trip can be shared and replayed. Encounter seeds stay `hash(base seed, encounter index)`.
-- **New encounters:** Ringed planets, icy dwarfs, asteroids and comets follow the planet rule: the path is planned first and the object is placed beside it, so the closest approach is fixed and the camera never passes through a solid part (planet, ring, asteroid or comet nucleus). A comet's tail may reach the camera, but it must never cover the view so that the scene is hidden; check its screen coverage at the closest approach.
-- **Speed driven by visibility:** After the closest approach, the encounter ends as soon as its object is out of view, and the ship eases back into warp from the speed the encounter ended at. Out of view is a pure function of the simulation state and the fixed vertical field of view: the object lies wholly outside the cone that holds the view at the widest supported aspect ratio, 21:9. On a wider screen the camera narrows its vertical field of view so the horizontal one stays at the 21:9 one, so the view never reaches past that cone on any screen. A planet is out of view once a sphere holding everything drawn for it is outside that cone; a nebula, whose layers reach across the path, once every layer is behind the camera. While the object is in view the speed profile is unchanged. The encounter interval still counts the cruise from the end of each encounter.
+- **New encounters:** Ringed planets, icy dwarfs, asteroids and comets follow the planet rule: the path is planned first and the object is placed beside it, so the closest approach is fixed and the camera never passes through a solid part (planet, ring, asteroid or comet nucleus). A comet's tail may reach the camera, but it must never cover the view so that the scene is hidden; check its screen coverage at the closest approach. (A comet's tails point away from the path, so they never reach the camera; their glow is additive and covers at most about a sixth of the view at any moment of the encounter, and none at the closest approach.)
+- **Speed driven by visibility:** After the closest approach, the encounter ends as soon as its object is out of view, and the ship eases back into warp from the speed the encounter ended at. Out of view is a pure function of the simulation state and the fixed vertical field of view: the object lies wholly outside the cone that holds the view at the widest supported aspect ratio, 21:9. On a wider screen the camera narrows its vertical field of view so the horizontal one stays at the 21:9 one, so the view never reaches past that cone on any screen. A planet is out of view once a sphere holding everything drawn for it is outside that cone; a nebula, whose layers reach across the path, once every layer is behind the camera; a comet once spheres holding its coma and every stretch of both tails are outside the cone (its tails trail behind it, so it leaves the view with its coma, at the closest approach). While the object is in view the speed profile is unchanged. The encounter interval still counts the cruise from the end of each encounter.
 - **Distant galaxies:** Part of the far layer, not encounters. They are fixed, seeded directions turned by the camera's rotation only, drawn with the far stars and never writing depth, so they never move with travel and never hide anything.
   - A trip has 0–3 of them, generated from the trip seed, so a shared seed replays them. Each is a small spiral (a core glow and two faint arms) or elliptical (a core glow in an oval falloff), with a seeded size of 1.2–3.5° across, tilt, rotation and colour. They sit where the heading drift sweeps the view, so each comes into view during a drift cycle.
   - Their sizes are angles in the sky, so they stay right whatever the field of view or aspect.
@@ -178,7 +179,9 @@ src/
 │   ├── Autopilot.ts   # Phase 2: travel state machine
 │   ├── Planet.ts      # Phase 2
 │   ├── Nebula.ts      # Phase 3
-│   └── Asteroid.ts    # Phase 4: asteroids (irregular rocky bodies)
+│   ├── irregularBody.ts # Phase 4: irregular body geometry (asteroid rocks, comet nuclei)
+│   ├── Asteroid.ts    # Phase 4: asteroids (irregular rocky bodies)
+│   └── Comet.ts       # Phase 4: comets (nucleus, coma, ion and dust tails)
 └── ui/
     ├── controls.ts    # Buttons, keyboard, auto-hide, cursor
     └── wakeLock.ts

@@ -5,12 +5,17 @@ import {
   ASTEROID_ENCOUNTER_DISTANCE,
   ASTEROID_SIDE_OFFSET_FACTOR,
   CAMERA_FOV_DEG,
+  COMET_DESPAWN_DISTANCE,
+  COMET_ENCOUNTER_DISTANCE,
+  COMET_SIDE_OFFSET_FACTOR,
   DT_CAP_SECONDS,
   ENCOUNTER_ARRIVAL_SPEED,
   ENCOUNTER_ASTEROID_SHARE,
   ENCOUNTER_ASTEROID_SHARE_BOUNDS,
   ENCOUNTER_BASE_SEED,
   ENCOUNTER_CLEARANCE_MARGIN,
+  ENCOUNTER_COMET_SHARE,
+  ENCOUNTER_COMET_SHARE_BOUNDS,
   ENCOUNTER_DESPAWN_DISTANCE,
   ENCOUNTER_DISTANCE,
   ENCOUNTER_DRIFT_SETTLE_SECONDS,
@@ -49,17 +54,21 @@ import {
 import { Asteroid, asteroidParams, type AsteroidParams } from './Asteroid';
 import {
   ASTEROID_ENCOUNTER_PROFILE,
+  COMET_ENCOUNTER_PROFILE,
   DEFAULT_AUTOPILOT_PARAMS,
   NEBULA_ENCOUNTER_PROFILE,
   PLANET_VIEW_RADIUS_FACTOR,
   asteroidFraction,
   bodyKind,
   cappedNebulaShare,
+  cometFraction,
+  cometPassFactor,
   createAutopilotState,
   cruiseInterval,
   cruiseTargetSpeed,
   cruiseIntervalFor,
   defaultAsteroid,
+  defaultComet,
   defaultNebula,
   createTravel,
   defaultPlanet,
@@ -71,6 +80,7 @@ import {
   encounterSide,
   encounterViewMargin,
   kindDrawShare,
+  mixHasPlanets,
   nebulaViewExtent,
   nextEncounterKind,
   runClass,
@@ -81,6 +91,7 @@ import {
   type ActiveEncounter,
   type AutopilotParams,
   type AutopilotState,
+  type CometEncounter,
   type EncounterKind,
   type Travel,
   type TravelState,
@@ -94,6 +105,7 @@ import {
   viewConeHalfAngle,
   type Encounter,
 } from './encounter';
+import { cometGlowGeometry, cometParams, type CometParams } from './Comet';
 import { Nebula, nebulaParams, type NebulaParams } from './Nebula';
 import { Planet, planetParams, type PlanetParams } from './Planet';
 import { cameraFovDeg } from './renderSize';
@@ -211,8 +223,8 @@ const holdsHeading = (a: Readonly<AutopilotState>, b: Readonly<AutopilotState>):
 const CYCLE: TravelState[] = ['APPROACH', 'FLYBY', 'DEPARTURE', 'CRUISE'];
 
 /** The shares that make every encounter `kind` (as the engine's `encounterKind` option sets them). */
-function onlyKind(kind: EncounterKind): Pick<AutopilotParams, 'nebulaShare' | 'asteroidShare'> {
-  return { nebulaShare: kind === 'nebula' ? 1 : 0, asteroidShare: kind === 'asteroid' ? 1 : 0 };
+function onlyKind(kind: EncounterKind): Pick<AutopilotParams, 'nebulaShare' | 'asteroidShare' | 'cometShare'> {
+  return { nebulaShare: kind === 'nebula' ? 1 : 0, asteroidShare: kind === 'asteroid' ? 1 : 0, cometShare: kind === 'comet' ? 1 : 0 };
 }
 
 /** The default params with every encounter a planet. */
@@ -308,9 +320,25 @@ describe('autopilot config', () => {
     expect(ENCOUNTER_ASTEROID_SHARE).toBeGreaterThan(aLow);
     expect(ENCOUNTER_ASTEROID_SHARE).toBeLessThan(aHigh);
     expect(aLow).toBeGreaterThan(0);
-    // The asteroids come out of the planets' share, which stays the largest.
-    expect(ENCOUNTER_NEBULA_SHARE + ENCOUNTER_ASTEROID_SHARE).toBeLessThan(1);
-    expect(1 - ENCOUNTER_NEBULA_SHARE - ENCOUNTER_ASTEROID_SHARE).toBeGreaterThan(ENCOUNTER_NEBULA_SHARE);
+    expect(DEFAULT_AUTOPILOT_PARAMS.cometShare).toBe(ENCOUNTER_COMET_SHARE);
+    expect(DEFAULT_AUTOPILOT_PARAMS.comet.encounterDistance).toBe(COMET_ENCOUNTER_DISTANCE);
+    expect(DEFAULT_AUTOPILOT_PARAMS.comet.sideOffsetFactor).toBe(COMET_SIDE_OFFSET_FACTOR);
+    expect(DEFAULT_AUTOPILOT_PARAMS.comet.profile).toBe(COMET_ENCOUNTER_PROFILE);
+    expect(COMET_ENCOUNTER_PROFILE.despawnDistance).toBe(COMET_DESPAWN_DISTANCE);
+    expect(COMET_ENCOUNTER_PROFILE.spawnScale).toBe(1);
+    // The comet is planned past its slowdown, so its encounter starts at the arrival speed.
+    expect(COMET_ENCOUNTER_DISTANCE).toBeGreaterThan(COMET_ENCOUNTER_PROFILE.slowdownDistance);
+    expect(defaultComet(123).radius).toBeGreaterThan(0);
+    const [cLow, cHigh] = ENCOUNTER_COMET_SHARE_BOUNDS;
+    expect(ENCOUNTER_COMET_SHARE).toBeGreaterThan(cLow);
+    expect(ENCOUNTER_COMET_SHARE).toBeLessThan(cHigh);
+    expect(cLow).toBeGreaterThan(0);
+    // The asteroids and comets come out of the planets' share, which stays the largest; comets are
+    // the rarest kind, rarer than planets (docs/PLAN.md section 9, Phase 4).
+    const planetShare = 1 - ENCOUNTER_NEBULA_SHARE - ENCOUNTER_ASTEROID_SHARE - ENCOUNTER_COMET_SHARE;
+    expect(planetShare).toBeGreaterThan(ENCOUNTER_NEBULA_SHARE);
+    expect(ENCOUNTER_COMET_SHARE).toBeLessThan(ENCOUNTER_ASTEROID_SHARE);
+    expect(ENCOUNTER_COMET_SHARE).toBeLessThan(planetShare);
   });
 });
 
@@ -364,6 +392,7 @@ describe('encounter schedule', () => {
   it('over 1,000 encounters per base seed: every kind at shares within bounds, no run of any kind longer than the cap', () => {
     const [low, high] = ENCOUNTER_NEBULA_SHARE_BOUNDS;
     const [aLow, aHigh] = ENCOUNTER_ASTEROID_SHARE_BOUNDS;
+    const [cLow, cHigh] = ENCOUNTER_COMET_SHARE_BOUNDS;
     for (const baseSeed of BASE_SEEDS) {
       const label = `base seed ${baseSeed}`;
       const schedule = encounterSchedule({ ...DEFAULT_AUTOPILOT_PARAMS, baseSeed }, 1000);
@@ -374,13 +403,16 @@ describe('encounter schedule', () => {
       expect(share('nebula'), label).toBeLessThanOrEqual(high);
       expect(share('asteroid'), label).toBeGreaterThanOrEqual(aLow);
       expect(share('asteroid'), label).toBeLessThanOrEqual(aHigh);
-      expect(share('planet'), label).toBeGreaterThan(share('nebula'));
-      // No kind runs longer than the cap, and nor do planets and asteroids together (the run class).
+      expect(share('comet'), label).toBeGreaterThanOrEqual(cLow);
+      expect(share('comet'), label).toBeLessThanOrEqual(cHigh);
+      expect(share('planet'), label).toBeGreaterThan(share('comet'));
+      expect(share('planet'), label).toBeGreaterThan(share('asteroid'));
+      // No kind runs longer than the cap, and nor do planets, asteroids and comets together (the run class).
       expect(longestRun(kinds), label).toBeLessThanOrEqual(ENCOUNTER_MAX_SAME_KIND_RUN);
       const classes = kinds.map(runClass);
       expect(longestRun(classes), label).toBeLessThanOrEqual(ENCOUNTER_MAX_SAME_KIND_RUN);
-      // The cap is in effect: runs reach it (they would run longer without it), and asteroids come
-      // in runs of their own too.
+      // The cap is in effect: runs reach it (they would run longer without it), and the solid bodies
+      // mix within their runs.
       expect(longestRun(classes), label).toBe(ENCOUNTER_MAX_SAME_KIND_RUN);
       expect(longestRun(kinds.filter((k) => k !== 'nebula')), label).toBeGreaterThan(1);
       const uncapped = schedule.map((e) => encounterKind(e.seed, ENCOUNTER_NEBULA_SHARE));
@@ -388,17 +420,19 @@ describe('encounter schedule', () => {
     }
   });
 
-  it('over 50,000 encounters the nebula and asteroid shares are the configured shares, within 0.01', () => {
+  it('over 50,000 encounters the nebula, asteroid and comet shares are the configured shares, within 0.01', () => {
     // The standard error of the share over 50,000 encounters is about 0.002, so the 0.01 tolerance
     // is about 5 standard errors: an uncompensated draw (a nebula share of about 0.415) fails it.
     for (const baseSeed of [ENCOUNTER_BASE_SEED, 0xdeadbeef]) {
       const kinds = encounterSchedule({ ...DEFAULT_AUTOPILOT_PARAMS, baseSeed }, 50_000).map((e) => e.kind);
       const share = (kind: EncounterKind) => kinds.filter((k) => k === kind).length / kinds.length;
-      const label = `base seed ${baseSeed}: ${share('planet')} / ${share('nebula')} / ${share('asteroid')}`;
+      const label = `base seed ${baseSeed}: ${share('planet')} / ${share('nebula')} / ${share('asteroid')} / ${share('comet')}`;
       expect(Math.abs(share('nebula') - ENCOUNTER_NEBULA_SHARE), label).toBeLessThan(0.01);
       expect(Math.abs(share('asteroid') - ENCOUNTER_ASTEROID_SHARE), label).toBeLessThan(0.01);
-      // The planets keep the rest: 0.5, from 0.65 before asteroids.
-      expect(Math.abs(share('planet') - (1 - ENCOUNTER_NEBULA_SHARE - ENCOUNTER_ASTEROID_SHARE)), label).toBeLessThan(0.01);
+      expect(Math.abs(share('comet') - ENCOUNTER_COMET_SHARE), label).toBeLessThan(0.01);
+      // The planets keep the rest: 0.4, from 0.5 before comets and 0.65 before asteroids.
+      const planets = 1 - ENCOUNTER_NEBULA_SHARE - ENCOUNTER_ASTEROID_SHARE - ENCOUNTER_COMET_SHARE;
+      expect(Math.abs(share('planet') - planets), label).toBeLessThan(0.01);
       expect(longestRun(kinds), label).toBeLessThanOrEqual(ENCOUNTER_MAX_SAME_KIND_RUN);
       expect(longestRun(kinds.map(runClass)), label).toBeLessThanOrEqual(ENCOUNTER_MAX_SAME_KIND_RUN);
     }
@@ -409,8 +443,10 @@ describe('encounter schedule', () => {
     const baseSeeds = [ENCOUNTER_BASE_SEED, ...Array.from({ length: 49 }, () => Math.floor(random() * 2 ** 32))];
     let asteroids = 0;
     for (const baseSeed of baseSeeds) {
-      const withAsteroids = encounterSchedule({ ...DEFAULT_AUTOPILOT_PARAMS, baseSeed }, 500);
-      const without = encounterSchedule({ ...DEFAULT_AUTOPILOT_PARAMS, baseSeed, asteroidShare: 0 }, 500);
+      // Without asteroids, and without comets either (which would otherwise take a larger share of the
+      // planets).
+      const withAsteroids = encounterSchedule({ ...DEFAULT_AUTOPILOT_PARAMS, baseSeed, cometShare: 0 }, 500);
+      const without = encounterSchedule({ ...DEFAULT_AUTOPILOT_PARAMS, baseSeed, asteroidShare: 0, cometShare: 0 }, 500);
       for (let i = 0; i < 500; i++) {
         const a = withAsteroids[i]!;
         const b = without[i]!;
@@ -428,6 +464,32 @@ describe('encounter schedule', () => {
     expect(asteroidFraction(DEFAULT_AUTOPILOT_PARAMS)).toBeCloseTo(ENCOUNTER_ASTEROID_SHARE / (1 - ENCOUNTER_NEBULA_SHARE), 12);
   });
 
+  it('comets only turn planets into comets: every nebula and every asteroid stays where it was without them, for any base seed', () => {
+    const random = mulberry32(0xc0e7_5eed);
+    const baseSeeds = [ENCOUNTER_BASE_SEED, ...Array.from({ length: 49 }, () => Math.floor(random() * 2 ** 32))];
+    let comets = 0;
+    const fraction = cometFraction(DEFAULT_AUTOPILOT_PARAMS);
+    for (const baseSeed of baseSeeds) {
+      const withComets = encounterSchedule({ ...DEFAULT_AUTOPILOT_PARAMS, baseSeed }, 500);
+      const without = encounterSchedule({ ...DEFAULT_AUTOPILOT_PARAMS, baseSeed, cometShare: 0 }, 500);
+      for (let i = 0; i < 500; i++) {
+        const a = withComets[i]!;
+        const b = without[i]!;
+        const label = `base seed ${baseSeed}, encounter ${i}`;
+        // The same seed, side and cruise, and a nebula or an asteroid exactly where there was one.
+        expect({ ...a, kind: a.kind === 'comet' ? 'planet' : a.kind }, label).toEqual(b);
+        // A comet where the third draw makes one of a planet (never the first encounter).
+        if (b.kind === 'planet') {
+          expect(a.kind, label).toBe(i === 0 ? 'planet' : bodyKind(a.seed, asteroidFraction(DEFAULT_AUTOPILOT_PARAMS), fraction));
+        }
+        if (a.kind === 'comet') comets++;
+      }
+    }
+    expect(comets).toBeGreaterThan(0.07 * 50 * 500);
+    // The fraction of the bodies left after the asteroids that are comets gives the comet share.
+    expect(fraction).toBeCloseTo(ENCOUNTER_COMET_SHARE / (1 - ENCOUNTER_NEBULA_SHARE - ENCOUNTER_ASTEROID_SHARE), 12);
+  });
+
   it('the default opening: the first default encounter is a planet, within 30–60 s of load, then a nebula at index 1 or 2', () => {
     // The default base seed is the test default trip seed (ENCOUNTER_BASE_SEED); production draws a
     // random one on each load (the simulation test below checks the autopilot meets the schedule in
@@ -439,17 +501,22 @@ describe('encounter schedule', () => {
     expect([second!.kind, third!.kind]).toContain('nebula');
   });
 
-  it('the default test seed: its opening (planet, nebula, planet, nebula) is kept, an asteroid comes fifth, and its first 50 encounters hold several', () => {
+  it('the default test seed: its opening (planet, nebula, planet, nebula) is kept, an asteroid comes fifth and a comet sixth, and its first 50 encounters hold several of each', () => {
     // docs/PLAN.md section 9, Phase 4: with the documented default test seed, the first 50
-    // encounters include at least one asteroid.
+    // encounters include at least one asteroid and one comet (and a ringed planet and an icy dwarf,
+    // Planet.test.ts).
     const kinds = encounterSchedule(DEFAULT_AUTOPILOT_PARAMS, 50).map((e) => e.kind);
-    expect(kinds.slice(0, 5)).toEqual(['planet', 'nebula', 'planet', 'nebula', 'asteroid']);
+    expect(kinds.slice(0, 6)).toEqual(['planet', 'nebula', 'planet', 'nebula', 'asteroid', 'comet']);
     const count = (kind: EncounterKind) => kinds.filter((k) => k === kind).length;
-    // Measured: 26 planets, 17 nebulae and 7 asteroids.
+    // Measured: 22 planets, 17 nebulae, 7 asteroids and 4 comets (at 5, 8, 14 and 22).
     expect(count('asteroid')).toBeGreaterThanOrEqual(5);
-    expect(count('planet') + count('nebula') + count('asteroid')).toBe(50);
-    // Without asteroids the same trip is the same, with those seven planets in their place.
-    const without = encounterSchedule({ ...DEFAULT_AUTOPILOT_PARAMS, asteroidShare: 0 }, 50).map((e) => e.kind);
+    expect(count('comet')).toBeGreaterThanOrEqual(3);
+    expect(count('planet') + count('nebula') + count('asteroid') + count('comet')).toBe(50);
+    // Without comets the same trip is the same, with those planets in their place; without asteroids
+    // and comets alike, every solid body is a planet and every nebula where it was.
+    const withoutComets = encounterSchedule({ ...DEFAULT_AUTOPILOT_PARAMS, cometShare: 0 }, 50).map((e) => e.kind);
+    expect(kinds.map((k) => (k === 'comet' ? 'planet' : k))).toEqual(withoutComets);
+    const without = encounterSchedule({ ...DEFAULT_AUTOPILOT_PARAMS, asteroidShare: 0, cometShare: 0 }, 50).map((e) => e.kind);
     expect(kinds.map(runClass)).toEqual(without);
   });
 
@@ -494,37 +561,54 @@ describe('encounter schedule', () => {
     }
   });
 
-  it('encounterKindAt: a planet at index 0 unless every encounter is a nebula or an asteroid, nextEncounterKind after that', () => {
-    const params = { nebulaShare: ENCOUNTER_NEBULA_SHARE, asteroidShare: ENCOUNTER_ASTEROID_SHARE, maxSameKindRun: 3 };
+  it('encounterKindAt: a planet at index 0 unless the mix has no planets, nextEncounterKind after that', () => {
+    const params = { nebulaShare: ENCOUNTER_NEBULA_SHARE, asteroidShare: ENCOUNTER_ASTEROID_SHARE, cometShare: ENCOUNTER_COMET_SHARE, maxSameKindRun: 3 };
     let asteroidsAfterFirst = 0;
+    let cometsAfterFirst = 0;
+    // The guard is the mix having planets at all: a nebula share below 1 and solid bodies not all
+    // asteroids or comets.
+    expect(mixHasPlanets(params)).toBe(true);
+    expect(mixHasPlanets({ ...params, nebulaShare: 1 })).toBe(false);
+    expect(mixHasPlanets({ ...params, nebulaShare: 0.5, asteroidShare: 0.5, cometShare: 0 })).toBe(false);
+    expect(mixHasPlanets({ ...params, nebulaShare: 0.5, asteroidShare: 0.2, cometShare: 0.3 })).toBe(false);
+    expect(mixHasPlanets({ ...params, nebulaShare: 0.5, asteroidShare: 0.2, cometShare: 0.29 })).toBe(true);
     for (let i = 0; i < 300; i++) {
       const seed = hash(ENCOUNTER_BASE_SEED, i);
       expect(encounterKindAt(0, seed, params, null, 0)).toBe('planet');
       expect(encounterKindAt(0, seed, { ...params, nebulaShare: 0 }, null, 0)).toBe('planet');
       expect(encounterKindAt(0, seed, { ...params, nebulaShare: 1 }, null, 0)).toBe('nebula');
       // Forced kinds, as the engine's `encounterKind` option sets them.
-      for (const kind of ['planet', 'nebula', 'asteroid'] as const) {
+      for (const kind of ['planet', 'nebula', 'asteroid', 'comet'] as const) {
         const forced = { ...params, ...onlyKind(kind) };
         expect(encounterKindAt(0, seed, forced, null, 0)).toBe(kind);
         expect(encounterKindAt(i + 1, seed, forced, kind, 50)).toBe(kind);
       }
-      if (encounterKindAt(i + 1, seed, params, 'nebula', 1) === 'asteroid') asteroidsAfterFirst++;
-      for (const [lastKind, run] of [['planet', 1], ['nebula', 2], ['planet', 3], ['asteroid', 3]] as const) {
+      // A mix of nebulae and asteroids only has no planet to open with: it draws its first encounter.
+      const noPlanets = { ...params, nebulaShare: 0.5, asteroidShare: 0.5, cometShare: 0 };
+      expect(encounterKindAt(0, seed, noPlanets, null, 0)).toBe(nextEncounterKind(seed, noPlanets, null, 0));
+      expect(encounterKindAt(0, seed, noPlanets, null, 0)).not.toBe('planet');
+      const next = encounterKindAt(i + 1, seed, params, 'nebula', 1);
+      if (next === 'asteroid') asteroidsAfterFirst++;
+      if (next === 'comet') cometsAfterFirst++;
+      for (const [lastKind, run] of [['planet', 1], ['nebula', 2], ['planet', 3], ['asteroid', 3], ['comet', 3]] as const) {
         expect(encounterKindAt(i + 1, seed, params, lastKind, run)).toBe(nextEncounterKind(seed, params, lastKind, run));
       }
     }
-    // The planet first is the only rule: later encounters are asteroids at their share.
+    // The planet first is the only rule: later encounters are asteroids and comets at their shares.
     expect(asteroidsAfterFirst).toBeGreaterThan(20);
+    expect(cometsAfterFirst).toBeGreaterThan(10);
   });
 
-  it('nextEncounterKind: planets and asteroids share one run, so a body after three bodies is a nebula, whichever they were', () => {
-    const params = { nebulaShare: ENCOUNTER_NEBULA_SHARE, asteroidShare: ENCOUNTER_ASTEROID_SHARE, maxSameKindRun: 3 };
+  it('nextEncounterKind: planets, asteroids and comets share one run, so a body after three bodies is a nebula, whichever they were', () => {
+    const params = { nebulaShare: ENCOUNTER_NEBULA_SHARE, asteroidShare: ENCOUNTER_ASTEROID_SHARE, cometShare: ENCOUNTER_COMET_SHARE, maxSameKindRun: 3 };
     const draw = kindDrawShare(ENCOUNTER_NEBULA_SHARE, 3);
     const fraction = asteroidFraction(params);
+    const comet = cometFraction(params);
     let asteroids = 0;
+    let comets = 0;
     for (let i = 0; i < 1000; i++) {
       const seed = hash(0xb0d1e5, i);
-      const body = bodyKind(seed, fraction);
+      const body = bodyKind(seed, fraction, comet);
       if (encounterKind(seed, draw) === 'nebula') {
         expect(nextEncounterKind(seed, params, 'planet', 1)).toBe('nebula');
         // A nebula drawn after three nebulae is a body instead: a planet or an asteroid by the second draw.
@@ -532,22 +616,33 @@ describe('encounter schedule', () => {
         continue;
       }
       if (body === 'asteroid') asteroids++;
+      if (body === 'comet') comets++;
+      // Comets never take an asteroid's place.
+      if (bodyKind(seed, fraction) === 'asteroid') expect(body).toBe('asteroid');
       expect(nextEncounterKind(seed, params, null, 0)).toBe(body);
       expect(nextEncounterKind(seed, params, 'nebula', 3)).toBe(body);
-      for (const last of ['planet', 'asteroid'] as const) {
+      for (const last of ['planet', 'asteroid', 'comet'] as const) {
         expect(nextEncounterKind(seed, params, last, 2)).toBe(body);
         expect(nextEncounterKind(seed, params, last, 3)).toBe('nebula');
       }
     }
     expect(asteroids).toBeGreaterThan(100);
-    // The run class: planets and asteroids are bodies.
-    expect([runClass('planet'), runClass('asteroid'), runClass('nebula'), runClass(null)]).toEqual(['planet', 'planet', 'nebula', null]);
+    expect(comets).toBeGreaterThan(50);
+    // The run class: planets, asteroids and comets are bodies.
+    expect([runClass('planet'), runClass('asteroid'), runClass('comet'), runClass('nebula'), runClass(null)]).toEqual(['planet', 'planet', 'planet', 'nebula', null]);
     // The fraction of the bodies that are asteroids gives the asteroid share of all encounters.
     expect(asteroidFraction({ nebulaShare: 0.35, asteroidShare: 0.15 })).toBeCloseTo(0.15 / 0.65, 12);
     expect(asteroidFraction({ nebulaShare: 0, asteroidShare: 1 })).toBe(1);
     expect(asteroidFraction({ nebulaShare: 0.5, asteroidShare: 0.9 })).toBe(1);
     expect(asteroidFraction({ nebulaShare: 1, asteroidShare: 0.5 })).toBe(0);
     expect(asteroidFraction({ nebulaShare: 0.35 })).toBe(0);
+    // The fraction of the bodies left after the asteroids that are comets gives the comet share.
+    expect(cometFraction({ nebulaShare: 0.35, asteroidShare: 0.15, cometShare: 0.1 })).toBeCloseTo(0.1 / 0.5, 12);
+    expect(cometFraction({ nebulaShare: 0, asteroidShare: 0, cometShare: 1 })).toBe(1);
+    expect(cometFraction({ nebulaShare: 0.5, asteroidShare: 0.3, cometShare: 0.5 })).toBe(1);
+    expect(cometFraction({ nebulaShare: 0, asteroidShare: 1, cometShare: 0.5 })).toBe(0);
+    expect(cometFraction({ nebulaShare: 1, cometShare: 0.5 })).toBe(0);
+    expect(cometFraction({ nebulaShare: 0.35, asteroidShare: 0.15 })).toBe(0);
   });
 
   it('nextEncounterKind keeps the draw until the run reaches the cap, then switches kind', () => {
@@ -808,7 +903,7 @@ describe('nebula encounters', () => {
     },
   );
 
-  it('with the default shares, planets, nebulae and asteroids follow the schedule, each through the full cycle', () => {
+  it('with the default shares, planets, nebulae, asteroids and comets follow the schedule, each through the full cycle', () => {
     const kinds: string[] = [];
     const { transitions } = simulate(1 / 60, {
       until: afterEncounters(6),
@@ -819,8 +914,8 @@ describe('nebula encounters', () => {
     });
     expect(transitions.map((t) => t.to)).toEqual(Array.from({ length: 6 }, () => CYCLE).flat());
     expect(kinds).toEqual(encounterSchedule(DEFAULT_AUTOPILOT_PARAMS, 6).map((e) => e.kind));
-    // The test default trip meets an asteroid fifth.
-    expect(new Set(kinds)).toEqual(new Set(['planet', 'nebula', 'asteroid']));
+    // The test default trip meets an asteroid fifth and a comet sixth.
+    expect(new Set(kinds)).toEqual(new Set(['planet', 'nebula', 'asteroid', 'comet']));
   });
 
   it('setCruiseSpeed scales the nebula profile like the planet one and keeps its distances', () => {
@@ -922,7 +1017,7 @@ describe('autopilot simulation', () => {
     expect(kinds).toEqual(encounterSchedule(DEFAULT_AUTOPILOT_PARAMS, n).map((e) => e.kind));
     expect(longestRun(kinds)).toBeLessThanOrEqual(ENCOUNTER_MAX_SAME_KIND_RUN);
     expect(longestRun(kinds.map((k) => runClass(k as EncounterKind)))).toBeLessThanOrEqual(ENCOUNTER_MAX_SAME_KIND_RUN);
-    expect(new Set(kinds)).toEqual(new Set(['planet', 'nebula', 'asteroid']));
+    expect(new Set(kinds)).toEqual(new Set(['planet', 'nebula', 'asteroid', 'comet']));
     expect(sides).toEqual(new Set(['left', 'right']));
     const [low, high] = ENCOUNTER_NEBULA_SHARE_BOUNDS;
     const share = kinds.filter((k) => k === 'nebula').length / n;
@@ -932,6 +1027,10 @@ describe('autopilot simulation', () => {
     const asteroidShare = kinds.filter((k) => k === 'asteroid').length / n;
     expect(asteroidShare).toBeGreaterThanOrEqual(aLow);
     expect(asteroidShare).toBeLessThanOrEqual(aHigh);
+    const [cLow, cHigh] = ENCOUNTER_COMET_SHARE_BOUNDS;
+    const cometShare = kinds.filter((k) => k === 'comet').length / n;
+    expect(cometShare).toBeGreaterThanOrEqual(cLow);
+    expect(cometShare).toBeLessThanOrEqual(cHigh);
     // Cruise lengths, from load and from each return to CRUISE to the next APPROACH. Stated tolerance
     // for the mean: 1% of the configured interval (the jitter's standard error over 1,000 encounters
     // is about 0.3%, and each cruise is measured to within two steps).
@@ -944,6 +1043,8 @@ describe('autopilot simulation', () => {
     const largestNebula = NEBULA_RANGES.radius[1];
     // Larger than any seeded field's bounding radius (about 53 at most over 2,000 seeds).
     const largestAsteroid = 64;
+    // Larger than any seeded coma (COMET_RANGES.comaRadius).
+    const largestComet = 60;
     const random = mulberry32(0x5afe_7e57);
     const draws = Array.from({ length: 200 }, () => ({
       baseSeed: Math.floor(random() * 2 ** 32),
@@ -954,7 +1055,7 @@ describe('autopilot simulation', () => {
     const largest = SHIP_SPEED_LEVELS.map((_, level) => ({ baseSeed: level + 1, level, dt: 1 / 60, largest: true }));
     const cases = [...draws.map((d) => ({ ...d, largest: false })), ...largest];
 
-    it.each(['planet', 'nebula', 'asteroid'] as const)('%s: clearance ≥ radius × (1 + margin) and no frame jumps', (kind) => {
+    it.each(['planet', 'nebula', 'asteroid', 'comet'] as const)('%s: clearance ≥ radius × (1 + margin) and no frame jumps', (kind) => {
       let checked = 0;
       let largestSeen = 0;
       for (const { baseSeed, level, dt, largest: useLargest } of cases) {
@@ -966,6 +1067,7 @@ describe('autopilot simulation', () => {
           planetFor: useLargest ? () => ({ radius: largestPlanet }) : planetParams,
           nebulaFor: useLargest ? () => ({ radius: largestNebula }) : nebulaParams,
           asteroidFor: useLargest ? () => ({ radius: largestAsteroid }) : asteroidParams,
+          cometFor: useLargest ? () => ({ radius: largestComet }) : cometParams,
         };
         setCruiseSpeed(params, SHIP_SPEED_LEVELS[level]!);
         let minClearance = Number.POSITIVE_INFINITY;
@@ -997,7 +1099,8 @@ describe('autopilot simulation', () => {
         checked++;
       }
       expect(checked).toBe(cases.length);
-      expect(largestSeen).toBe(kind === 'planet' ? largestPlanet : kind === 'nebula' ? largestNebula : largestAsteroid);
+      const largestOf = { planet: largestPlanet, nebula: largestNebula, asteroid: largestAsteroid, comet: largestComet };
+      expect(largestSeen).toBe(largestOf[kind]);
     }, 120_000);
   });
 
@@ -1256,7 +1359,7 @@ describe('dropping out of warp', () => {
 
   describe.each(SHIP_SPEED_LEVELS.map((cruiseSpeed) => ({ cruiseSpeed })))('at cruise speed $cruiseSpeed', ({ cruiseSpeed }) => {
     const encounterSpeed = Math.min(cruiseSpeed, ENCOUNTER_ARRIVAL_SPEED);
-    const cases = (['planet', 'nebula', 'asteroid'] as const).flatMap((kind) => [1 / 60, 1 / 120].map((dt) => ({ kind, dt })));
+    const cases = (['planet', 'nebula', 'asteroid', 'comet'] as const).flatMap((kind) => [1 / 60, 1 / 120].map((dt) => ({ kind, dt })));
 
     it.each(cases)(
       'the ship is out of warp when the $kind reaches opacity 0.1, and flies the profile for its encounter speed from the spawn (dt $dt)',
@@ -1267,6 +1370,7 @@ describe('dropping out of warp', () => {
           expect(params.profile).toEqual(DEFAULT_AUTOPILOT_PARAMS.profile);
           expect(params.nebula.profile).toEqual(DEFAULT_AUTOPILOT_PARAMS.nebula.profile);
           expect(params.asteroid.profile).toEqual(DEFAULT_AUTOPILOT_PARAMS.asteroid.profile);
+          expect(params.comet.profile).toEqual(DEFAULT_AUTOPILOT_PARAMS.comet.profile);
         }
         const profile = encounterProfile(params, kind);
         // Over three encounters, so the cruises after an encounter (the return to warp, then the drop
@@ -1576,6 +1680,31 @@ function rockSpheres(params: Readonly<AsteroidParams>, plan: Readonly<Encounter>
   return rocks;
 }
 
+/**
+ * Spheres holding a comet's glow mesh as the renderer places it (its coma, and each stretch of tube
+ * between two neighbouring rings of either tail), centred relative to the nucleus in world axes: much
+ * tighter than the out-of-view bounds the autopilot uses (`CometSpec.bounds`, one per five stretches).
+ */
+function cometSpheres(params: Readonly<CometParams>, plan: Readonly<Encounter>): { centre: Vec3; radius: number }[] {
+  const geometry = cometGlowGeometry(params, plan);
+  const position = geometry.getAttribute('position');
+  const uv = geometry.getAttribute('uv');
+  const spheres: { centre: Vec3; radius: number }[] = [{ centre: { x: 0, y: 0, z: 0 }, radius: params.radius * (1 + 1e-6) }];
+  const sides = 16;
+  let first = 0;
+  while (first < position.count && uv.getY(first) === 0) first++;
+  for (let start = first; start + 2 * sides <= position.count; start += sides) {
+    // Skip the pair that would join the last ring of one tail to the first of the next.
+    if (uv.getY(start) !== uv.getY(start + sides)) continue;
+    const vertices: Vec3[] = [];
+    for (let v = start; v < start + 2 * sides; v++) vertices.push({ x: position.getX(v), y: position.getY(v), z: position.getZ(v) });
+    const centre = vertices.reduce((c, v) => ({ x: c.x + v.x / vertices.length, y: c.y + v.y / vertices.length, z: c.z + v.z / vertices.length }), { x: 0, y: 0, z: 0 });
+    spheres.push({ centre, radius: Math.max(...vertices.map((v) => len(sub(v, centre)))) * (1 + 1e-6) });
+  }
+  geometry.dispose();
+  return spheres;
+}
+
 /** Median radius of the seeded planets (`planetParams` over 2,001 seeds). */
 const MEDIAN_PLANET_RADIUS = (() => {
   const radii = Array.from({ length: 2001 }, (_, i) => planetParams(hash(0x3ed1a7, i)).radius).sort((a, b) => a - b);
@@ -1649,17 +1778,18 @@ function atLevel(level: number, overrides: Partial<AutopilotParams> = {}): Autop
 
 /**
  * The first encounter of a trip from load at speed level `level` and dt = 1/60, of a median planet
- * (k = 2) or the median nebula, with the view cone `viewHalfAngle` (π: main's departure). Seconds
+ * (k = 2), the median nebula or the comet `comet`, with the view cone `viewHalfAngle` (π: main's departure). Seconds
  * from the closest approach until the object is out of view (`encounterViewMargin` > 0 with the
  * default cone, measured the same way in both runs), until the encounter ends, and until the next
  * cruise has the ship at 99% of the arrival speed (min(cruise speed, arrival speed)) and at 99% of
  * the cruise speed; and the ship's largest acceleration from the closest approach on (units per
  * second per second).
  */
-function departureTimes(kind: 'planet' | 'nebula', level: number, viewHalfAngle: number) {
+function departureTimes(kind: 'planet' | 'nebula' | 'comet', level: number, viewHalfAngle: number, comet?: Readonly<CometParams>) {
   const params = atLevel(level, {
-    nebulaShare: kind === 'nebula' ? 1 : 0,
+    ...onlyKind(kind),
     planetFor: () => ({ radius: MEDIAN_PLANET_RADIUS }),
+    ...(comet === undefined ? {} : { cometFor: () => comet }),
     viewHalfAngle,
   });
   const travel = createTravel(params, DEFAULT_SHIP_PARAMS);
@@ -1782,7 +1912,7 @@ describe('speed driven by visibility', () => {
       const cruise = params.cruiseSpeed;
       const arrival = encounterCruiseSpeed(params);
       for (const interval of [ENCOUNTER_INTERVAL_SECONDS * (1 - ENCOUNTER_INTERVAL_JITTER), ENCOUNTER_INTERVAL_SECONDS]) {
-        for (const entry of [params.profile.minSpeed, params.nebula.profile.minSpeed, params.asteroid.profile.minSpeed, arrival]) {
+        for (const entry of [params.profile.minSpeed, params.nebula.profile.minSpeed, params.asteroid.profile.minSpeed, params.comet.profile.minSpeed, arrival]) {
           const duration = warpEntryDuration(params, entry);
           expect(duration).toBeGreaterThanOrEqual(ENCOUNTER_WARP_ENTRY_SECONDS);
           expect((1.5 * (cruise - entry)) / duration).toBeLessThanOrEqual(ENCOUNTER_WARP_ENTRY_MAX_RATE + 1e-9);
@@ -1986,6 +2116,100 @@ describe('speed driven by visibility', () => {
     },
     120_000,
   );
+});
+
+describe('speed driven by visibility: comets', () => {
+  it("a comet's view margin is the smallest of its bounds' margins (the coma's sphere without them), and its pass factor keeps the path out of the coma", () => {
+    const comet = cometParams(hash(ENCOUNTER_BASE_SEED, 5));
+    const plan = planEncounter({ x: 3, y: -2, z: 7 }, { x: 0.2, y: 0.1, z: -1 }, comet.radius, COMET_ENCOUNTER_DISTANCE, cometPassFactor(comet, 4), 0.4);
+    const encounter: CometEncounter = { kind: 'comet', index: 0, seed: comet.seed, side: 'right', comet, plan };
+    const up = { x: plan.side.y * plan.direction.z - plan.side.z * plan.direction.y, y: plan.side.z * plan.direction.x - plan.side.x * plan.direction.z, z: plan.side.x * plan.direction.y - plan.side.y * plan.direction.x };
+    const half = DEFAULT_AUTOPILOT_PARAMS.viewHalfAngle;
+    for (const remaining of [2000, 600, 100, 0, -20, -200]) {
+      const position = { x: 3 + plan.direction.x * (COMET_ENCOUNTER_DISTANCE - remaining), y: -2 + plan.direction.y * (COMET_ENCOUNTER_DISTANCE - remaining), z: 7 + plan.direction.z * (COMET_ENCOUNTER_DISTANCE - remaining) };
+      const ship = { ...createShipState(), position, heading: plan.direction };
+      const nucleus = encounterOffset(plan, position, { x: 0, y: 0, z: 0 });
+      const expected = Math.min(
+        ...comet.bounds.map((b) => {
+          const [a, c, e] = b.offset;
+          const centre = {
+            x: nucleus.x + a * plan.direction.x + c * plan.side.x + e * up.x,
+            y: nucleus.y + a * plan.direction.y + c * plan.side.y + e * up.y,
+            z: nucleus.z + a * plan.direction.z + c * plan.side.z + e * up.z,
+          };
+          return sphereViewMargin(centre, plan.direction, b.radius, half);
+        }),
+      );
+      expect(encounterViewMargin(encounter, ship, half)).toBeCloseTo(expected, 12);
+      // A tail can only keep a comet in view longer than its coma alone would.
+      const bare: CometEncounter = { ...encounter, comet: { radius: comet.radius } };
+      expect(encounterViewMargin(bare, ship, half)).toBeCloseTo(sphereViewMargin(nucleus, plan.direction, comet.radius, half), 12);
+      expect(encounterViewMargin(encounter, ship, half)).toBeLessThanOrEqual(encounterViewMargin(bare, ship, half) + 1e-12);
+    }
+    expect(cometPassFactor({ radius: 30 }, 4)).toBe(4);
+    expect(cometPassFactor({ radius: 30, passFactor: 1.1 }, 4)).toBe(1 + ENCOUNTER_CLEARANCE_MARGIN);
+    expect(cometPassFactor(comet, 99)).toBe(comet.passFactor);
+  });
+
+  it.each([0, 1, 2])(
+    'comets at level %i, elevations from -0.6 to 0.6: while the coma or any stretch of a tail is in the 21:9 view the ship is never faster than on main, and none is in view again after the encounter ends',
+    (level) => {
+      let cases = 0;
+      let latest = 0;
+      for (const elevation of [-0.6, 0, 0.6]) {
+        for (let draw = 0; draw < 3; draw++) {
+          const baseSeed = 0xc0e + 13 * cases;
+          const label = `level ${level}, elevation ${elevation}, base seed ${baseSeed}`;
+          let spheres: { centre: Vec3; radius: number }[] = [];
+          let spheresFor: ActiveEncounter | null = null;
+          const params = atLevel(level, { ...onlyKind('comet'), sideElevation: [elevation, elevation], baseSeed, cometFor: cometParams });
+          const r = againstMain(params, 1 / 60, (encounter, ship) => {
+            if (encounter.kind !== 'comet') throw new Error(`${label}: a ${encounter.kind}`);
+            if (spheresFor !== encounter) {
+              spheres = cometSpheres(encounter.comet as CometParams, encounter.plan);
+              spheresFor = encounter;
+            }
+            const centre = encounterOffset(encounter.plan, ship.position, { x: 0, y: 0, z: 0 });
+            return spheres.some((sphere) =>
+              sphereInView({ x: centre.x + sphere.centre.x, y: centre.y + sphere.centre.y, z: centre.z + sphere.centre.z }, sphere.radius, ship.heading),
+            );
+          });
+          expect(spheres.length, label).toBe(1 + 2 * 40);
+          expect(r.worstProfileError, label).toBe(0);
+          expect(r.inViewFrames, label).toBeGreaterThan(1000);
+          expect(r.worstExcess, label).toBeLessThanOrEqual(1e-9);
+          expect(r.inViewAfterEnd, `${label} ${JSON.stringify(r.firstBack)}`).toBe(0);
+          expect(r.endedAt, label).toBeGreaterThan(r.closestAt);
+          latest = Math.max(latest, r.endedAt - r.closestAt);
+          cases++;
+        }
+      }
+      // The tails lie behind the camera after the closest approach, so a comet leaves the view with
+      // its coma: measured within about 0.1 s of the closest approach at every level.
+      expect(latest).toBeLessThan(2);
+    },
+    120_000,
+  );
+
+  it.each([0, 1, 2])('at level %i a comet encounter ends within a second of the closest approach, and the ship is back at the arrival speed soon after', (level) => {
+    const comet = cometParams(hash(ENCOUNTER_BASE_SEED, 5));
+    const before = departureTimes('comet', level, Math.PI, comet);
+    const after = departureTimes('comet', level, DEFAULT_AUTOPILOT_PARAMS.viewHalfAngle, comet);
+    const label = `comet at level ${level}: ${JSON.stringify({ before, after })}`;
+    // Measured (seconds after the closest approach; before → after, before being main's departure to
+    // the despawn distance): out of view 0.01–0.02 s after it at every level (the tails are behind the
+    // camera, and the coma is already beside it), so the encounter ends on the step after (DEPARTURE
+    // lasts at least one); back at the arrival speed 115.3 → 13.5 (level 0), 54.7 → 13.8 (level 1) and
+    // 54.7 → 7.0 (level 2).
+    expect(after.outOfView, label).toBe(before.outOfView);
+    expect(after.outOfView, label).toBeLessThan(0.1);
+    expect(after.ended - after.outOfView, label).toBeLessThanOrEqual(2 / 60 + 1e-9);
+    expect(after.atArrival, label).toBeLessThan(before.atArrival);
+    expect(after.atCruise, label).toBeLessThan(before.atCruise);
+    // As for planets (docs/PLAN.md section 9, Phase 4): at least 50% sooner at the default and top levels.
+    if (level >= SHIP_DEFAULT_SPEED_LEVEL) expect(after.atArrival, label).toBeLessThanOrEqual(0.5 * before.atArrival);
+    expect(after.worstAccel, label).toBeLessThan(16);
+  });
 });
 
 describe('speed driven by visibility: the departure, before and after', () => {

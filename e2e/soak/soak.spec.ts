@@ -1,7 +1,7 @@
 /**
  * Long-run soak (docs/PLAN.md section 5, "Stable rendering across tab switches and long runs",
  * section 9 Phase 1/3 "Done when" and section 10): travel with a short encounter interval for
- * SOAK_MINUTES (default 30), through many planet, nebula and asteroid encounters, and sample them.
+ * SOAK_MINUTES (default 30), through many planet, nebula, asteroid and comet encounters, and sample them.
  *
  * Each sample is taken at CRUISE with no encounter object, so every sample sees the same scene: the
  * used JS heap after a forced GC, the renderer's resource counts, and the frame-time statistics of
@@ -227,7 +227,7 @@ test(`soak: ${SOAK_MINUTES} min, heap, frame time and GPU resources stay stable`
   test.setTimeout(durationMs + SOAK_SAMPLE_SECONDS * 1000 + 3 * CRUISE_WAIT_MS + 120_000);
   const errors = collectErrors(page);
   await page.setViewportSize(VIEWPORT);
-  // The seeded default mix of planets, nebulae and asteroids, at a short interval, flown from the top speed
+  // The seeded default mix of planets, nebulae, asteroids and comets, at a short interval, flown from the top speed
   // (FAST_ENCOUNTERS_ARRIVAL_SPEED in e2e/limits.ts): without that override the encounters are
   // flown from the default speed after dropping out of warp, and a 3-minute run meets only 2 of them
   // and takes 2 samples (measured), too few for its checks. Heap, frame time and resources do not

@@ -58,6 +58,11 @@ Each automated check is written as `file` — `test title`, using the title as i
 - `src/engine/Asteroid.test.ts` — `the ship, flown frame by frame at every level, never comes within the minimum pass distance of any rock: 60 asteroid encounters`
 - `src/engine/Asteroid.test.ts` — `at speed level $level ($cruiseSpeed u/s) no rock of 2,000 seeded asteroids sweeps past faster in angle than the planet guard (5.1°/s)`
 - `e2e/asteroid.spec.ts` — `a forced asteroid encounter draws lit rocks, runs the full cycle, compiles nothing and frees its GPU resources`
+- `src/engine/Comet.test.ts` — `for 2,000 seeded comets the path passes the nucleus at least the minimum pass distance off, outside the coma, and never meets a tail`
+- `src/engine/Comet.test.ts` — `the ship, flown frame by frame at every level, keeps the planned distance from the nucleus and never enters the coma or a tail: 30 comet encounters`
+- `src/engine/Comet.test.ts` — `at speed level $level ($cruiseSpeed u/s) neither the nucleus nor any point of a tail of 2,000 seeded comets sweeps past faster in angle than the planet guard (5.1°/s)`
+- `src/engine/Comet.test.ts` — `over 40 seeded comets at 4:3, 16:9 and 21:9, from the spawn to the end of the encounter, the glow never fills the view`
+- `e2e/comet.spec.ts` — `a forced comet encounter draws its coma and tails, runs the full cycle, compiles nothing and frees its GPU resources`
 - `src/engine/EncounterView.test.ts` — `a ringed planet is drawn with its ring turned toward its encounter, and a ring that does not fit the plan is not drawn`
 - `src/engine/EncounterView.test.ts` — `at the reduced-motion level the floored minimum speed keeps the clearance and gradual fades (dt = %f)`
 - `e2e/encounter.spec.ts` — `three encounters run CRUISE → APPROACH → FLYBY → DEPARTURE → CRUISE and free their GPU resources`
@@ -80,10 +85,12 @@ Each automated check is written as `file` — `test title`, using the title as i
 - `src/engine/Autopilot.test.ts` — `ringed planets at level %i, the widest ring, k from its clearance to 6, tilts and elevations from -0.6 to 0.6: while the planet or its ring is in the 21:9 view the ship is never faster than on main, and neither is in view again after the encounter ends`
 - `src/engine/Autopilot.test.ts` — `nebulae at level %i, elevations from -0.6 to 0.6: while any layer is in the 21:9 view the ship is never faster than on main, and none is in view again after the encounter ends`
 - `src/engine/Autopilot.test.ts` — `asteroids at level %i, seeded single rocks and fields, elevations from -0.6 to 0.6: while any rock is in the 21:9 view the ship is never faster than on main, and none is in view again after the encounter ends`
+- `src/engine/Autopilot.test.ts` — `comets at level %i, elevations from -0.6 to 0.6: while the coma or any stretch of a tail is in the 21:9 view the ship is never faster than on main, and none is in view again after the encounter ends`
+- `src/engine/Comet.test.ts` — `fades in and out with the encounter opacity in the encounter view, and frees both meshes`
 - `e2e/rings.spec.ts` — `a ring shows in front of its planet and against the sky, and the planet hides the ring behind it`
 - `src/engine/renderSize.test.ts` — `keeps the whole view inside the autopilot view cone at every aspect ratio`
 - `e2e/encounter.spec.ts` — `three encounters run CRUISE → APPROACH → FLYBY → DEPARTURE → CRUISE and free their GPU resources`
-- Manual: watch a few encounters, either on the live site (the first planet appears within about a minute) or on the e2e build with a short interval (`npm run build:e2e && npx vite preview --outDir dist-e2e`, then open `/elsewhere/?encounterInterval=5`, adding `&encounterKind=asteroid` for asteroids alone). Stars, planets, nebulae and asteroids should fade in and out with no visible pop. Smoothness on screen is a visual judgement. The `Starfield.test.ts` checks above test `starFade` in `src/engine/Starfield.ts`, the TypeScript mirror of the shader's star fade, so the GLSL that actually runs on the GPU is covered only by this manual step.
+- Manual: watch a few encounters, either on the live site (the first planet appears within about a minute) or on the e2e build with a short interval (`npm run build:e2e && npx vite preview --outDir dist-e2e`, then open `/elsewhere/?encounterInterval=5`, adding `&encounterKind=asteroid` or `&encounterKind=comet` for asteroids or comets alone). Stars, planets, nebulae, asteroids and comets should fade in and out with no visible pop. Smoothness on screen is a visual judgement. The `Starfield.test.ts` checks above test `starFade` in `src/engine/Starfield.ts`, the TypeScript mirror of the shader's star fade, so the GLSL that actually runs on the GPU is covered only by this manual step.
 
 ## 7. Fullscreen, pause, speed change and keyboard shortcuts work.
 
@@ -136,9 +143,11 @@ Each automated check is written as `file` — `test title`, using the title as i
 - `.github/workflows/soak.yml` (the full run, started by hand, 30 minutes by default)
 - `e2e/acceleratedEncounters.spec.ts` — `ten encounters, accelerated with a fake clock, leave the GPU resources at their baseline every time`
 - `e2e/starfield.spec.ts` — `soak: GPU resources stay constant and the JS heap does not grow`
-- `src/engine/longRun.test.ts` — `100 accelerated encounters, planets, nebulae and asteroids, each return every resource to baseline`
+- `src/engine/longRun.test.ts` — `100 accelerated encounters, planets, nebulae, asteroids and comets, each return every resource to baseline`
 - `src/engine/longRun.test.ts` — `120 accelerated asteroid encounters, fields of up to 7 rocks among them, each free every rock geometry and material`
+- `src/engine/longRun.test.ts` — `120 accelerated comet encounters each free the nucleus and the glow, with no growth over the run`
 - `e2e/asteroid.spec.ts` — `a forced asteroid encounter draws lit rocks, runs the full cycle, compiles nothing and frees its GPU resources`
+- `e2e/comet.spec.ts` — `a forced comet encounter draws its coma and tails, runs the full cycle, compiles nothing and frees its GPU resources`
 - Manual: CI runs only the 3-minute soak. For the full 30 minutes, start the Soak workflow from the Actions tab (`minutes` defaults to 30) and check the `soak-report` artifact. SwiftShader frame rates say nothing about a real GPU, so also leave the live site running for 30 minutes in desktop Chrome with DevTools' Performance monitor open. The JS heap and frame rate at the end should be close to their values just after start.
 
 ## 13. Asset paths resolve at `https://zeikar.dev/elsewhere/`.
