@@ -7,7 +7,8 @@ import { expect, test, type Page } from '@playwright/test';
 import type { E2EHookSnapshot } from '../src/e2eHook';
 import { installFrameSampler, takeFrameWindow } from './frameSampler';
 import { appUrl } from './app';
-import { ENCOUNTER_BASE_SEED } from '../src/config';
+import { CRUISE_PROGRAMS } from './limits';
+import { DT_CAP_SECONDS, ENCOUNTER_BASE_SEED } from '../src/config';
 import { generateGalaxies } from '../src/engine/Galaxies';
 import { formatTripSeed } from '../src/tripSeed';
 
@@ -94,16 +95,77 @@ test('the hook reports frame-time statistics, the heap and renderer.info, and a 
   expect(errors).toEqual([]);
 });
 
+test('the frame-rate cap: the engine draws at most the cap a second, and the simulation stays real time', async ({ page }) => {
+  const errors = collectErrors(page);
+  await page.setViewportSize({ width: 160, height: 90 });
+  // The default cap, then a cap of 15 fps (an e2e-only override), well under headless Chromium's 60 Hz.
+  await page.goto(appUrl('encounterInterval=1e9'));
+  await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) >= 5);
+  expect((await snapshot(page)).frameRateCap).toBe(60);
+  // Only the far stars: under SwiftShader the near starfield's quads alone take 100–270 ms a frame
+  // even at 160×90, over the dt cap, which would rightly hold the simulation back.
+  await page.goto(appUrl('encounterInterval=1e9&frameRateCap=15&starLayers=far'));
+  await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) >= 5);
+  expect((await snapshot(page)).frameRateCap).toBe(15);
+  // Over 4 s, read at drawn frames only (in the page, so both ends are frame boundaries): frames
+  // drawn, and the simulated time against the wall-clock time between the first and last of them.
+  // The window starts after a second of steady frames: under SwiftShader a frame or two soon after
+  // start-up stall (on main too), and the dt cap rightly drops most of such a stall from the
+  // simulation.
+  const run = await page.evaluate(
+    (dtCapMs) =>
+      new Promise<{ drawn: number; wall: number; simulated: number; distance: number }>((resolve) => {
+        const hook = window.__elsewhere!;
+        let first: { frames: number; at: number; time: number; distance: number } | null = null;
+        let last = hook.snapshot().frames;
+        let lastAt = Number.NaN;
+        let steady = 0;
+        const tick = (at: number) => {
+          const s = hook.snapshot();
+          if (s.frames !== last) {
+            last = s.frames;
+            steady = at - lastAt < dtCapMs ? steady + 1 : 0;
+            lastAt = at;
+            if (first === null) {
+              if (steady >= 15) first = { frames: s.frames, at, time: s.ship.time, distance: s.ship.distance };
+            } else if (at - first.at >= 4_000) {
+              resolve({ drawn: s.frames - first.frames, wall: at - first.at, simulated: s.ship.time - first.time, distance: s.ship.distance - first.distance });
+              return;
+            }
+          }
+          requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      }),
+    DT_CAP_SECONDS * 1000,
+  );
+  test.info().annotations.push({ type: 'capped at 15 fps', description: JSON.stringify({ ...run, ratio: run.simulated / (run.wall / 1000) }) });
+  expect(run.drawn).toBeGreaterThan(0);
+  // At most 15 a second (one more for the window's ends).
+  expect(run.drawn).toBeLessThanOrEqual(Math.ceil((run.wall / 1000) * 15) + 1);
+  // Each drawn frame steps the simulation by the real time since the last (a 15 fps frame, 67 ms,
+  // is under the 100 ms dt cap, DT_CAP_SECONDS), so the simulation keeps real time, not 1/60 s a
+  // drawn frame (which would be a quarter of it). The margin below allows for a few frames over the
+  // dt cap on a loaded CI machine.
+  expect(run.simulated).toBeGreaterThan(0.8 * (run.wall / 1000));
+  expect(run.simulated).toBeLessThan(1.1 * (run.wall / 1000));
+  expect(run.distance).toBeGreaterThan(0);
+  expect(errors).toEqual([]);
+});
+
 /**
  * The GPU resource budget at cruise (no encounter object): what the sky costs.
  *
  * - The far stars, the near dust and, in a trip with any distant galaxy, the galaxy layer: one
  *   geometry and one draw call each.
- * - Programs: one per sky layer drawn, plus the four encounter programs ProgramWarmup keeps from
- *   start-up (the rocky and gas planet surfaces, the atmosphere and the nebula layers).
+ * - Programs: one per sky layer drawn, plus the eight encounter programs ProgramWarmup keeps from
+ *   start-up (the procedural and baked rocky and gas planet surfaces, the two surface bakes, the
+ *   halo (atmosphere, rings, comet glow) and the nebula layers; CRUISE_PROGRAMS in e2e/limits.ts).
+ *   Before issue #65 there were four (7 and 6 in all).
+ * - Textures: none. A planet's bake cube maps exist only while it does.
  *
- * So the galaxies add at most one geometry, one program and one draw call: 3, 7 and 3 in a trip
- * with galaxies (the test default trip has two), and 2, 6 and 2 in a trip without, where the
+ * So the galaxies add at most one geometry, one program and one draw call: 3, 11 and 3 in a trip
+ * with galaxies (the test default trip has two), and 2, 10 and 2 in a trip without, where the
  * galaxy layer is hidden and never compiled.
  */
 test('the resource budget at cruise: the distant galaxies add one geometry, one program and one draw call', async ({ page }) => {
@@ -118,14 +180,14 @@ test('the resource budget at cruise: the distant galaxies add one geometry, one 
     expect(s.planets).toBe(0);
     return { galaxies: s.galaxies.items.length, visible: s.galaxies.visible, ...s.renderer };
   };
-  const withGalaxies = await budget(ENCOUNTER_BASE_SEED, 7);
+  const withGalaxies = await budget(ENCOUNTER_BASE_SEED, CRUISE_PROGRAMS.withGalaxies);
   // A trip without galaxies (0–3 per trip, from the trip seed).
   let emptySeed = 1;
   while (generateGalaxies(emptySeed).length > 0) emptySeed++;
-  const without = await budget(emptySeed, 6);
+  const without = await budget(emptySeed, CRUISE_PROGRAMS.withoutGalaxies);
   test.info().annotations.push({ type: 'cruise budget', description: JSON.stringify({ withGalaxies, without, emptySeed }) });
-  expect(withGalaxies).toMatchObject({ galaxies: 2, visible: true, geometries: 3, programs: 7, calls: 3, textures: 0 });
-  expect(without).toMatchObject({ galaxies: 0, visible: false, geometries: 2, programs: 6, calls: 2, textures: 0 });
+  expect(withGalaxies).toMatchObject({ galaxies: 2, visible: true, geometries: 3, programs: CRUISE_PROGRAMS.withGalaxies, calls: 3, textures: 0 });
+  expect(without).toMatchObject({ galaxies: 0, visible: false, geometries: 2, programs: CRUISE_PROGRAMS.withoutGalaxies, calls: 2, textures: 0 });
   expect(errors).toEqual([]);
 });
 

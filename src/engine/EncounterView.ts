@@ -22,6 +22,9 @@
  *   planet's rotation, the nebula's churn and per-layer near fade, the rocks' and the nucleus's
  *   tumble), so it freezes
  *   while paused.
+ * - Planet surface bake (issue #65): with `bakePlanets`, each planet is made with a surface bake
+ *   (`PlanetOptions.bake`), which the engine draws a slice at a time (PlanetBake.ts); the planet is
+ *   drawn procedurally until it is done. Its cube maps are freed with the planet.
  *
  * Nothing is allocated per frame; creating an object (once per encounter) allocates its materials.
  */
@@ -207,9 +210,16 @@ export interface EncounterObject {
  */
 export type EncounterCompiler = (object: Object3D) => PromiseLike<unknown>;
 
+/** How the encounter view makes its objects. */
+export interface EncounterViewOptions {
+  /** Make planets with a surface bake (`PlanetOptions.bake`). Default: false. */
+  bakePlanets?: boolean;
+}
+
 export class EncounterView {
   private readonly scene: Object3D;
   private readonly compile: EncounterCompiler | null;
+  private readonly bakePlanets: boolean;
   private current: EncounterObject | null = null;
   /** Encounter index of `current`. */
   private index = -1;
@@ -218,9 +228,10 @@ export class EncounterView {
   /** Scratch light direction, reused for every planet. */
   private readonly light: Vec3 = { x: 0, y: 0, z: 0 };
 
-  constructor(scene: Object3D, compile: EncounterCompiler | null = null) {
+  constructor(scene: Object3D, compile: EncounterCompiler | null = null, options: Readonly<EncounterViewOptions> = {}) {
     this.scene = scene;
     this.compile = compile;
+    this.bakePlanets = options.bakePlanets === true;
   }
 
   /** The current encounter object, planet, nebula, asteroid or comet, or `null` (read-only view; do not modify). */
@@ -263,7 +274,9 @@ export class EncounterView {
           ? new Asteroid(encounterAsteroidParams(encounter), encounterLightDirection(encounter.plan, this.light), encounter.plan)
           : encounter.kind === 'comet'
             ? new Comet(encounterCometParams(encounter), encounter.plan)
-            : new Planet(encounterPlanetParams(encounter), encounterLightDirection(encounter.plan, this.light), encounter.plan);
+            : new Planet(encounterPlanetParams(encounter), encounterLightDirection(encounter.plan, this.light), encounter.plan, {
+                bake: this.bakePlanets,
+              });
     created.setFade(0);
     this.current = created;
     this.index = encounter.index;

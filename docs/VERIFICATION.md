@@ -35,6 +35,9 @@ Each automated check is written as `file` — `test title`, using the title as i
 - `src/engine/Autopilot.test.ts` — `at the top speed level the timeline, warp entry and exit included, matches between dt = 1/60 and dt = 1/120 over %i encounters`
 - `src/engine/Autopilot.test.ts` — `the timeline at dt = %f matches dt = 1/144 over 6 encounters, kinds and states included`
 - `src/engine/Autopilot.test.ts` — `from load with defaults, goes APPROACH, FLYBY, DEPARTURE, CRUISE, and the planet is visible within 30-60 s (dt = %f)`
+- `src/engine/FrameCap.test.ts` — `draws every frame of a display at or under the cap ($label): never halved to 30`
+- `src/engine/FrameCap.test.ts` — `at 120 Hz draws exactly every other display frame`
+- `e2e/perf.spec.ts` — `the frame-rate cap: the engine draws at most the cap a second, and the simulation stays real time`
 
 ## 4. Coming back to a tab hidden for a long time doesn't teleport the stars.
 
@@ -99,6 +102,8 @@ Each automated check is written as `file` — `test title`, using the title as i
 - `src/engine/Nebula.test.ts` — `is 0 up to the minimum distance, 1 from the end of the fade, monotonic and continuous`
 - `src/engine/Nebula.test.ts` — `every layer fades out continuously and is 0 before the camera is within the minimum of its plane (dt $dt, level $level)`
 - `src/engine/EncounterView.test.ts` — `keeps a new planet hidden until its compile settles, then follows the fade`
+- `e2e/planet.spec.ts` — `a baked planet looks as the procedural one does over its disc, apart from filtering, framed as usual and close up`
+- `e2e/gpuCost.spec.ts` — `a planet bakes its surface while it is still a dot, from warmed programs, and frees the cube maps with it`
 - `src/engine/EncounterView.test.ts` — `keeps a new nebula hidden until its compile settles`
 - `src/engine/Autopilot.test.ts` — `planets at level %i, k from 1.6 to 6, elevations from -0.6 to 0.6, at every aspect: while on screen the ship is never faster than on main, and it is never on screen again after the encounter ends`
 - `src/engine/Autopilot.test.ts` — `ringed planets at level %i, the widest ring, k from its clearance to 6, tilts and elevations from -0.6 to 0.6: while the planet or its ring is on screen the ship is never faster than on main, and neither is on screen again after the encounter ends`
@@ -168,6 +173,7 @@ Each automated check is written as `file` — `test title`, using the title as i
 - `e2e/acceleratedEncounters.spec.ts` — `ten encounters, accelerated with a fake clock, leave the GPU resources at their baseline every time`
 - `e2e/starfield.spec.ts` — `soak: GPU resources stay constant and the JS heap does not grow`
 - `src/engine/longRun.test.ts` — `100 accelerated encounters, planets, nebulae, asteroids and comets, each return every resource to baseline`
+- `src/engine/PlanetBake.test.ts` — `frees the cube maps and every material with the planet; the memory is as documented`
 - `src/engine/longRun.test.ts` — `120 accelerated asteroid encounters, fields of up to 7 rocks among them, each free every rock geometry and material`
 - `src/engine/longRun.test.ts` — `120 accelerated comet encounters each free the nucleus and the glow, with no growth over the run`
 - `e2e/asteroid.spec.ts` — `a forced asteroid encounter draws lit rocks, runs the full cycle, compiles nothing and frees its GPU resources`

@@ -44,6 +44,7 @@ import { FarStarfield } from './engine/FarStarfield';
 import { Galaxies, generateGalaxies, type Galaxy } from './engine/Galaxies';
 import { Nebula, nebulaParams } from './engine/Nebula';
 import { Planet, planetParams, ringAxis, DEFAULT_PLANET_FRAME, type PlanetType } from './engine/Planet';
+import { PlanetBaker } from './engine/PlanetBake';
 import { computeRenderSize } from './engine/renderSize';
 import { hash } from './engine/seed';
 
@@ -77,6 +78,12 @@ export interface PlanetPreviewInfo {
   programs: number;
   /** The planet's disc on the canvas, in CSS pixels from the top-left corner (approximately a circle). */
   disc: { x: number; y: number; radius: number };
+  /**
+   * The planet's sphere as the camera sees it, for telling which pixels are on its disc however the
+   * camera is turned (close up, say): its centre in the camera's view space (looking down -Z), its
+   * drawn radius, and the camera's vertical field of view in degrees.
+   */
+  sphere: { centre: { x: number; y: number; z: number }; radius: number; fovDeg: number };
   /**
    * With the far stars drawn: how many far stars lie behind the inner 80% of the disc's radius
    * (their direction within 0.8 × the disc's angular radius of its centre). `null` without them.
@@ -112,6 +119,16 @@ export interface PlanetPreviewOptions {
    * direction and changes nothing else, so the planet is as small as it is at that distance.
    */
   farFraming?: 'zoom' | 'grow' | 'none';
+  /**
+   * The surface as the engine draws it once baked (`'baked'`, the default: the whole bake is drawn
+   * first, PlanetBake.ts) or procedurally, as before the bake is done (`'procedural'`).
+   */
+  surface?: 'baked' | 'procedural';
+  /**
+   * Seen up close instead: the camera `closeup` planet radii above the surface (0.6 is the closest
+   * pass, k = 1.6), looking at the lit limb, so the surface is magnified as at a closest approach.
+   */
+  closeup?: number;
 }
 
 export interface EncounterPreviewInfo {
@@ -132,6 +149,7 @@ export interface EncounterPreviewInfo {
 
 let canvas: HTMLCanvasElement | null = null;
 let renderer: WebGLRenderer | null = null;
+let baker: PlanetBaker | null = null;
 let shown: Planet | Nebula | Asteroid | Comet | null = null;
 let farStars: FarStarfield | null = null;
 let galaxies: Galaxies | null = null;
@@ -159,6 +177,7 @@ function prepare(): { renderer: WebGLRenderer; scene: Scene; camera: Perspective
     renderer = new WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
     renderer.outputColorSpace = SRGBColorSpace;
     renderer.setClearColor(CLEAR_COLOR, 1);
+    baker = new PlanetBaker(renderer);
   }
   scene ??= new Scene();
   camera ??= new PerspectiveCamera(CAMERA_FOV_DEG, 1, CAMERA_NEAR, CAMERA_FAR);
@@ -169,6 +188,8 @@ function prepare(): { renderer: WebGLRenderer; scene: Scene; camera: Perspective
   camera.aspect = width / height;
   camera.fov = CAMERA_FOV_DEG;
   camera.updateProjectionMatrix();
+  camera.rotation.set(0, 0, 0);
+  camera.updateMatrixWorld();
   shown?.dispose();
   shown = null;
   if (farStars !== null) scene.remove(farStars.mesh);
@@ -205,11 +226,12 @@ function farStarsWithin(stars: FarStarfield, centre: { x: number; y: number; z: 
 function drawPlanet(
   seed: number,
   options: Readonly<PlanetPreviewOptions> = {},
-): Pick<PlanetPreviewInfo, 'disc' | 'farStarsBehindDisc' | 'galaxies'> & { planet: Planet } {
+): Pick<PlanetPreviewInfo, 'disc' | 'sphere' | 'farStarsBehindDisc' | 'galaxies'> & { planet: Planet } {
   const { renderer: r, scene: s, camera: c } = prepare();
   const params = planetParams(seed);
-  const planet = new Planet(params);
+  const planet = new Planet(params, undefined, undefined, { bake: options.surface !== 'procedural' });
   shown = planet;
+  baker?.complete(planet);
   const radius = params.radius;
   const back = params.ring === null ? 1 : Math.max(1, params.extent / PREVIEW_RING_EXTENT);
   planet.object.position.set(PREVIEW_OFFSET_RADII.x * radius, PREVIEW_OFFSET_RADII.y * radius, PREVIEW_OFFSET_RADII.z * radius * back);
@@ -230,6 +252,15 @@ function drawPlanet(
       position.multiplyScalar(factor);
       if (framing === 'grow') planet.object.scale.multiplyScalar(factor);
     }
+  }
+  if (options.closeup !== undefined) {
+    // The camera at the origin looks down -Z: put the planet so the camera is `closeup` radii above
+    // its surface, to the planet's right, and turn the camera to look along the limb a little toward
+    // the planet, at the lit side.
+    const above = radius * (1 + options.closeup);
+    planet.object.position.set(-above, 0, 0);
+    c.lookAt(-0.6 * above, 0, -above);
+    c.updateMatrixWorld();
   }
   planet.update(PREVIEW_TIME);
   s.add(planet.object);
@@ -280,7 +311,9 @@ function drawPlanet(
   };
   const farStarsBehindDisc =
     stars === null ? null : farStarsWithin(stars, { x: p.x / distance, y: p.y / distance, z: p.z / distance }, 0.8 * angularRadius);
-  return { planet, disc, farStarsBehindDisc, galaxies: galaxyInfo };
+  const inView = p.clone().applyMatrix4(c.matrixWorldInverse);
+  const sphere = { centre: { x: inView.x, y: inView.y, z: inView.z }, radius: planet.object.scale.x, fovDeg: c.fov };
+  return { planet, disc, sphere, farStarsBehindDisc, galaxies: galaxyInfo };
 }
 
 /** Draws the nebula for appearance seed `seed` as seen mid-APPROACH, replacing anything shown. */
@@ -350,7 +383,7 @@ function drawComet(seed: number): Comet {
  */
 export function showPlanetPreview(type: PlanetType, nth = 0, options: Readonly<PlanetPreviewOptions> = {}): PlanetPreviewInfo {
   const { index, seed } = findSeed(type, Math.max(0, Math.floor(nth)));
-  const { planet, disc, farStarsBehindDisc, galaxies: galaxyInfo } = drawPlanet(seed, options);
+  const { planet, disc, sphere, farStarsBehindDisc, galaxies: galaxyInfo } = drawPlanet(seed, options);
   const { params } = planet;
   return {
     index,
@@ -360,6 +393,7 @@ export function showPlanetPreview(type: PlanetType, nth = 0, options: Readonly<P
     radius: params.radius,
     programs: renderer?.info.programs?.length ?? 0,
     disc,
+    sphere,
     farStarsBehindDisc,
     galaxies: galaxyInfo,
   };
@@ -586,6 +620,8 @@ export function hidePlanetPreview(): void {
   if (galaxies !== null) scene?.remove(galaxies.mesh);
   galaxies?.dispose();
   galaxies = null;
+  baker?.dispose();
+  baker = null;
   renderer?.dispose();
   renderer = null;
   canvas?.remove();

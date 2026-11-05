@@ -1,4 +1,4 @@
-import { Mesh, RingGeometry, type ShaderMaterial, Texture, Vector3 } from 'three';
+import { FrontSide, Mesh, RingGeometry, type ShaderMaterial, Texture, Vector3 } from 'three';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CAMERA_FAR,
@@ -36,6 +36,7 @@ import {
   disposePlanetGeometry,
   passFactorFor,
   planetGeometry,
+  atmosphereGeometry,
   planetGeometryRefs,
   planetParams,
   ringAxis,
@@ -480,6 +481,9 @@ describe('Planet', () => {
   it('dispose() frees its materials and textures, and only the last live planet frees the shared geometry', () => {
     const geometry = planetGeometry();
     const geometryDispose = vi.spyOn(geometry, 'dispose');
+    // The atmosphere's annulus (issue #65) is shared and freed with the sphere.
+    const annulus = atmosphereGeometry();
+    const annulusDispose = vi.spyOn(annulus, 'dispose');
     // A planet kept alive throughout holds the shared geometry while the others come and go.
     const keeper = new Planet(firstOfType('gas'));
     expect(planetGeometryRefs()).toBe(1);
@@ -494,11 +498,12 @@ describe('Planet', () => {
           .filter((v): v is Texture => v instanceof Texture),
       );
       const textureSpies = textures.map((t) => vi.spyOn(t, 'dispose'));
-      // Every mesh draws with the one shared geometry.
+      // Every mesh draws with the one shared geometry, and the atmosphere with the shared annulus.
       planet.object.traverse((o) => {
         const g = (o as { geometry?: unknown }).geometry;
-        if (g) expect(g).toBe(geometry);
+        if (g) expect(g).toBe(o === planet.atmosphere ? annulus : geometry);
       });
+      expect(planet.atmosphere).not.toBeNull();
 
       planet.dispose();
       for (const spy of [...materialSpies, ...textureSpies]) expect(spy).toHaveBeenCalledTimes(1);
@@ -516,6 +521,8 @@ describe('Planet', () => {
     keeper.dispose();
     expect(planetGeometryRefs()).toBe(0);
     expect(geometryDispose).toHaveBeenCalledTimes(1);
+    expect(annulusDispose).toHaveBeenCalledTimes(1);
+    expect(atmosphereGeometry()).not.toBe(annulus);
     keeper.dispose();
     disposePlanetGeometry();
     expect(geometryDispose).toHaveBeenCalledTimes(1);
@@ -615,6 +622,7 @@ describe('Planet', () => {
     expect(ringMaterial.fragmentShader).toBe(atmosphereMaterial.fragmentShader);
     expect(ringMaterial.defines).toEqual(atmosphereMaterial.defines);
     expect(ringMaterial.side).toBe(atmosphereMaterial.side);
+    expect(ringMaterial.side).toBe(FrontSide);
     expect(ringMaterial.uniforms.uRing!.value).toBe(1);
     expect(atmosphereMaterial.uniforms.uRing!.value).toBe(0);
     // It fades and is lit with the planet.

@@ -62,7 +62,15 @@ npm run test:e2e    # end-to-end tests (Playwright, Chromium)
 npm run typecheck   # type check the app and the e2e suite
 ```
 
-Before the first e2e run, install the browser with `npx playwright install chromium`. The e2e suite builds the site in e2e mode into `dist-e2e/` and runs against `vite preview`. In that build only, `?encounterInterval=<seconds>` overrides the mean encounter interval (each cruise is still seeded-jittered around it) so encounters come quickly, and `?encounterKind=planet`, `?encounterKind=nebula`, `?encounterKind=asteroid` or `?encounterKind=comet` makes every encounter that kind (`npm run check:hook` checks that production reads none of these). The specs load the app through `appUrl` (e2e/app.ts), which pins the test default trip seed `?seed=91b3a5ba` (`ENCOUNTER_BASE_SEED`), so the suite stays deterministic. The unit tests default to the same seed.
+Before the first e2e run, install the browser with `npx playwright install chromium`. The e2e suite builds the site in e2e mode into `dist-e2e/` and runs against `vite preview`. In that build only, `?encounterInterval=<seconds>` overrides the mean encounter interval (each cruise is still seeded-jittered around it) so encounters come quickly, and `?encounterKind=planet`, `?encounterKind=nebula`, `?encounterKind=asteroid` or `?encounterKind=comet` makes every encounter that kind, `?frameRateCap=<fps>` replaces the 60 FPS frame-rate cap (`0` for none), `?gpuTiming=1` times every frame on the GPU where the browser has `EXT_disjoint_timer_query_webgl2` (reported by the test hook), and `?perfOverlay=1` (which implies `?gpuTiming=1`) shows a small readout of the frame rate, the frame and GPU times and the GPU cost estimate in the top-left corner (`npm run check:hook` checks that production reads none of these). The specs load the app through `appUrl` (e2e/app.ts), which pins the test default trip seed `?seed=91b3a5ba` (`ENCOUNTER_BASE_SEED`), so the suite stays deterministic. The unit tests default to the same seed.
+
+To measure the GPU cost on real hardware (a Mac, say), build the e2e site and serve it:
+
+```sh
+npm run build:e2e && npx vite preview --outDir dist-e2e
+```
+
+Then open <http://localhost:4173/elsewhere/?perfOverlay=1&encounterKind=planet&encounterInterval=5> in the browser to measure (Chrome has the GPU timer; Safari does not, and the overlay then shows only the estimate). Every encounter is then a planet, after about 5 s of cruise. Note the overlay's `gpu` line (GPU ms per frame, and GPU-seconds per second) during cruise and again while the planet is at its closest, largest on screen, and compare the two, before and after a change (build and serve each version the same way).
 
 A long-run soak travels through many planet, nebula, asteroid and comet encounters at a short interval and fails if the JS heap (after a forced GC) grows, if the frame time late in the run is worse than early on, or if the renderer's resource counts drift:
 
@@ -86,6 +94,7 @@ npm run check:hook   # the e2e test hook is not in the production build
 
 - **Fullscreen on iPhone:** Safari on iPhone has no Fullscreen API for pages, so the Fullscreen button is hidden there and F does nothing.
 - **Mobile:** Phones and tablets work (tap shows the controls), but performance is tuned for desktop. Expect lower frame rates and more battery use on mobile.
+- **Frame rate is capped at 60 FPS:** A 120 Hz display draws every other frame (`FRAME_RATE_CAP` in `src/config.ts`), which halves the GPU work there; the motion is slow enough that more frames show nothing more. Planets draw their surfaces from cube maps baked once per planet (about 100 MB of GPU memory for a rocky world and 34 MB for a gas giant while it is on its way past), rather than evaluating the procedural surface for every pixel of every frame.
 - **Nebulae are the main GPU cost:** During a nebula encounter, large soft-blended layers cover much of the screen, so a weak GPU may drop frames there. Quality presets and adaptive resolution are an Optional item in PLAN.md section 5, and are not built.
 - **Screen Wake Lock:** Where the browser doesn't support it, the screen follows the device's own sleep settings. A failed request is logged to the console.
 - **Soak length:** CI runs the soak for 5 minutes, under SwiftShader (software rendering), so its frame times say nothing absolute about real hardware. The 30-minute run is started by hand from the Soak workflow ([.github/workflows/soak.yml](.github/workflows/soak.yml)).

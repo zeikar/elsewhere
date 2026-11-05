@@ -269,3 +269,123 @@ for (const { name, at } of OCCLUSION_PLACES) test(`a planet hides a distant gala
   await page.evaluate(() => window.__elsewhere!.hidePlanet());
   expect(errors).toEqual([]);
 });
+
+/**
+ * Issue #65: planets are drawn from a bake of their surface into cube maps (src/engine/PlanetBake.ts)
+ * instead of procedurally per pixel. The look must stay the same, but for filtering: the same preview
+ * planets drawn both ways, framed as usual and close up (as at the closest pass, k = 1.6), differ by
+ * little on average and in all but a few pixels of the disc (the fine relief, which the bake's
+ * mipmaps filter a little differently from the per-pixel footprint filter, and whose bump the baked
+ * surface takes from the baked height's slope). The statistics are over the planet's disc only (the
+ * pixels whose view ray meets its sphere), not the whole frame, so the sky does not dilute them. The
+ * airless, cratered world (a lunar one, the test default trip's third rocky planet) close up at 2×
+ * DPR is the hardest case: crater rims and the finest relief, magnified, with no sea to flatten it.
+ */
+const BAKE_CASES: readonly { name: string; type: 'rocky' | 'gas'; nth: number; closeup?: number; dpr?: number }[] = [
+  { name: 'rocky', type: 'rocky', nth: 0 },
+  { name: 'rocky 3', type: 'rocky', nth: 3 },
+  { name: 'gas', type: 'gas', nth: 0 },
+  { name: 'gas 2', type: 'gas', nth: 2 },
+  { name: 'rocky close up', type: 'rocky', nth: 0, closeup: 0.6 },
+  { name: 'gas close up', type: 'gas', nth: 0, closeup: 0.6 },
+  { name: 'airless rocky close up 2x', type: 'rocky', nth: 2, closeup: 0.6, dpr: 2 },
+];
+
+/**
+ * Over the disc, the mean channel difference must be under `mean` and the 99th percentile of each
+ * pixel's largest channel difference at most `p99` (0–255). Framed as usual the disc is a few
+ * hundred pixels across, so the mipmaps filter the fine relief and the two differ more (under
+ * SwiftShader up to a mean of 2.8 and a p99 of 27); close up, where blur would show, they must match
+ * closely (up to 0.5 and 8).
+ */
+const LOOK_LIMITS = { framed: { mean: 4, p99: 36 }, closeup: { mean: 1, p99: 12 } } as const;
+
+test('a baked planet looks as the procedural one does over its disc, apart from filtering, framed as usual and close up', async ({ browser }) => {
+  test.setTimeout(300_000);
+  const results = [];
+  for (const dpr of [1, 2]) {
+    const cases = BAKE_CASES.filter((c) => (c.dpr ?? 1) === dpr);
+    const context = await browser.newContext({ viewport: { width: 960, height: 540 }, deviceScaleFactor: dpr });
+    const page = await context.newPage();
+    const errors = collectErrors(page);
+    await page.goto(appUrl('encounterInterval=1e9'));
+    await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 0);
+    await page.evaluate(() => window.__elsewhere!.pause());
+    for (const c of cases) {
+      const shots: Buffer[] = [];
+      let sphere = null;
+      for (const surface of ['procedural', 'baked'] as const) {
+        const info = await page.evaluate(
+          ({ c, surface }) => window.__elsewhere!.showPlanet(c.type, c.nth, { surface, ...(c.closeup === undefined ? {} : { closeup: c.closeup }) }),
+          { c, surface },
+        );
+        sphere = info.sphere;
+        const png = await page.locator('#planet-preview').screenshot({ style: CANVAS_ONLY });
+        shots.push(png);
+        writeFileSync(test.info().outputPath(`${c.name.replaceAll(' ', '-')}-${surface}.png`), png);
+      }
+      const diff = await page.evaluate(
+        async ({ a, b, sphere }) => {
+          const decode = async (b64: string) => {
+            const bitmap = await createImageBitmap(await (await fetch(`data:image/png;base64,${b64}`)).blob());
+            const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+            const ctx = canvas.getContext('2d')!;
+            ctx.drawImage(bitmap, 0, 0);
+            return { data: ctx.getImageData(0, 0, bitmap.width, bitmap.height).data, width: bitmap.width, height: bitmap.height };
+          };
+          const [pa, pb] = await Promise.all([decode(a), decode(b)]);
+          // Whether the view ray through a pixel's centre meets the planet's sphere (view space, the
+          // camera looking down -Z).
+          const tanHalf = Math.tan((sphere.fovDeg * Math.PI) / 360);
+          const aspect = window.innerWidth / window.innerHeight;
+          const { x: cx, y: cy, z: cz } = sphere.centre;
+          const c2 = cx * cx + cy * cy + cz * cz;
+          const r2 = sphere.radius * sphere.radius;
+          const onDisc = (x: number, y: number) => {
+            const dx = (((x + 0.5) / pa.width) * 2 - 1) * tanHalf * aspect;
+            const dy = (1 - ((y + 0.5) / pa.height) * 2) * tanHalf;
+            const len = Math.hypot(dx, dy, 1);
+            const along = (dx * cx + dy * cy - cz) / len;
+            return along > 0 && c2 - along * along <= r2;
+          };
+          const hist = new Uint32Array(256);
+          let sum = 0;
+          let n = 0;
+          for (let y = 0; y < pa.height; y++) {
+            for (let x = 0; x < pa.width; x++) {
+              if (!onDisc(x, y)) continue;
+              const i = (y * pa.width + x) * 4;
+              const dr = Math.abs(pa.data[i]! - pb.data[i]!);
+              const dg = Math.abs(pa.data[i + 1]! - pb.data[i + 1]!);
+              const db = Math.abs(pa.data[i + 2]! - pb.data[i + 2]!);
+              hist[Math.max(dr, dg, db)]!++;
+              sum += dr + dg + db;
+              n++;
+            }
+          }
+          const rank = (q: number) => {
+            let seen = 0;
+            for (let d = 0; d < 256; d++) if ((seen += hist[d]!) >= q * n) return d;
+            return 255;
+          };
+          return { mean: sum / (3 * Math.max(n, 1)), p99: rank(0.99), p999: rank(0.999), discFraction: n / (pa.width * pa.height), width: pa.width };
+        },
+        { a: shots[0]!.toString('base64'), b: shots[1]!.toString('base64'), sphere: sphere! },
+      );
+      results.push({ ...c, ...diff });
+    }
+    await page.evaluate(() => window.__elsewhere!.hidePlanet());
+    expect(errors).toEqual([]);
+    await context.close();
+  }
+  test.info().annotations.push({ type: 'baked vs procedural over the disc (0–255)', description: JSON.stringify(results) });
+  console.log(`baked vs procedural over the disc: ${JSON.stringify(results)}`);
+  for (const r of results) {
+    // Something to compare: the disc fills a good part of the view, drawn at the asked-for DPR.
+    expect(r.discFraction, r.name).toBeGreaterThan(0.05);
+    expect(r.width, r.name).toBe(960 * (r.dpr ?? 1));
+    const limits = r.closeup === undefined ? LOOK_LIMITS.framed : LOOK_LIMITS.closeup;
+    expect(r.mean, r.name).toBeLessThan(limits.mean);
+    expect(r.p99, r.name).toBeLessThanOrEqual(limits.p99);
+  }
+});

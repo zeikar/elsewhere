@@ -21,7 +21,16 @@
  * holds the heading at -Z (so the ship only translates), and `?arrivalSpeed=<u/s>` sets the arrival
  * speed (a value at or above the top speed flies encounters from the top speed, without dropping
  * out of warp, so tests that only need encounter cycles pass them about 2.5–3× sooner).
+ * `?frameRateCap=<fps>` replaces the frame-rate cap (FRAME_RATE_CAP; 0 for none).
+ * `?gpuTiming=1` times each frame's GPU work (`EXT_disjoint_timer_query_webgl2`, where the browser
+ * has it), reported in `snapshot().perf.gpuMs`, and `?perfOverlay=1` (which implies it) shows a small
+ * on-screen readout of the frame rate, the frame and GPU times and the GPU cost estimate.
  * `?seed=` is not one of these: it is read in every build (src/tripSeed.ts).
+ *
+ * GPU cost (issue #65): `gpuCost()` reports the GPU frame times and, for where there is no timer,
+ * an estimate of the current frame's work, shaded fragments × a per-shader cost
+ * (src/e2eGpuCost.ts); `bench(request)` measures one frame of cruise or of an encounter at a chosen
+ * moment on its own canvas (src/e2eGpuBench.ts).
  */
 import { Vector3 } from 'three';
 import type { Engine, EngineOptions } from './engine/Engine';
@@ -30,6 +39,8 @@ import type { EncounterKind, EncounterSide, TravelState } from './engine/Autopil
 import type { GalaxyType } from './engine/Galaxies';
 import { nebulaLayerPlaneDistance } from './engine/Nebula';
 import type { PlanetType } from './engine/Planet';
+import { estimateFrameCost, type FrameCostEstimate } from './e2eGpuCost';
+import { disposeGpuBench, runGpuBench, type GpuBenchRequest, type GpuBenchResult } from './e2eGpuBench';
 import {
   checkRingDepth,
   hidePlanetPreview,
@@ -84,7 +95,10 @@ export interface E2EHookSnapshot {
   paused: boolean;
   /** Pixel ratio applied to the renderer. */
   dpr: number;
+  /** Frames drawn (display frames skipped by the frame-rate cap are not counted). */
   frames: number;
+  /** The frame-rate cap in use, in frames per second (0: none). */
+  frameRateCap: number;
   cameraAspect: number;
   /** The camera's live vertical field of view, in degrees. */
   cameraFov: number;
@@ -113,6 +127,11 @@ export interface E2EHookSnapshot {
     workMs: E2EFrameTimes;
     /** `performance.memory.usedJSHeapSize` in bytes (no forced GC), or `null` outside Chromium. */
     heapUsed: number | null;
+    /**
+     * GPU time per frame (`?gpuTiming=1`), from `EXT_disjoint_timer_query_webgl2`; `null` with GPU
+     * timing off or without the extension.
+     */
+    gpuMs: E2EFrameTimes | null;
   };
   starfield: {
     /** DPR uniform. */
@@ -197,6 +216,11 @@ export interface E2EHookSnapshot {
     family: string;
     /** Whether the planet is drawn with a ring. */
     ringed: boolean;
+    /**
+     * The surface bake (issue #65): the share of it drawn so far (0–1), and whether the surface is
+     * drawn from it yet; `null` for a planet drawn procedurally throughout.
+     */
+    bake: { progress: number; baked: boolean } | null;
     /** Planet radius in world units. */
     radius: number;
     /** Drawn radius in world units (radius × the encounter's size scale). */
@@ -313,6 +337,27 @@ export interface E2EHook {
   checkRingDepth(seed: number, distance?: number): RingDepthInfo;
   /** Removes the planet overlay canvas. */
   hidePlanet(): void;
+  /**
+   * The GPU cost of the engine's frames: whether GPU timing is on and the timer there, the GPU frame
+   * times, and an estimate of the latest frame's work (src/e2eGpuCost.ts), for where there is no timer.
+   */
+  gpuCost(): E2EGpuCost;
+  /** Measures one frame of cruise or of an encounter on its own canvas (src/e2eGpuBench.ts). */
+  bench(request: GpuBenchRequest): Promise<GpuBenchResult>;
+  /** Removes the benchmark canvas. */
+  hideBench(): void;
+}
+
+export interface E2EGpuCost {
+  /** Whether GPU timing was asked for (`?gpuTiming=1`). */
+  timing: boolean;
+  /** Whether frames are timed on the GPU (timing on and `EXT_disjoint_timer_query_webgl2` there). */
+  timer: boolean;
+  gpuMs: E2EFrameTimes | null;
+  /** The estimated work of the latest frame, as drawn. */
+  estimate: FrameCostEstimate;
+  /** Mean frame rate over the frame-interval window, in frames per second (`null` while empty). */
+  fps: number | null;
 }
 
 declare global {
@@ -324,7 +369,7 @@ declare global {
 /** Reads the e2e-only engine overrides from a URL query string (see the module comment). */
 export function e2eEngineOptions(
   search: string,
-): Pick<EngineOptions, 'encounterInterval' | 'encounterKind' | 'starLayers' | 'headingDrift' | 'arrivalSpeed'> {
+): Pick<EngineOptions, 'encounterInterval' | 'encounterKind' | 'starLayers' | 'headingDrift' | 'arrivalSpeed' | 'gpuTiming' | 'frameRateCap'> {
   const query = new URLSearchParams(search);
   const raw = query.get('encounterInterval');
   const interval = raw === null ? Number.NaN : Number(raw);
@@ -333,12 +378,17 @@ export function e2eEngineOptions(
   const drift = query.get('headingDrift');
   const rawArrival = query.get('arrivalSpeed');
   const arrival = rawArrival === null ? Number.NaN : Number(rawArrival);
+  const gpuTiming = query.get('gpuTiming') === '1' || query.get('perfOverlay') === '1';
+  const rawCap = query.get('frameRateCap');
+  const cap = rawCap === null ? Number.NaN : Number(rawCap);
   return {
     ...(interval >= 0 ? { encounterInterval: interval } : {}),
     ...(kind === 'planet' || kind === 'nebula' || kind === 'asteroid' || kind === 'comet' ? { encounterKind: kind } : {}),
     ...(layers === 'far' || layers === 'near' || layers === 'both' ? { starLayers: layers } : {}),
     ...(drift === '0' ? { headingDrift: false } : {}),
     ...(arrival > 0 ? { arrivalSpeed: arrival } : {}),
+    ...(gpuTiming ? { gpuTiming: true } : {}),
+    ...(cap >= 0 ? { frameRateCap: cap } : {}),
   };
 }
 
@@ -379,7 +429,55 @@ function newProbe(): E2EProbe {
   };
 }
 
+/** The GPU cost reading of `gpuCost()`. */
+function gpuCost(engine: Engine): E2EGpuCost {
+  const gpu = engine.getGpuFrameTimes();
+  const size = engine.getDrawingBufferSize();
+  const intervals = engine.getFrameIntervals();
+  const mean = intervals.mean();
+  return {
+    timing: engine.isGpuTimingOn(),
+    timer: gpu !== null,
+    gpuMs: gpu === null ? null : frameTimes(gpu),
+    estimate: estimateFrameCost(engine.getScene(), engine.getCamera(), size.width, size.height, engine.getAppliedDpr()),
+    fps: Number.isFinite(mean) && mean > 0 ? 1000 / mean : null,
+  };
+}
+
+/**
+ * `?perfOverlay=1`: a small readout in the top-left corner, refreshed twice a second: the frame
+ * rate, the frame interval and work (p95), the GPU time per frame (mean and p95) where the timer is
+ * there, and the estimate (shaded fragments and work per frame and per second) otherwise as well.
+ */
+function installPerfOverlay(engine: Engine): void {
+  const box = document.createElement('pre');
+  box.id = 'perf-overlay';
+  box.style.cssText =
+    'position:fixed;left:8px;top:8px;z-index:3;margin:0;padding:6px 8px;font:11px/1.35 ui-monospace,monospace;color:#cfe;background:rgba(0,0,0,0.6);pointer-events:none;white-space:pre;';
+  document.body.append(box);
+  const fmt = (x: number | null, digits = 1) => (x === null ? '–' : x.toFixed(digits));
+  const refresh = () => {
+    const cost = gpuCost(engine);
+    const s = engine.getFrameIntervals();
+    const w = engine.getFrameWork();
+    const size = engine.getDrawingBufferSize();
+    const fps = cost.fps;
+    const lines = [
+      `${size.width}×${size.height} @${engine.getAppliedDpr()}×  ${fmt(fps)} fps (cap ${engine.getFrameRateCap() || 'off'})`,
+      `frame p95 ${fmt(Number.isFinite(s.percentile(95)) ? s.percentile(95) : null)} ms  work p95 ${fmt(Number.isFinite(w.percentile(95)) ? w.percentile(95) : null)} ms`,
+      cost.gpuMs === null
+        ? `gpu ${cost.timing ? 'no timer (EXT_disjoint_timer_query_webgl2)' : 'timing off'}`
+        : `gpu ${fmt(cost.gpuMs.mean, 2)} ms (p95 ${fmt(cost.gpuMs.p95, 2)})  ${fmt(fps === null || cost.gpuMs.mean === null ? null : (cost.gpuMs.mean * fps) / 1000, 3)} s/s`,
+      `est ${(cost.estimate.totalFragments / 1e6).toFixed(2)} Mfrag  ${(cost.estimate.mops / 1e3).toFixed(2)} Gop/frame  ${fmt(fps === null ? null : (cost.estimate.mops * fps) / 1e3)} Gop/s`,
+    ];
+    box.textContent = lines.join('\n');
+  };
+  refresh();
+  setInterval(refresh, 500);
+}
+
 export function installE2EHook(engine: Engine): void {
+  if (new URLSearchParams(window.location.search).get('perfOverlay') === '1') installPerfOverlay(engine);
   const hook: E2EHook = {
     snapshot() {
       const ship = engine.getShip();
@@ -397,6 +495,7 @@ export function installE2EHook(engine: Engine): void {
           seed: planet.params.seed,
           family: planet.params.family,
           ringed: planet.ring !== null,
+          bake: planet.bake === null ? null : { progress: planet.bake.rowsDone / planet.bake.rowsTotal, baked: planet.isSurfaceBaked() },
           radius: planet.params.radius,
           drawnRadius: planet.object.scale.x,
           opacity: planet.uniforms.uOpacity.value,
@@ -499,6 +598,7 @@ export function installE2EHook(engine: Engine): void {
         paused: engine.isPaused(),
         dpr: engine.getAppliedDpr(),
         frames: engine.getFrameCount(),
+        frameRateCap: engine.getFrameRateCap(),
         cameraAspect: engine.getCameraAspect(),
         cameraFov: engine.getCameraFov(),
         ship: {
@@ -520,6 +620,10 @@ export function installE2EHook(engine: Engine): void {
           frameMs: frameTimes(engine.getFrameIntervals()),
           workMs: frameTimes(engine.getFrameWork()),
           heapUsed: heapUsed(),
+          gpuMs: (() => {
+            const gpu = engine.getGpuFrameTimes();
+            return gpu === null ? null : frameTimes(gpu);
+          })(),
         },
         starfield: { ...engine.getStarfieldSizing(), streakTime: engine.getStreakTime(), visible: engine.isStarfieldVisible() },
         farStars: engine.getFarStarfieldInfo(),
@@ -575,6 +679,9 @@ export function installE2EHook(engine: Engine): void {
     showEncounter: (kind, seed) => showEncounterPreview(kind, seed),
     checkRingDepth: (seed, distance) => checkRingDepth(seed, distance),
     hidePlanet: () => hidePlanetPreview(),
+    gpuCost: () => gpuCost(engine),
+    bench: (request) => runGpuBench(request),
+    hideBench: () => disposeGpuBench(),
   };
   Object.defineProperty(window, '__elsewhere', { value: Object.freeze(hook), configurable: false });
 }

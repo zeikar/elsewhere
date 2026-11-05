@@ -38,3 +38,13 @@ export const SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS = 100;
  * three-encounter spec 4.6 min (3.2 min) in a full parallel run here.
  */
 export const FAST_ENCOUNTERS_ARRIVAL_SPEED = 150;
+
+/**
+ * Compiled shader programs at cruise once start-up's warm-up is done (e2e/perf.spec.ts): one per sky
+ * layer drawn (the far stars, the near dust, and the galaxies in a trip with any), plus the eight
+ * encounter programs ProgramWarmup keeps for the whole run: the procedural rocky and gas surfaces,
+ * the halo (the atmosphere, rings and comet glow) and the nebula layers, and since issue #65 the
+ * baked rocky and gas surfaces and the rocky and gas surface bakes. No encounter adds any. Before
+ * issue #65: 7 and 6.
+ */
+export const CRUISE_PROGRAMS = { withGalaxies: 11, withoutGalaxies: 10 } as const;

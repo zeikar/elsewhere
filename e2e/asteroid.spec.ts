@@ -23,7 +23,7 @@ import { hash } from '../src/engine/seed';
 import { formatTripSeed } from '../src/tripSeed';
 import { appUrl } from './app';
 import { frameTimeStats, installFrameSampler, takeFrameWindow } from './frameSampler';
-import { FAST_ENCOUNTERS_ARRIVAL_SPEED, SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS } from './limits';
+import { FAST_ENCOUNTERS_ARRIVAL_SPEED, SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS, CRUISE_PROGRAMS } from './limits';
 
 /** A pixel counts as lit when its brightest channel is above this (0–255). */
 const LIT_THRESHOLD = 16;
@@ -191,8 +191,8 @@ test('a forced asteroid encounter draws lit rocks, runs the full cycle, compiles
   await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 0);
   await page.evaluate(() => window.__elsewhere!.setSpeed(99));
   // The encounter programs are compiled asynchronously at start-up: wait until they all are (the
-  // test default trip has galaxies: 7, see e2e/perf.spec.ts).
-  await expect.poll(async () => (await snapshot(page)).renderer.programs, { timeout: 60_000 }).toBe(7);
+  // test default trip has galaxies: CRUISE_PROGRAMS, see e2e/limits.ts).
+  await expect.poll(async () => (await snapshot(page)).renderer.programs, { timeout: 60_000 }).toBe(CRUISE_PROGRAMS.withGalaxies);
   await watch(page);
 
   // Mid-encounter, the main rock near, faded in and on screen.
@@ -343,7 +343,7 @@ async function flyFirstEncounter(page: Page, tripSeed: number, kind: 'asteroid' 
   await page.evaluate(() => window.__elsewhere!.setSpeed(99));
   // The encounter programs are compiled asynchronously at start-up: wait until they all are (one
   // more with any galaxy in the trip, see e2e/perf.spec.ts).
-  const programs = generateGalaxies(tripSeed).length > 0 ? 7 : 6;
+  const programs = generateGalaxies(tripSeed).length > 0 ? CRUISE_PROGRAMS.withGalaxies : CRUISE_PROGRAMS.withoutGalaxies;
   await expect.poll(async () => (await snapshot(page)).renderer.programs, { timeout: 60_000 }).toBe(programs);
   const cruisePrograms = (await snapshot(page)).renderer.programs;
   await installFrameSampler(page);
