@@ -20,7 +20,18 @@ import {
   STAR_CUBE_SIZE,
   VIEW_DEFAULT_ASPECT,
 } from '../config';
-import { DEFAULT_AUTOPILOT_PARAMS, createTravel, setCruiseSpeed, stepTravel } from './Autopilot';
+import {
+  DEFAULT_AUTOPILOT_PARAMS,
+  chooseEncounter,
+  createTravel,
+  encounterChoicePlan,
+  setCruiseSpeed,
+  stepTravel,
+  type AutopilotParams,
+  type EncounterKind,
+} from './Autopilot';
+import { asteroidParams } from './Asteroid';
+import { cometParams } from './Comet';
 import { FAR_STARFIELD_RENDER_ORDER, FAR_STAR_NDC_DEPTH } from './FarStarfield';
 import {
   DEFAULT_GALAXY_OPTIONS,
@@ -35,7 +46,7 @@ import {
 } from './Galaxies';
 import { NEBULA_RENDER_ORDER } from './Nebula';
 import { cameraFovDeg } from './renderSize';
-import { ATMOSPHERE_RENDER_ORDER, SURFACE_RENDER_ORDER } from './Planet';
+import { ATMOSPHERE_RENDER_ORDER, SURFACE_RENDER_ORDER, planetParams } from './Planet';
 import { hash, mulberry32 } from './seed';
 import { DEFAULT_SHIP_PARAMS, type Vec3 } from './Ship';
 import { STARFIELD_RENDER_ORDER } from './Starfield';
@@ -228,9 +239,35 @@ describe('galaxy generation', () => {
     expect(widest).toBeGreaterThan(0.9);
   });
 
+  it('sets the centre clearance past where every asteroid and comet first appears, and nearly every planet', () => {
+    // The bearing off the centre (-Z, the fixed heading) at the spawn: the object is planned `distance`
+    // ahead and `radius × k` to the side, with the choosers and pass factors the engine uses. It only
+    // grows after that, as the ship closes in.
+    const params: AutopilotParams = { ...DEFAULT_AUTOPILOT_PARAMS, planetFor: planetParams, asteroidFor: asteroidParams, cometFor: cometParams };
+    const spawnBearings = (kind: EncounterKind, seeds: number): number[] =>
+      manySeeds(seeds).map((seed) => {
+        const { radius, distance, k } = encounterChoicePlan(chooseEncounter(0, seed, kind, params), params);
+        return Math.atan2(radius * k, distance);
+      });
+    const clearance = GALAXY_CENTRE_CLEARANCE_DEG * DEG;
+    // Asteroids and comets: within about 1.2° (measured: 0.21–0.76° and 0.79–1.18°). Comets cost the
+    // most to generate, so fewer seeds.
+    for (const [kind, seeds] of [['asteroid', 4000], ['comet', 1000]] as const) {
+      const widest = Math.max(...spawnBearings(kind, seeds));
+      expect(widest, kind).toBeLessThan(1.25 * DEG);
+      expect(widest, kind).toBeLessThan(clearance);
+    }
+    // Planets: within 4° but for about 0.6%, the largest passed far off, which reach about 4.7°. The
+    // clearance covers the centre of all but a few of them (measured: 9,996 of these 10,000).
+    const planets = spawnBearings('planet', 10_000);
+    const covered = planets.filter((b) => b < clearance).length / planets.length;
+    expect(covered).toBeGreaterThanOrEqual(0.99);
+    expect(planets.filter((b) => b > 4 * DEG).length / planets.length).toBeLessThan(0.01);
+    expect(Math.max(...planets)).toBeGreaterThan(4 * DEG);
+    expect(Math.max(...planets)).toBeLessThan(4.75 * DEG);
+  });
+
   it('keeps every galaxy’s edge at least GALAXY_CENTRE_CLEARANCE_DEG from the screen centre, where encounters appear, with the count drawn for every seed', () => {
-    // Every planet, asteroid and comet first appears 0.2–4° off the centre (-Z, the fixed heading).
-    expect(GALAXY_CENTRE_CLEARANCE_DEG).toBeGreaterThan(4);
     expect(DEFAULT_GALAXY_OPTIONS.centreClearance).toBeCloseTo((GALAXY_SIZE_MAX_DEG / 2 + GALAXY_CENTRE_CLEARANCE_DEG) * DEG, 12);
     let nearest = Number.POSITIVE_INFINITY;
     let galaxies = 0;
