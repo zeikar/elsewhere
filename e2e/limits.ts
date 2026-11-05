@@ -29,7 +29,9 @@ export const SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS = 100;
  * spec takes 8.4 min without it (40 s before the drop out of warp), the three-encounter spec runs out
  * of its 9-min budget (3.9 min before), the forced nebula spec takes 4.4 min (1.8 min), and a
  * 3-minute soak meets only 2 encounters and takes 2 samples, failing its check of at least 3. The drop
- * out of warp itself is checked in src/engine/Autopilot.test.ts and EncounterView.test.ts, and the
- * mid-encounter ArrowUp spec in e2e/encounter.spec.ts runs without this override.
+ * out of warp itself is checked in src/engine/Autopilot.test.ts and EncounterView.test.ts, and in the
+ * browser by e2e/warp.spec.ts, which runs without this override and flies the real drop out of warp
+ * and return to it at the top speed. The mid-encounter ArrowUp spec in e2e/encounter.spec.ts also
+ * runs without it, but cruises at the default speed and switches to the top speed only in APPROACH.
  */
 export const FAST_ENCOUNTERS_ARRIVAL_SPEED = 150;
