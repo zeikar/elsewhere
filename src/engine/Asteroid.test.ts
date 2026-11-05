@@ -24,12 +24,8 @@ import {
   asteroidMinClosestDistance,
   asteroidParams,
   asteroidRockPassDistances,
-  MIN_RELATIVE_RADIUS,
-  irregularBodyGeometry,
-  irregularBodyRadii,
   rockPosition,
   type AsteroidParams,
-  type IrregularBodyShape,
 } from './Asteroid';
 import {
   DEFAULT_AUTOPILOT_PARAMS,
@@ -41,6 +37,7 @@ import {
   type AutopilotParams,
 } from './Autopilot';
 import { encounterOffset, planEncounter, type Encounter } from './encounter';
+import { MIN_RELATIVE_RADIUS, irregularBodyGeometry, irregularBodyRadii, type IrregularBodyShape } from './irregularBody';
 import { encounterAsteroidParams, encounterLightDirection } from './EncounterView';
 import { DEFAULT_PLANET_FRAME, SURFACE_RENDER_ORDER, planetProgramMaterials } from './Planet';
 import { hash, mulberry32 } from './seed';

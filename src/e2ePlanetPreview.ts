@@ -1,7 +1,7 @@
 /**
  * E2E-only encounter preview, used through the test hook (src/e2eHook.ts) and absent from the
  * production build. The engine draws encounter objects wherever the encounter puts them; this
- * instead draws one chosen planet, nebula or asteroid, framed the same every time, on its own full-viewport
+ * instead draws one chosen planet, nebula, asteroid or comet, framed the same every time, on its own full-viewport
  * canvas (`#planet-preview`) laid over the scene, with its own renderer and a camera at the origin
  * looking down -Z, like the engine's. It is drawn once at a fixed time so screenshots are repeatable.
  *
@@ -20,6 +20,9 @@
  *   fully faded in.
  * - An asteroid (one rock or a field) is framed like a planet, by its bounding radius, with its rocks
  *   laid out as for an encounter planned along -Z with the field to the right (DEFAULT_PLANET_FRAME).
+ * - A comet is seen as in its encounter, mid-APPROACH, like a nebula: planned along -Z on its seeded
+ *   side of the path, with the camera COMET_PREVIEW_REMAINING short of the closest approach, fully
+ *   faded in, so the tails stretch back past the camera's side toward the coma ahead.
  */
 import { PerspectiveCamera, SRGBColorSpace, Scene, Vector3, WebGLRenderer } from 'three';
 import {
@@ -27,6 +30,7 @@ import {
   CAMERA_FOV_DEG,
   CAMERA_NEAR,
   CLEAR_COLOR,
+  COMET_ENCOUNTER_DISTANCE,
   DPR_CAP,
   ENCOUNTER_BASE_SEED,
   NEBULA_ENCOUNTER_DISTANCE,
@@ -34,6 +38,7 @@ import {
 } from './config';
 import { encounterSide, type EncounterKind, type EncounterSide } from './engine/Autopilot';
 import { Asteroid, asteroidParams } from './engine/Asteroid';
+import { Comet, cometParams } from './engine/Comet';
 import { encounterOffset, planEncounter } from './engine/encounter';
 import { FarStarfield } from './engine/FarStarfield';
 import { Galaxies, generateGalaxies, type Galaxy } from './engine/Galaxies';
@@ -57,6 +62,9 @@ const MAX_SEARCH = 1000;
 
 /** Remaining distance to the closest approach the nebula preview is seen from (fully faded in). */
 const NEBULA_PREVIEW_REMAINING = 1100;
+
+/** Remaining distance to the closest approach the comet preview is seen from (fully faded in). */
+const COMET_PREVIEW_REMAINING = 900;
 
 export interface PlanetPreviewInfo {
   /** Encounter index whose appearance seed was used. */
@@ -94,11 +102,11 @@ export interface EncounterPreviewInfo {
   kind: EncounterKind;
   seed: number;
   family: string;
-  /** Planet type, or `null` for a nebula or an asteroid. */
+  /** Planet type, or `null` for a nebula, an asteroid or a comet. */
   type: PlanetType | null;
-  /** Radius: a planet's, a nebula's core radius, or an asteroid field's bounding radius. */
+  /** Radius: a planet's, a nebula's core radius, an asteroid field's bounding radius, or a comet's coma radius. */
   radius: number;
-  /** Rocks of an asteroid (1 for a single rock), or `null` for a planet or a nebula. */
+  /** Rocks of an asteroid (1 for a single rock), or `null` for the other kinds. */
   rocks: number | null;
   /** Side of the path the object sits on in its encounter. */
   side: EncounterSide;
@@ -108,7 +116,7 @@ export interface EncounterPreviewInfo {
 
 let canvas: HTMLCanvasElement | null = null;
 let renderer: WebGLRenderer | null = null;
-let shown: Planet | Nebula | Asteroid | null = null;
+let shown: Planet | Nebula | Asteroid | Comet | null = null;
 let farStars: FarStarfield | null = null;
 let galaxies: Galaxies | null = null;
 // Created on first use, so merely importing this module has no side effects.
@@ -278,6 +286,29 @@ function drawAsteroid(seed: number): Asteroid {
   return asteroid;
 }
 
+/** Draws the comet for appearance seed `seed` as seen mid-APPROACH, replacing anything shown. */
+function drawComet(seed: number): Comet {
+  const { renderer: r, scene: s, camera: c } = prepare();
+  const params = cometParams(seed);
+  const plan = planEncounter(
+    { x: 0, y: 0, z: 0 },
+    { x: 0, y: 0, z: -1 },
+    params.radius,
+    COMET_ENCOUNTER_DISTANCE,
+    params.passFactor,
+    encounterSide(seed).sideAngle,
+  );
+  const ship = { x: 0, y: 0, z: -(COMET_ENCOUNTER_DISTANCE - COMET_PREVIEW_REMAINING) };
+  const comet = new Comet(params, plan);
+  shown = comet;
+  encounterOffset(plan, ship, comet.object.position);
+  comet.setFade(1);
+  comet.update(PREVIEW_TIME);
+  s.add(comet.object);
+  r.render(s, c);
+  return comet;
+}
+
 /**
  * Shows the `nth` (default: the first) encounter planet of `type`, replacing anything shown, and
  * draws it once, with the far stars behind it when `options.farStars` is set.
@@ -300,7 +331,7 @@ export function showPlanetPreview(type: PlanetType, nth = 0, options: Readonly<P
 }
 
 /**
- * Shows the planet, nebula or asteroid for appearance seed `seed` (a uint32), whatever kind the
+ * Shows the planet, nebula, asteroid or comet for appearance seed `seed` (a uint32), whatever kind the
  * schedule would give it, replacing anything shown, and draws it once.
  */
 export function showEncounterPreview(kind: EncounterKind, seed: number): EncounterPreviewInfo {
@@ -314,6 +345,10 @@ export function showEncounterPreview(kind: EncounterKind, seed: number): Encount
   if (kind === 'asteroid') {
     const { params } = drawAsteroid(s);
     return { kind, seed: s, family: params.family, type: null, radius: params.radius, rocks: params.rocks.length, side, programs: programs() };
+  }
+  if (kind === 'comet') {
+    const { params } = drawComet(s);
+    return { kind, seed: s, family: params.family, type: null, radius: params.radius, rocks: null, side, programs: programs() };
   }
   const { params } = drawPlanet(s).planet;
   return { kind, seed: s, family: params.family, type: params.type, radius: params.radius, rocks: null, side, programs: programs() };

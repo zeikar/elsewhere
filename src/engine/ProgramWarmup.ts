@@ -14,8 +14,10 @@
  * atmosphere and the nebula layers), built by the same factories as the real materials so each
  * compiles to the very program they use. They are compiled (and primed, see `compile`) at start-up
  * and never disposed until the engine is, so every planet and nebula finds its program already
- * linked, and so does every asteroid, whose rocks draw with the rocky surface program: no encounter
- * compiles anything, and the program count stays constant from start-up on.
+ * linked, and so does every asteroid, whose rocks draw with the rocky surface program, and every
+ * comet, whose nucleus draws with the rocky surface program and whose coma and tails draw with the
+ * halo (atmosphere) program: no encounter compiles anything, and the program count stays constant
+ * from start-up on.
  * The holders are never drawn.
  *
  * Three.js derives part of a program from the geometry's attributes (whether it has normals, for

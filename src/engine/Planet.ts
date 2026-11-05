@@ -1,8 +1,9 @@
 /**
  * Planets (docs/PLAN.md section 6, Planets (Phase 2), Variety (Phase 4) and Performance): seeded
  * rocky planets, icy dwarfs and gas giants with procedural surfaces, basic lighting, an additive
- * atmospheric rim glow, and for some a ring system. Asteroid rocks (Asteroid.ts) are shaded with the
- * rocky surface program too (`rockySurfaceMaterial`).
+ * atmospheric rim glow, and for some a ring system. Asteroid rocks (Asteroid.ts) and comet nuclei
+ * (Comet.ts) are shaded with the rocky surface program too (`rockySurfaceMaterial`), and a comet's
+ * coma and tails with the halo program (`cometGlowMaterial`).
  *
  * - `planetParams(seed)` is pure: it derives the type, radius, palette, noise or band parameters,
  *   rotation and atmosphere from an encounter's appearance seed (`hash(baseSeed, encounterIndex)`),
@@ -918,12 +919,13 @@ void main() {
 `;
 
 /*
- * The halo program draws both the atmosphere shell and the ring (`uRing` picks which), so a ringed
- * planet needs no shader program of its own: the program count stays the same from start-up on, and
- * ProgramWarmup's atmosphere holder already keeps it compiled (see `planetProgramMaterials`). Three.js
- * keys a program on its sources, defines and a few material flags (side, among them), not on
- * blending or depth writes, so the two materials share it. Uniforms keep their values per program,
- * so every halo material sets `uRing` itself.
+ * The halo program draws the atmosphere shell, the ring and a comet's coma and tails (`uRing` picks
+ * which: 0, 1 and 2), so neither a ringed planet nor a comet needs a shader program of its own: the
+ * program count stays the same from start-up on, and ProgramWarmup's atmosphere holder already keeps
+ * it compiled (see `planetProgramMaterials`). Three.js keys a program on its sources, defines and a
+ * few material flags (side, among them), not on blending or depth writes, so the three materials
+ * share it. Uniforms keep their values per program, so every halo material sets `uRing` itself, and
+ * the comet's uniforms are read only by the comet branch.
  */
 const haloVertexShader = /* glsl */ `
 varying vec3 vWorld;
@@ -931,6 +933,9 @@ varying vec3 vCenter;
 varying float vShellRadius;
 // The mesh's local +Y in world space: the ring plane's normal (unused by the atmosphere).
 varying vec3 vAxis;
+// The comet glow's piece (y: 0 the coma, 1 the ion tail, 2 the dust tail) and how far along its tail
+// (x, from 0 at the head to 1 at the end); unused by the atmosphere and the ring.
+varying vec2 vUv;
 
 void main() {
   vec4 world = modelMatrix * vec4(position, 1.0);
@@ -938,6 +943,7 @@ void main() {
   vCenter = modelMatrix[3].xyz;
   vShellRadius = length(modelMatrix[0].xyz);
   vAxis = normalize(modelMatrix[1].xyz);
+  vUv = uv;
   gl_Position = projectionMatrix * viewMatrix * world;
 }
 `;
@@ -959,11 +965,28 @@ uniform float uRingGap;
 uniform float uRingGapWidth;
 uniform vec3 uRingColor0;
 uniform vec3 uRingColor1;
+// A comet's coma (radius in the mesh's units, brightness, colour) and tails: each tail's unit
+// direction at the head and unit bend (world space), its shape (length in the mesh's units, the
+// bend's angle and curvature, peak brightness), its half-width at the head and the end, and colour.
+uniform float uComaRadius;
+uniform float uComaIntensity;
+uniform vec3 uComaColor;
+uniform vec3 uIonDir;
+uniform vec3 uIonBend;
+uniform vec4 uIonShape;
+uniform vec2 uIonWidth;
+uniform vec3 uIonColor;
+uniform vec3 uDustDir;
+uniform vec3 uDustBend;
+uniform vec4 uDustShape;
+uniform vec2 uDustWidth;
+uniform vec3 uDustColor;
 
 varying vec3 vWorld;
 varying vec3 vCenter;
 varying float vShellRadius;
 varying vec3 vAxis;
+varying vec2 vUv;
 
 const float PI = 3.141592653589793;
 
@@ -1041,7 +1064,53 @@ vec3 atmosphereGlow(float planetRadius) {
   return uAtmosphereColor * glow * day * uAtmosphereIntensity * uOpacity;
 }
 
+// A comet's glow along the view ray through this fragment (linear colour, before the encounter fade
+// and the output encoding). The mesh is the coma's sphere and an open tube along each tail's axis,
+// centred on the nucleus (vCenter) and scaled by the encounter's size scale (vShellRadius); its front
+// faces cover each piece's outline once, and each fragment adds the light of the gas its ray crosses,
+// from how close the ray passes to the coma's centre or to the tail's axis (taken near this
+// fragment's place along the tail, as the line through it along the axis). The profiles fall to 0 at
+// the mesh's edges, so its outline never shows.
+vec3 cometGlow() {
+  vec3 rd = normalize(vWorld - cameraPosition);
+  float scale = vShellRadius;
+  if (vUv.y < 0.5) {
+    vec3 oc = vCenter - cameraPosition;
+    vec3 off = cameraPosition + rd * dot(oc, rd) - vCenter;
+    float x2 = min(1.0, dot(off, off) / (uComaRadius * uComaRadius * scale * scale));
+    // A bright core in a wide, faint halo, a little brighter toward the sun.
+    float glow = (0.65 * exp(-36.0 * x2) + 0.35 * exp(-5.0 * x2)) * (1.0 - x2);
+    float sun = 1.0 + 0.3 * dot(normalize(off + 1e-5), normalize(uLightDir));
+    return uComaColor * glow * sun * uComaIntensity;
+  }
+  bool dust = vUv.y > 1.5;
+  vec3 dir = dust ? uDustDir : uIonDir;
+  vec3 bend = dust ? uDustBend : uIonBend;
+  vec4 shape = dust ? uDustShape : uIonShape;
+  vec2 width = dust ? uDustWidth : uIonWidth;
+  float t = clamp(vUv.x, 0.0, 1.0);
+  vec3 axis = vCenter + shape.x * scale * (t * dir + (shape.y * t + shape.z * t * t) * bend);
+  vec3 tangent = normalize(dir + (shape.y + 2.0 * shape.z * t) * bend);
+  // Signed distance between the view ray and the axis line (the ray's along-axis component cancels).
+  vec3 n = cross(rd, tangent);
+  float nl = length(n);
+  vec3 toAxis = axis - cameraPosition;
+  float d = nl > 1e-4 ? dot(toAxis, n) / nl : length(cross(toAxis, rd));
+  float r = (width.x + (width.y - width.x) * t) * scale;
+  float x2 = min(1.0, (d * d) / (r * r));
+  float across = exp(-2.5 * x2) * (1.0 - x2);
+  // Brightest a little behind the head, fading out toward the end; the ion tail also in streaks.
+  float along = smoothstep(0.0, 0.06, t) * pow(1.0 - t, dust ? 1.6 : 1.1);
+  if (!dust) across *= 0.7 + 0.3 * noise1(5.0 * d / r + 11.0 + 3.0 * t);
+  return (dust ? uDustColor : uIonColor) * across * along * shape.w;
+}
+
 void main() {
+  if (uRing > 1.5) {
+    gl_FragColor = vec4(cometGlow() * uOpacity, 1.0);
+    #include <colorspace_fragment>
+    return;
+  }
   if (uRing > 0.5) {
     gl_FragColor = ring();
     #include <colorspace_fragment>
@@ -1207,6 +1276,17 @@ function createRingMaterial(uniforms: Uniforms): ShaderMaterial {
     depthTest: true,
     depthWrite: true,
   });
+}
+
+/**
+ * A comet's glow material (its coma and tails, see `cometGlow` in the halo shader): the halo program,
+ * additive, depth-tested and writing no depth, exactly as the atmosphere draws, so a comet adds no
+ * shader program. `uniforms` must hold everything the comet branch reads (see Comet.ts).
+ */
+export function cometGlowMaterial(uniforms: Uniforms): ShaderMaterial {
+  const material = createAtmosphereMaterial(uniforms);
+  material.uniforms.uRing = { value: 2 };
+  return material;
 }
 
 /**
