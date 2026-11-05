@@ -223,7 +223,8 @@ function spikeReport(samples: readonly Sample[]) {
 
 test(`soak: ${SOAK_MINUTES} min, heap, frame time and GPU resources stay stable`, async ({ page }) => {
   const durationMs = SOAK_MINUTES * 60_000;
-  test.setTimeout(durationMs + 3 * CRUISE_WAIT_MS + 120_000);
+  // The last sample can be due one spacing after the end, then wait out an encounter.
+  test.setTimeout(durationMs + SOAK_SAMPLE_SECONDS * 1000 + 3 * CRUISE_WAIT_MS + 120_000);
   const errors = collectErrors(page);
   await page.setViewportSize(VIEWPORT);
   // The seeded default mix of planets and nebulae, at a short interval, flown from the top speed
@@ -253,10 +254,14 @@ test(`soak: ${SOAK_MINUTES} min, heap, frame time and GPU resources stay stable`
   samples[0]!.atMin = 0;
 
   // Then a sample due every SOAK_SAMPLE_SECONDS, each taken at the first CRUISE after it is due (so
-  // the spacing is the later of the two: about one encounter cycle), until the run is over.
+  // the spacing is the later of the two: about one encounter cycle), until a sample lands at or
+  // after the end of the run. A sample is never due sooner than SOAK_SAMPLE_SECONDS after the
+  // previous one, even near the end: a sample taken just before the end (after waiting out an
+  // encounter) would otherwise be followed at once by one with a window of a second or two, too
+  // few frames to compare (#57). So the run can overrun SOAK_MINUTES by up to one spacing.
   let lastAt = startedAt;
-  while (Date.now() - startedAt < durationMs) {
-    const due = Math.min(lastAt + SOAK_SAMPLE_SECONDS * 1000, startedAt + durationMs);
+  while (lastAt - startedAt < durationMs) {
+    const due = lastAt + SOAK_SAMPLE_SECONDS * 1000;
     await page.waitForTimeout(Math.max(0, due - Date.now()));
     const sample = await takeSample(page, startedAt);
     lastAt = Date.now();
