@@ -7,6 +7,7 @@ import { expect, test, type Page } from '@playwright/test';
 import type { E2EHookSnapshot } from '../src/e2eHook';
 import { installFrameSampler, takeFrameWindow } from './frameSampler';
 import { appUrl } from './app';
+import { CRUISE_PROGRAMS } from './limits';
 import { ENCOUNTER_BASE_SEED } from '../src/config';
 import { generateGalaxies } from '../src/engine/Galaxies';
 import { formatTripSeed } from '../src/tripSeed';
@@ -94,16 +95,46 @@ test('the hook reports frame-time statistics, the heap and renderer.info, and a 
   expect(errors).toEqual([]);
 });
 
+test('the frame-rate cap: the engine draws at most the cap a second, and the simulation stays real time', async ({ page }) => {
+  const errors = collectErrors(page);
+  await page.setViewportSize({ width: 160, height: 90 });
+  // The default cap, then a cap of 15 fps (an e2e-only override), well under headless Chromium's 60 Hz.
+  await page.goto(appUrl('encounterInterval=1e9'));
+  await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) >= 5);
+  expect((await snapshot(page)).frameRateCap).toBe(60);
+  await page.goto(appUrl('encounterInterval=1e9&frameRateCap=15'));
+  await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) >= 5);
+  const before = await snapshot(page);
+  const wallStart = await page.evaluate(() => performance.now());
+  await page.waitForTimeout(4_000);
+  const after = await snapshot(page);
+  const wall = (await page.evaluate(() => performance.now())) - wallStart;
+  expect(before.frameRateCap).toBe(15);
+  const drawn = after.frames - before.frames;
+  test.info().annotations.push({ type: 'capped at 15 fps', description: JSON.stringify({ drawn, wall, simulated: after.ship.time - before.ship.time }) });
+  expect(drawn).toBeGreaterThan(0);
+  // At most 15 a second (one more for the window's ends).
+  expect(drawn).toBeLessThanOrEqual(Math.ceil((wall / 1000) * 15) + 1);
+  // Each drawn frame steps the simulation by the time since the last (up to the dt cap), so it
+  // keeps moving at the capped rate.
+  expect(after.ship.time - before.ship.time).toBeGreaterThan(0);
+  expect(after.ship.distance).toBeGreaterThan(before.ship.distance);
+  expect(errors).toEqual([]);
+});
+
 /**
  * The GPU resource budget at cruise (no encounter object): what the sky costs.
  *
  * - The far stars, the near dust and, in a trip with any distant galaxy, the galaxy layer: one
  *   geometry and one draw call each.
- * - Programs: one per sky layer drawn, plus the four encounter programs ProgramWarmup keeps from
- *   start-up (the rocky and gas planet surfaces, the atmosphere and the nebula layers).
+ * - Programs: one per sky layer drawn, plus the eight encounter programs ProgramWarmup keeps from
+ *   start-up (the procedural and baked rocky and gas planet surfaces, the two surface bakes, the
+ *   halo (atmosphere, rings, comet glow) and the nebula layers; CRUISE_PROGRAMS in e2e/limits.ts).
+ *   Before issue #65 there were four (7 and 6 in all).
+ * - Textures: none. A planet's bake cube maps exist only while it does.
  *
- * So the galaxies add at most one geometry, one program and one draw call: 3, 7 and 3 in a trip
- * with galaxies (the test default trip has two), and 2, 6 and 2 in a trip without, where the
+ * So the galaxies add at most one geometry, one program and one draw call: 3, 11 and 3 in a trip
+ * with galaxies (the test default trip has two), and 2, 10 and 2 in a trip without, where the
  * galaxy layer is hidden and never compiled.
  */
 test('the resource budget at cruise: the distant galaxies add one geometry, one program and one draw call', async ({ page }) => {
@@ -118,14 +149,14 @@ test('the resource budget at cruise: the distant galaxies add one geometry, one 
     expect(s.planets).toBe(0);
     return { galaxies: s.galaxies.items.length, visible: s.galaxies.visible, ...s.renderer };
   };
-  const withGalaxies = await budget(ENCOUNTER_BASE_SEED, 7);
+  const withGalaxies = await budget(ENCOUNTER_BASE_SEED, CRUISE_PROGRAMS.withGalaxies);
   // A trip without galaxies (0–3 per trip, from the trip seed).
   let emptySeed = 1;
   while (generateGalaxies(emptySeed).length > 0) emptySeed++;
-  const without = await budget(emptySeed, 6);
+  const without = await budget(emptySeed, CRUISE_PROGRAMS.withoutGalaxies);
   test.info().annotations.push({ type: 'cruise budget', description: JSON.stringify({ withGalaxies, without, emptySeed }) });
-  expect(withGalaxies).toMatchObject({ galaxies: 2, visible: true, geometries: 3, programs: 7, calls: 3, textures: 0 });
-  expect(without).toMatchObject({ galaxies: 0, visible: false, geometries: 2, programs: 6, calls: 2, textures: 0 });
+  expect(withGalaxies).toMatchObject({ galaxies: 2, visible: true, geometries: 3, programs: CRUISE_PROGRAMS.withGalaxies, calls: 3, textures: 0 });
+  expect(without).toMatchObject({ galaxies: 0, visible: false, geometries: 2, programs: CRUISE_PROGRAMS.withoutGalaxies, calls: 2, textures: 0 });
   expect(errors).toEqual([]);
 });
 

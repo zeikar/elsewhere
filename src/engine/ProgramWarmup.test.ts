@@ -1,10 +1,10 @@
-import { PerspectiveCamera, Scene, type BufferGeometry, type Material, type Object3D, type ShaderMaterial } from 'three';
+import { PerspectiveCamera, Scene, WebGLRenderTarget, type BufferGeometry, type Material, type Object3D, type ShaderMaterial } from 'three';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ENCOUNTER_BASE_SEED } from '../config';
 import { Asteroid, asteroidParams } from './Asteroid';
 import { Comet, cometParams } from './Comet';
 import { Nebula, disposeNebulaGeometry, nebulaGeometry, nebulaParams, nebulaProgramMaterials } from './Nebula';
-import { Planet, disposePlanetGeometry, planetGeometry, planetParams, planetProgramMaterials, ringGeometry } from './Planet';
+import { Planet, atmosphereGeometry, disposePlanetGeometry, planetBakeProgramMaterials, planetGeometry, planetParams, planetProgramMaterials, ringGeometry } from './Planet';
 import { ProgramWarmup, holderGeometry, type ProgramCompiler } from './ProgramWarmup';
 import { hash } from './seed';
 
@@ -77,18 +77,31 @@ function planetSeeds(): { rocky: number; gas: number; ringedGas: number; ringedR
 
 describe('encounter program holders', () => {
   it('hold exactly the programs real planets, nebulae, asteroids and comets use', () => {
+    // On screen: the procedural and baked rocky and gas surfaces, the halo and the nebula layers.
     const holders = new Set([...planetProgramMaterials(), ...nebulaProgramMaterials()].map(programSignature));
-    expect(holders.size).toBe(4);
+    expect(holders.size).toBe(6);
+    // Into a render target: the rocky and gas surface bakes (issue #65).
+    const bakeHolders = new Set(planetBakeProgramMaterials().map(programSignature));
+    expect(bakeHolders.size).toBe(2);
 
     const seeds = planetSeeds();
     const used = new Set<string>();
+    const bakes = new Set<string>();
     let rings = 0;
     for (const seed of [seeds.rocky, seeds.gas, seeds.ringedGas, seeds.ringedRocky, seeds.icy]) {
-      const planet = new Planet(planetParams(seed));
-      if (planet.ring !== null) rings++;
-      for (const m of materialsOf(planet.object)) used.add(programSignature(m));
-      planet.dispose();
+      for (const bake of [false, true]) {
+        const planet = new Planet(planetParams(seed), undefined, undefined, { bake });
+        if (planet.ring !== null && !bake) rings++;
+        for (const m of materialsOf(planet.object)) used.add(programSignature(m));
+        // Every material a planet owns, the baked surface's (drawn once the bake is done) among them.
+        for (const m of planet.materials()) {
+          if (m === planet.bake?.material) bakes.add(programSignature(m));
+          else used.add(programSignature(m));
+        }
+        planet.dispose();
+      }
     }
+    expect(bakes).toEqual(bakeHolders);
     // Rings and icy dwarfs need no program of their own (docs/PLAN.md section 9, Phase 4): a ring
     // draws with the atmosphere's halo program, an icy dwarf with the rocky surface.
     expect(rings).toBe(2);
@@ -112,9 +125,10 @@ describe('encounter program holders', () => {
     expect(used).toEqual(holders);
   });
 
-  it('use a geometry with the attributes of the planet sphere, the ring, the nebula plane, a rock and a comet glow, but no data', () => {
+  it('use a geometry with the attributes of the planet sphere, the atmosphere annulus, the ring, the nebula plane, a rock and a comet glow, but no data', () => {
     const holder = holderGeometry();
     expect(attributeLayout(holder)).toBe(attributeLayout(planetGeometry()));
+    expect(attributeLayout(holder)).toBe(attributeLayout(atmosphereGeometry()));
     const ring = ringGeometry(1.4, 2.4);
     expect(attributeLayout(holder)).toBe(attributeLayout(ring));
     ring.dispose();
@@ -165,6 +179,35 @@ describe('ProgramWarmup', () => {
     warmup.dispose();
     expect(disposed).toBe(materials.length);
     expect(warmup.object.children).toHaveLength(0);
+  });
+
+  it('with a target, binds it while the compile starts and binds the previous one again; isReady() once settled', async () => {
+    const warmup = new ProgramWarmup(planetBakeProgramMaterials());
+    const { renderer, compiled } = fakeRenderer();
+    const bound: (WebGLRenderTarget | null)[] = [];
+    let current: WebGLRenderTarget | null = null;
+    const previous = new WebGLRenderTarget(2, 2);
+    current = previous;
+    const target = new WebGLRenderTarget(1, 1);
+    const compileAsync = renderer.compileAsync.bind(renderer);
+    renderer.compileAsync = (object, camera, scene) => {
+      bound.push(current);
+      return compileAsync(object, camera, scene);
+    };
+    renderer.getRenderTarget = () => current;
+    renderer.setRenderTarget = (t) => {
+      current = t;
+    };
+    const pending = warmup.compile(renderer, new PerspectiveCamera(), new Scene(), target);
+    expect(warmup.isReady()).toBe(false);
+    expect(bound).toEqual([target]);
+    expect(current).toBe(previous);
+    await pending;
+    expect(compiled).toHaveLength(1);
+    expect(warmup.isReady()).toBe(true);
+    warmup.dispose();
+    target.dispose();
+    previous.dispose();
   });
 
   it('never rejects, and primes nothing once disposed or when the compile fails', async () => {

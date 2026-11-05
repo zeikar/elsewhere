@@ -269,3 +269,81 @@ for (const { name, at } of OCCLUSION_PLACES) test(`a planet hides a distant gala
   await page.evaluate(() => window.__elsewhere!.hidePlanet());
   expect(errors).toEqual([]);
 });
+
+/**
+ * Issue #65: planets are drawn from a bake of their surface into cube maps (src/engine/PlanetBake.ts)
+ * instead of procedurally per pixel. The look must stay the same, but for filtering: the same preview
+ * planets drawn both ways, framed as usual and close up (as at the closest pass, k = 1.6), differ by
+ * little on average and in all but a few pixels (the fine relief, which the bake's mipmaps filter a
+ * little differently from the per-pixel footprint filter).
+ */
+const BAKE_CASES: readonly { name: string; type: 'rocky' | 'gas'; nth: number; closeup?: number }[] = [
+  { name: 'rocky', type: 'rocky', nth: 0 },
+  { name: 'rocky 3', type: 'rocky', nth: 3 },
+  { name: 'gas', type: 'gas', nth: 0 },
+  { name: 'gas 2', type: 'gas', nth: 2 },
+  { name: 'rocky close up', type: 'rocky', nth: 0, closeup: 0.6 },
+  { name: 'gas close up', type: 'gas', nth: 0, closeup: 0.6 },
+];
+
+test('a baked planet looks as the procedural one does, apart from filtering, framed as usual and close up', async ({ page }) => {
+  test.setTimeout(300_000);
+  const errors = collectErrors(page);
+  await page.setViewportSize({ width: 960, height: 540 });
+  await page.goto(appUrl('encounterInterval=1e9'));
+  await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 0);
+  await page.evaluate(() => window.__elsewhere!.pause());
+  const results = [];
+  for (const c of BAKE_CASES) {
+    const shots: Buffer[] = [];
+    for (const surface of ['procedural', 'baked'] as const) {
+      await page.evaluate(({ c, surface }) => window.__elsewhere!.showPlanet(c.type, c.nth, { surface, ...(c.closeup === undefined ? {} : { closeup: c.closeup }) }), {
+        c,
+        surface,
+      });
+      const png = await page.locator('#planet-preview').screenshot({ style: CANVAS_ONLY });
+      shots.push(png);
+      writeFileSync(test.info().outputPath(`${c.name.replaceAll(' ', '-')}-${surface}.png`), png);
+    }
+    const diff = await page.evaluate(
+      async ({ a, b }) => {
+        const decode = async (b64: string) => {
+          const bitmap = await createImageBitmap(await (await fetch(`data:image/png;base64,${b64}`)).blob());
+          const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+          const ctx = canvas.getContext('2d')!;
+          ctx.drawImage(bitmap, 0, 0);
+          return ctx.getImageData(0, 0, bitmap.width, bitmap.height).data;
+        };
+        const [pa, pb] = await Promise.all([decode(a), decode(b)]);
+        const hist = new Uint32Array(256);
+        let sum = 0;
+        let lit = 0;
+        for (let i = 0; i < pa.length; i += 4) {
+          const d = Math.max(Math.abs(pa[i]! - pb[i]!), Math.abs(pa[i + 1]! - pb[i + 1]!), Math.abs(pa[i + 2]! - pb[i + 2]!));
+          hist[d]!++;
+          sum += Math.abs(pa[i]! - pb[i]!) + Math.abs(pa[i + 1]! - pb[i + 1]!) + Math.abs(pa[i + 2]! - pb[i + 2]!);
+          if (Math.max(pa[i]!, pa[i + 1]!, pa[i + 2]!) > 16) lit++;
+        }
+        const n = pa.length / 4;
+        const rank = (q: number) => {
+          let seen = 0;
+          for (let d = 0; d < 256; d++) if ((seen += hist[d]!) >= q * n) return d;
+          return 255;
+        };
+        return { mean: sum / (3 * n), p99: rank(0.99), p999: rank(0.999), litFraction: lit / n };
+      },
+      { a: shots[0]!.toString('base64'), b: shots[1]!.toString('base64') },
+    );
+    results.push({ ...c, ...diff });
+  }
+  test.info().annotations.push({ type: 'baked vs procedural (0–255)', description: JSON.stringify(results) });
+  console.log(`baked vs procedural: ${JSON.stringify(results)}`);
+  for (const r of results) {
+    // Something to compare: the planet fills a good part of the view.
+    expect(r.litFraction, r.name).toBeGreaterThan(0.05);
+    expect(r.mean, r.name).toBeLessThan(1);
+    expect(r.p99, r.name).toBeLessThanOrEqual(12);
+  }
+  await page.evaluate(() => window.__elsewhere!.hidePlanet());
+  expect(errors).toEqual([]);
+});

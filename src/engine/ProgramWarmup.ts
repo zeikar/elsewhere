@@ -20,6 +20,10 @@
  * from start-up on.
  * The holders are never drawn.
  *
+ * Programs that draw into a render target (the planet surface bakes, PlanetBake.ts) differ from
+ * those that draw on screen (Three.js writes linear colour there, so it builds them apart), so they
+ * are held by a warm-up of their own, compiled with a render target bound (`compile`'s `target`).
+ *
  * Three.js derives part of a program from the geometry's attributes (whether it has normals, for
  * one), so the holders' geometry has the same attributes as the planet sphere and the nebula plane
  * (`position`, `normal`, `uv`), but empty: no buffers are uploaded (or counted in
@@ -34,6 +38,7 @@ import {
   type Material,
   type Object3D,
   type Scene,
+  type WebGLRenderTarget,
 } from 'three';
 
 /** What the warm-up needs from the renderer (a `WebGLRenderer`). */
@@ -41,6 +46,9 @@ export interface ProgramCompiler {
   compileAsync(object: Object3D, camera: Camera, scene: Scene): PromiseLike<unknown>;
   /** Three.js' per-object renderer state; a compiled material's entry holds its `currentProgram`. */
   properties: { get(object: object): unknown };
+  /** For compiling with a render target bound (see `compile`). */
+  getRenderTarget?(): WebGLRenderTarget | null;
+  setRenderTarget?(target: WebGLRenderTarget | null): void;
 }
 
 export class ProgramWarmup {
@@ -49,6 +57,7 @@ export class ProgramWarmup {
   private readonly geometry = holderGeometry();
   private readonly materials: readonly Material[];
   private disposed = false;
+  private ready = false;
 
   constructor(materials: readonly Material[]) {
     this.materials = materials;
@@ -60,22 +69,38 @@ export class ProgramWarmup {
    * a program's uniform locations (and checks it for errors) the first time it is used, with
    * synchronous WebGL calls that wait for the GPU to finish everything queued before them. Left to
    * the first frame that draws an encounter, that wait stalled the frame by about one frame time;
-   * here it happens once, at start-up. Settles when done; never rejects.
+   * here it happens once, at start-up. With `target`, the programs are built for drawing into a
+   * render target: it is bound while the compile starts (Three.js reads which target is bound when
+   * it builds a program), then the previous one is bound again. Settles when done, after which
+   * `isReady()` is true; never rejects.
    */
-  compile(renderer: ProgramCompiler, camera: Camera, scene: Scene): Promise<void> {
+  compile(renderer: ProgramCompiler, camera: Camera, scene: Scene, target: WebGLRenderTarget | null = null): Promise<void> {
     if (this.disposed) return Promise.resolve();
     let pending: PromiseLike<unknown>;
+    const previous = target === null ? null : (renderer.getRenderTarget?.() ?? null);
     try {
+      if (target !== null) renderer.setRenderTarget?.(target);
       pending = renderer.compileAsync(this.object, camera, scene);
     } catch {
+      this.ready = true;
       return Promise.resolve();
+    } finally {
+      if (target !== null) renderer.setRenderTarget?.(previous);
     }
     return Promise.resolve(pending).then(
       () => {
         if (!this.disposed) this.prime(renderer);
+        this.ready = true;
       },
-      () => undefined,
+      () => {
+        this.ready = true;
+      },
     );
+  }
+
+  /** Whether `compile` has settled (successfully or not), so drawing with the held programs no longer compiles. */
+  isReady(): boolean {
+    return this.ready;
   }
 
   /** Makes Three.js do each program's first-use work now (see `compile`). Tolerates any renderer state. */

@@ -44,6 +44,7 @@ import { FarStarfield } from './engine/FarStarfield';
 import { Galaxies, generateGalaxies, type Galaxy } from './engine/Galaxies';
 import { Nebula, nebulaParams } from './engine/Nebula';
 import { Planet, planetParams, ringAxis, DEFAULT_PLANET_FRAME, type PlanetType } from './engine/Planet';
+import { PlanetBaker } from './engine/PlanetBake';
 import { computeRenderSize } from './engine/renderSize';
 import { hash } from './engine/seed';
 
@@ -112,6 +113,16 @@ export interface PlanetPreviewOptions {
    * direction and changes nothing else, so the planet is as small as it is at that distance.
    */
   farFraming?: 'zoom' | 'grow' | 'none';
+  /**
+   * The surface as the engine draws it once baked (`'baked'`, the default: the whole bake is drawn
+   * first, PlanetBake.ts) or procedurally, as before the bake is done (`'procedural'`).
+   */
+  surface?: 'baked' | 'procedural';
+  /**
+   * Seen up close instead: the camera `closeup` planet radii above the surface (0.6 is the closest
+   * pass, k = 1.6), looking at the lit limb, so the surface is magnified as at a closest approach.
+   */
+  closeup?: number;
 }
 
 export interface EncounterPreviewInfo {
@@ -132,6 +143,7 @@ export interface EncounterPreviewInfo {
 
 let canvas: HTMLCanvasElement | null = null;
 let renderer: WebGLRenderer | null = null;
+let baker: PlanetBaker | null = null;
 let shown: Planet | Nebula | Asteroid | Comet | null = null;
 let farStars: FarStarfield | null = null;
 let galaxies: Galaxies | null = null;
@@ -159,6 +171,7 @@ function prepare(): { renderer: WebGLRenderer; scene: Scene; camera: Perspective
     renderer = new WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
     renderer.outputColorSpace = SRGBColorSpace;
     renderer.setClearColor(CLEAR_COLOR, 1);
+    baker = new PlanetBaker(renderer);
   }
   scene ??= new Scene();
   camera ??= new PerspectiveCamera(CAMERA_FOV_DEG, 1, CAMERA_NEAR, CAMERA_FAR);
@@ -169,6 +182,8 @@ function prepare(): { renderer: WebGLRenderer; scene: Scene; camera: Perspective
   camera.aspect = width / height;
   camera.fov = CAMERA_FOV_DEG;
   camera.updateProjectionMatrix();
+  camera.rotation.set(0, 0, 0);
+  camera.updateMatrixWorld();
   shown?.dispose();
   shown = null;
   if (farStars !== null) scene.remove(farStars.mesh);
@@ -208,8 +223,9 @@ function drawPlanet(
 ): Pick<PlanetPreviewInfo, 'disc' | 'farStarsBehindDisc' | 'galaxies'> & { planet: Planet } {
   const { renderer: r, scene: s, camera: c } = prepare();
   const params = planetParams(seed);
-  const planet = new Planet(params);
+  const planet = new Planet(params, undefined, undefined, { bake: options.surface !== 'procedural' });
   shown = planet;
+  baker?.complete(planet);
   const radius = params.radius;
   const back = params.ring === null ? 1 : Math.max(1, params.extent / PREVIEW_RING_EXTENT);
   planet.object.position.set(PREVIEW_OFFSET_RADII.x * radius, PREVIEW_OFFSET_RADII.y * radius, PREVIEW_OFFSET_RADII.z * radius * back);
@@ -230,6 +246,15 @@ function drawPlanet(
       position.multiplyScalar(factor);
       if (framing === 'grow') planet.object.scale.multiplyScalar(factor);
     }
+  }
+  if (options.closeup !== undefined) {
+    // The camera at the origin looks down -Z: put the planet so the camera is `closeup` radii above
+    // its surface, to the planet's right, and turn the camera to look along the limb a little toward
+    // the planet, at the lit side.
+    const above = radius * (1 + options.closeup);
+    planet.object.position.set(-above, 0, 0);
+    c.lookAt(-0.6 * above, 0, -above);
+    c.updateMatrixWorld();
   }
   planet.update(PREVIEW_TIME);
   s.add(planet.object);
@@ -586,6 +611,8 @@ export function hidePlanetPreview(): void {
   if (galaxies !== null) scene?.remove(galaxies.mesh);
   galaxies?.dispose();
   galaxies = null;
+  baker?.dispose();
+  baker = null;
   renderer?.dispose();
   renderer = null;
   canvas?.remove();

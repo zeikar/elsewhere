@@ -3,8 +3,10 @@
 // encounter view's sync and place) leave every encounter resource freed, with the scene and the
 // shared geometries back at their baseline after each one. Asteroids and comets (Phase 4) own their
 // geometries (the rocks', the nucleus's and the glow's), so those are checked to be freed too, over
-// long runs of asteroids alone and of comets alone.
-import { Scene, type BufferGeometry, type Material, type Object3D } from 'three';
+// long runs of asteroids alone and of comets alone. Planets are made with their surface bakes (issue
+// #65), as in the engine, so their cube maps (render targets) and bake materials are checked to be
+// freed with them too.
+import { Scene, type BufferGeometry, type Material, type Object3D, type WebGLRenderTarget } from 'three';
 import { afterEach, describe, expect, it } from 'vitest';
 import { DT_CAP_SECONDS, SHIP_SPEED_LEVELS } from '../config';
 import {
@@ -21,7 +23,7 @@ import { asteroidParams } from './Asteroid';
 import { cometParams } from './Comet';
 import { EncounterView } from './EncounterView';
 import { disposeNebulaGeometry, nebulaGeometryRefs, nebulaParams } from './Nebula';
-import { disposePlanetGeometry, planetGeometryRefs, planetParams, planetProgramMaterials } from './Planet';
+import { Planet, disposePlanetGeometry, planetGeometryRefs, planetParams, planetProgramMaterials } from './Planet';
 import { mulberry32 } from './seed';
 import { DEFAULT_SHIP_PARAMS } from './Ship';
 
@@ -58,6 +60,8 @@ function programKey(material: Material): string {
 class ResourceLedger {
   readonly geometries = new Set<BufferGeometry>();
   readonly materials = new Set<Material>();
+  /** Render targets (a planet's bake cube maps), what `renderer.info.memory.textures` counts of them. */
+  readonly textures = new Set<WebGLRenderTarget>();
   /** Distinct shader sources among live materials (what `renderer.info.programs` would hold). */
   programs(): number {
     return this.programKeys().size;
@@ -79,12 +83,24 @@ class ResourceLedger {
         geometry.addEventListener('dispose', () => this.geometries.delete(geometry));
       }
       const materials = mesh.material === undefined ? [] : Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-      for (const material of materials) {
-        if (this.materials.has(material)) continue;
-        this.materials.add(material);
-        material.addEventListener('dispose', () => this.materials.delete(material));
-      }
+      for (const material of materials) this.trackMaterial(material);
     });
+  }
+
+  /** A planet's resources beyond its scene graph: every material it owns (the baked surface's and the bake's among them) and its bake's cube maps. */
+  trackPlanet(planet: Planet): void {
+    for (const material of planet.materials()) this.trackMaterial(material);
+    for (const target of planet.bake?.targets ?? []) {
+      if (this.textures.has(target)) continue;
+      this.textures.add(target);
+      target.addEventListener('dispose', () => this.textures.delete(target));
+    }
+  }
+
+  private trackMaterial(material: Material): void {
+    if (this.materials.has(material)) return;
+    this.materials.add(material);
+    material.addEventListener('dispose', () => this.materials.delete(material));
   }
 }
 
@@ -97,7 +113,7 @@ interface LongRunResult {
   /** Largest per-frame step beyond what the ship's speed allows (≤ 0 is fine). */
   worstJump: number;
   /** Peak live resources during an encounter, by kind. */
-  peak: Record<EncounterKind, { geometries: number; materials: number; programs: number }>;
+  peak: Record<EncounterKind, { geometries: number; materials: number; programs: number; textures: number }>;
   /** Asteroid encounters that were a field of several rocks, and the most rocks in one. */
   fields: number;
   mostRocks: number;
@@ -112,7 +128,7 @@ interface LongRunResult {
 /** Runs `count` encounters with engine-like frames of `dt(i)` seconds and audits every return to CRUISE. */
 function runEncounters(travel: Travel, count: number, dt: (frame: number) => number): LongRunResult {
   const scene = new Scene();
-  const view = new EncounterView(scene);
+  const view = new EncounterView(scene, null, { bakePlanets: true });
   const ledger = new ResourceLedger();
   const result: LongRunResult = {
     kinds: { planet: 0, nebula: 0, asteroid: 0, comet: 0 },
@@ -120,10 +136,10 @@ function runEncounters(travel: Travel, count: number, dt: (frame: number) => num
     leaks: [],
     worstJump: Number.NEGATIVE_INFINITY,
     peak: {
-      planet: { geometries: 0, materials: 0, programs: 0 },
-      nebula: { geometries: 0, materials: 0, programs: 0 },
-      asteroid: { geometries: 0, materials: 0, programs: 0 },
-      comet: { geometries: 0, materials: 0, programs: 0 },
+      planet: { geometries: 0, materials: 0, programs: 0, textures: 0 },
+      nebula: { geometries: 0, materials: 0, programs: 0, textures: 0 },
+      asteroid: { geometries: 0, materials: 0, programs: 0, textures: 0 },
+      comet: { geometries: 0, materials: 0, programs: 0, textures: 0 },
     },
     fields: 0,
     mostRocks: 0,
@@ -159,7 +175,11 @@ function runEncounters(travel: Travel, count: number, dt: (frame: number) => num
       ledger.track(current.object);
       const kind = travel.autopilot.encounter!.kind;
       result.kinds[kind]++;
-      if (view.getPlanet()?.ring) result.ringed++;
+      const planet = view.getPlanet();
+      if (planet !== null) {
+        ledger.trackPlanet(planet);
+        if (planet.ring) result.ringed++;
+      }
       const asteroid = view.getAsteroid();
       if (asteroid !== null) {
         if (asteroid.rocks.length > 1) result.fields++;
@@ -179,6 +199,7 @@ function runEncounters(travel: Travel, count: number, dt: (frame: number) => num
       peak.geometries = Math.max(peak.geometries, ledger.geometries.size);
       peak.materials = Math.max(peak.materials, ledger.materials.size);
       peak.programs = Math.max(peak.programs, ledger.programs());
+      peak.textures = Math.max(peak.textures, ledger.textures.size);
     }
 
     const next = travel.autopilot.state;
@@ -189,6 +210,7 @@ function runEncounters(travel: Travel, count: number, dt: (frame: number) => num
       if (view.getObject() !== null) left.push('an encounter object');
       if (ledger.geometries.size !== 0) left.push(`${ledger.geometries.size} geometries`);
       if (ledger.materials.size !== 0) left.push(`${ledger.materials.size} materials`);
+      if (ledger.textures.size !== 0) left.push(`${ledger.textures.size} bake cube maps`);
       if (planetGeometryRefs() !== 0) left.push(`${planetGeometryRefs()} planet geometry refs`);
       if (nebulaGeometryRefs() !== 0) left.push(`${nebulaGeometryRefs()} nebula geometry refs`);
       if (left.length > 0) result.leaks.push(`encounter ${index}: ${left.join(', ')}`);
@@ -210,7 +232,8 @@ describe('long run (simulation level)', () => {
     }
     const ledger = new ResourceLedger();
     ledger.track(view.getObject()!.object);
-    expect(ledger.geometries.size).toBe(1);
+    // The first encounter is a planet: the shared sphere and the atmosphere's annulus.
+    expect(ledger.geometries.size).toBe(2);
     expect(ledger.materials.size).toBeGreaterThan(0);
     expect(ledger.programs()).toBeGreaterThan(0);
     view.dispose();
@@ -232,12 +255,16 @@ describe('long run (simulation level)', () => {
     expect(result.kinds.nebula).toBeGreaterThan(20);
     expect(result.kinds.asteroid).toBeGreaterThan(5);
     expect(result.kinds.comet).toBeGreaterThan(3);
-    // A planet encounter holds one shared geometry (a ringed planet its own ring geometry too) and a
-    // handful of materials, never more. A ring draws with the atmosphere's (halo) program.
+    // A planet encounter holds the shared sphere and atmosphere annulus (a ringed planet its own ring
+    // geometry too), a
+    // handful of materials (the procedural and baked surfaces, the bake, the atmosphere, the ring)
+    // and its bake's cube maps (two for a rocky world), never more. A ring draws with the
+    // atmosphere's (halo) program.
     expect(result.ringed).toBeGreaterThan(0);
-    expect(result.peak.planet.geometries).toBe(2);
-    expect(result.peak.planet.materials).toBeLessThanOrEqual(3);
-    expect(result.peak.planet.programs).toBeLessThanOrEqual(2);
+    expect(result.peak.planet.geometries).toBe(3);
+    expect(result.peak.planet.materials).toBeLessThanOrEqual(5);
+    expect(result.peak.planet.programs).toBeLessThanOrEqual(4);
+    expect(result.peak.planet.textures).toBe(2);
     // A nebula: the shared plane, one material per layer, one program.
     expect(result.peak.nebula.geometries).toBe(1);
     expect(result.peak.nebula.materials).toBeLessThanOrEqual(8);

@@ -42,6 +42,23 @@ export const DT_CAP_SECONDS = 0.1;
  */
 export const PERF_FRAME_WINDOW = 120;
 
+/**
+ * Frame-rate cap (docs/PLAN.md section 6, Performance), in frames per second: the engine draws at
+ * most about this many frames a second, measured by the frame clock (engine/FrameCap.ts), so a
+ * 120 Hz display draws every other frame. The motion here is slow enough that more frames show
+ * nothing more, and each frame's GPU work (a planet's surface across much of a Retina screen) is the
+ * cost. The simulation stays real time: each drawn frame steps it by the real time since the last.
+ * 0 means no cap.
+ */
+export const FRAME_RATE_CAP = 60;
+
+/**
+ * How early, in milliseconds, a display frame may come and still be drawn under the cap: rAF
+ * timestamps jitter, so a 60 Hz display (59.9 Hz or 60.1 Hz too) draws every frame rather than
+ * dropping to 30. Well under the 8.3 ms of a 120 Hz frame, so there every other one is skipped.
+ */
+export const FRAME_CAP_TOLERANCE_MS = 2;
+
 /** Delay before the UI and cursor hide with no input, in milliseconds (docs/PLAN.md section 7). Placeholder. */
 export const UI_HIDE_DELAY_MS = 2500;
 
@@ -693,6 +710,34 @@ export const PLANET_ENCOUNTER_LIGHT = { behind: 0.6, inward: 0.6, up: 0.3 } as c
 
 /** Width and height segments of the shared planet sphere geometry. */
 export const PLANET_SPHERE_SEGMENTS = [96, 64] as const;
+
+/**
+ * Planet surface bake (issue #65; engine/PlanetBake.ts): each planet's surface is rendered once into
+ * cube maps of this many texels a side per face, then drawn from them, so a frame shades it with a
+ * couple of texture reads instead of a dozen noise evaluations.
+ *
+ * The size: the surface's finest detail (the top terrain octave, at most about 87 cycles per radian,
+ * and the narrowest crater rims) spans about 6 texels at 1024 (a face texel is at most 2/1024 rad
+ * across), so bilinear filtering keeps it; and the sharpest edges, the coastlines, are recomputed
+ * per pixel from the baked height, so they stay as sharp as before however close. Magnified, at the
+ * closest pass (k = 1.6) at 1512×982 @2×, a texel is at most about 6.6 device pixels (3.3 CSS
+ * pixels) across, at the very edge of the screen, and that finest detail about 38. Twice the size
+ * would quadruple the memory (see `SurfaceBake` in engine/Planet.ts: 100.7 MB for a rocky world at
+ * 1024) for detail the surface does not have.
+ */
+export const PLANET_BAKE_FACE_SIZE = 1024;
+
+/**
+ * Rows of one cube face baked per frame (one slice of PLANET_BAKE_FACE_SIZE × this texels, about an
+ * eighth of a face). A rocky world bakes 2 maps × 6 faces × 8 slices, 96 frames (1.6 s at 60 FPS); a
+ * gas giant 48 (0.8 s). The planet spawns as a dot and is 2° across no sooner than about 6 s after
+ * its spawn (the p10 at the top level), so the bake is done while it is a dot. Each slice is about
+ * 2% of a full-screen procedural planet at 1512×982 @2×, so no frame hitches.
+ */
+export const PLANET_BAKE_ROWS_PER_FRAME = 128;
+
+/** Anisotropic filtering of the baked cube maps, so the surface stays sharp toward the limb. */
+export const PLANET_BAKE_ANISOTROPY = 8;
 
 /**
  * Segments around a ring's annulus geometry (one per ringed planet, freed with it). Its edges are

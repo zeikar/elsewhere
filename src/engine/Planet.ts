@@ -13,14 +13,19 @@
  * - `Planet` builds the meshes. Every planet reuses one module-level unit `SphereGeometry`, which is
  *   reference-counted: each planet holds it from its constructor until its `dispose()`, and the last
  *   planet to be disposed frees it (the next planet makes a new one). Each planet owns its materials
- *   and frees them in `dispose()`. Surfaces are fully procedural, so no textures are made.
- * - Surfaces are shaded per fragment in a `ShaderMaterial`: domain-warped fBm terrain with seas,
- *   polar ice and bump shading for rocky planets, and turbulent latitude bands with an optional oval
- *   storm for gas giants. Shader programs depend only on the type, so all planets of one type share
- *   one compiled program.
+ *   and frees them in `dispose()`, and its surface bake's cube maps with them.
+ * - Surfaces are procedural, in a `ShaderMaterial`: domain-warped fBm terrain with seas, polar ice
+ *   and bump shading for rocky planets, and turbulent latitude bands with an optional oval storm for
+ *   gas giants. Shader programs depend only on the type, so all planets of one type share them.
+ * - Surface bake (issue #65; `PlanetOptions.bake`, `SurfaceBake`, PlanetBake.ts): what of the look
+ *   depends only on the point of the surface is rendered once into cube maps, and the planet is then
+ *   drawn from them (`bakedSurfaceFragmentShader`), with only the seas and the lighting done per
+ *   pixel; until then it is drawn procedurally, with the same look. See the shaders' comment below.
  * - The atmosphere is a slightly larger shell drawn additively. Its glow is computed analytically
  *   from how close each view ray passes to the planet, so it brightens toward the limb and fades out
- *   at the shell's edge, and it is brighter on the day side.
+ *   at the shell's edge, and it is brighter on the day side. It is drawn on a camera-facing annulus
+ *   (`atmosphereGeometry`) that covers only the pixels past the limb; over the disc the surface adds
+ *   the glow itself (`discGlow`), so those pixels are shaded once, not twice (issue #65).
  * - A ring is a flat annulus (its own geometry, freed with the planet) in the planet's equatorial
  *   plane, with seeded ringlets, a main gap, two tones from the planet's palette, a lit and an unlit
  *   face, and the planet's shadow across it. A ringed planet's spin axis and ring are turned toward
@@ -53,20 +58,31 @@
 import {
   AdditiveBlending,
   Color,
+  BufferAttribute,
+  BufferGeometry,
   FrontSide,
   Group,
+  HalfFloatType,
+  LinearFilter,
+  LinearMipmapLinearFilter,
+  LinearSRGBColorSpace,
   Mesh,
+  NoBlending,
   NormalBlending,
   Quaternion,
   RingGeometry,
   SRGBColorSpace,
   ShaderMaterial,
   SphereGeometry,
+  UnsignedByteType,
   Vector3,
+  WebGLCubeRenderTarget,
 } from 'three';
 import {
   ENCOUNTER_CLEARANCE_MARGIN,
   PLANET_ATMOSPHERE_TINT,
+  PLANET_BAKE_ANISOTROPY,
+  PLANET_BAKE_FACE_SIZE,
   PLANET_GAS_RANGES,
   PLANET_GAS_SHARE,
   PLANET_ICY_RADIUS,
@@ -669,6 +685,9 @@ varying vec3 vNormalW;
 varying vec3 vRotX;
 varying vec3 vRotY;
 varying vec3 vRotZ;
+// The planet's centre and radius in world space (for the atmosphere's glow over the disc).
+varying vec3 vCenter;
+varying float vRadius;
 
 void main() {
   // The shared geometry is a unit sphere, so the object-space position is the surface direction;
@@ -677,6 +696,8 @@ void main() {
   vec4 world = modelMatrix * vec4(position, 1.0);
   vWorld = world.xyz;
   vNormalW = mat3(modelMatrix) * normal;
+  vCenter = modelMatrix[3].xyz;
+  vRadius = length(modelMatrix[0].xyz);
   vRotX = normalize(modelMatrix[0].xyz);
   vRotY = normalize(modelMatrix[1].xyz);
   vRotZ = normalize(modelMatrix[2].xyz);
@@ -684,7 +705,25 @@ void main() {
 }
 `;
 
-const surfaceFragmentShader = /* glsl */ `
+/*
+ * The surface shaders (docs/PLAN.md section 6, Performance; issue #65). One look, three programs per
+ * planet type, all built from the chunks below, so they cannot drift apart:
+ *
+ * - The procedural surface (`surfaceFragmentShader`) computes the whole look per fragment, every
+ *   frame: noise, terrain, colours and lighting. Asteroid rocks and comet nuclei draw with its rocky
+ *   program, and a planet draws with it until its bake is done.
+ * - The bake (`bakeFragmentShader`) renders the part of the look that depends only on the point of
+ *   the surface into a cube map once per planet (PlanetBake.ts): for a gas giant its colour; for a
+ *   rocky world the land colour and the ice cover (one cube map), and the bump vector and the terrain
+ *   height (another).
+ * - The baked surface (`bakedSurfaceFragmentShader`) samples those cube maps at the fragment's
+ *   object-space direction (so they turn with the planet's spin) and does only what depends on the
+ *   view: the seas from the height (antialiased over the pixel, so coastlines stay sharp however
+ *   close), and the lighting.
+ */
+
+/** Uniforms and varyings shared by the procedural, baked and bake surface shaders. */
+const surfaceUniformsChunk = /* glsl */ `
 uniform vec3 uColor0;
 uniform vec3 uColor1;
 uniform vec3 uColor2;
@@ -712,18 +751,58 @@ uniform float uRelief;
 uniform float uCraters;
 #endif
 
-varying vec3 vObject;
-varying vec3 vWorld;
-varying vec3 vNormalW;
-varying vec3 vRotX;
-varying vec3 vRotY;
-varying vec3 vRotZ;
+const float PI = 3.141592653589793;
+`;
 
+/**
+ * The look that depends only on the point of the surface: `gasAlbedo(p)` for a gas giant;
+ * `rockyLand(...)` (the land colour, ice and terrain) and `rockySurface(...)` (the seas over it) for
+ * a rocky world.
+ */
+const surfaceLookChunk = /* glsl */ `
 ${noiseChunk}
 
-const float PI = 3.141592653589793;
+#ifdef PLANET_GAS
+// The gas giant's colour at unit-sphere point p: turbulent latitude bands, fine streaks, an optional
+// oval storm and darker poles.
+vec3 gasAlbedo(vec3 p) {
+  vec3 q = p * uNoiseScale + uNoiseOffset;
+  float phi = asin(clamp(p.y, -1.0, 1.0));
+  float lon = atan(p.z, p.x);
+  // Oval storm, in a local frame stretched along the longitude.
+  float dLon = mod(lon - uStormLongitude + PI, 2.0 * PI) - PI;
+  vec2 d = vec2(dLon * cos(phi), phi - uStormLatitude);
+  float stormOn = step(0.0001, uStormSize);
+  float e = length(d / vec2(max(uStormSize, 1e-4) * 1.8, max(uStormSize, 1e-4)));
+  float storm = stormOn * (1.0 - smoothstep(0.55, 1.0, e));
+  float wake = stormOn * (1.0 - smoothstep(1.0, 2.2, e));
 
-#ifndef PLANET_GAS
+  // Turbulence: noise stretched along the longitude, so it smears into streaks like real jets.
+  float t = fbm(vec3(q.x, q.y * 2.6, q.z), uOctaves);
+  float t2 = snoise(vec3(q.x * 0.6, q.y * 7.0, q.z * 0.6) + 11.0);
+  float y = phi / (0.5 * PI) + uTurbulence * 0.09 * t + 0.015 * t2;
+  // Swirl the bands around the storm.
+  y += wake * 0.05 * sin(e * 7.0 + atan(d.y, d.x) * 2.0) * uTurbulence;
+
+  float f = uBandFrequency * PI;
+  float b1 = sin(y * f + uBandPhase);
+  float b2 = sin(y * f * 2.37 + 1.7 + 2.0 * uBandPhase);
+  float b3 = sin(y * f * 0.53 + 0.4 + 3.0 * uBandPhase);
+  float band = 0.5 + 0.5 * (0.6 * b1 + 0.25 * b2 + 0.15 * b3);
+  vec3 albedo = mix(uColor0, uColor1, smoothstep(0.2, 0.8, band));
+  albedo = mix(albedo, uColor2, smoothstep(0.5, 1.0, 0.5 + 0.5 * b2) * 0.55);
+  // Fine streaks along the bands.
+  float s = fbm(vec3(q.x * 1.3, q.y * 16.0, q.z * 1.3) + uNoiseOffset.zxy, 3);
+  albedo *= 0.88 + 0.26 * s;
+  // The storm: an oval of the storm colour with a light collar.
+  float collar = stormOn * smoothstep(0.75, 0.95, e) * (1.0 - smoothstep(0.95, 1.25, e));
+  albedo = mix(albedo, uColor1, collar * 0.45);
+  albedo = mix(albedo, uColor3 * (0.85 + 0.15 * sin(e * 14.0)), storm * 0.85);
+  // Darker, hazier poles.
+  albedo *= mix(1.0, 0.72, smoothstep(0.78, 1.0, abs(p.y)));
+  return albedo;
+}
+#else
 /** Cells per unit of the crater lattice. */
 const float CRATER_SCALE = 7.0;
 
@@ -817,86 +896,52 @@ float terrain(vec3 p, float footprint, out vec3 grad) {
   }
   return h;
 }
-#endif
 
-void main() {
-  vec3 p = normalize(vObject);
-  vec3 ng = normalize(vNormalW);
-  vec3 v = normalize(cameraPosition - vWorld);
-  vec3 l = normalize(uLightDir);
+// The rocky world at unit-sphere point p, before its seas: the land colour (lowland to highland,
+// toned and grained, as it would be above the sea), the polar ice cover, the terrain height h and its
+// gradient along the surface (object space). footprint is the pixel's (or texel's) size on the unit
+// sphere; it filters the gradient only.
+void rockyLand(vec3 p, float footprint, out vec3 land, out float ice, out float h, out vec3 gradient) {
   vec3 q = p * uNoiseScale + uNoiseOffset;
-  vec3 n = ng;
-  vec3 albedo;
-  float specular = 0.0;
-
-#ifdef PLANET_GAS
-  float phi = asin(clamp(p.y, -1.0, 1.0));
-  float lon = atan(p.z, p.x);
-  // Oval storm, in a local frame stretched along the longitude.
-  float dLon = mod(lon - uStormLongitude + PI, 2.0 * PI) - PI;
-  vec2 d = vec2(dLon * cos(phi), phi - uStormLatitude);
-  float stormOn = step(0.0001, uStormSize);
-  float e = length(d / vec2(max(uStormSize, 1e-4) * 1.8, max(uStormSize, 1e-4)));
-  float storm = stormOn * (1.0 - smoothstep(0.55, 1.0, e));
-  float wake = stormOn * (1.0 - smoothstep(1.0, 2.2, e));
-
-  // Turbulence: noise stretched along the longitude, so it smears into streaks like real jets.
-  float t = fbm(vec3(q.x, q.y * 2.6, q.z), uOctaves);
-  float t2 = snoise(vec3(q.x * 0.6, q.y * 7.0, q.z * 0.6) + 11.0);
-  float y = phi / (0.5 * PI) + uTurbulence * 0.09 * t + 0.015 * t2;
-  // Swirl the bands around the storm.
-  y += wake * 0.05 * sin(e * 7.0 + atan(d.y, d.x) * 2.0) * uTurbulence;
-
-  float f = uBandFrequency * PI;
-  float b1 = sin(y * f + uBandPhase);
-  float b2 = sin(y * f * 2.37 + 1.7 + 2.0 * uBandPhase);
-  float b3 = sin(y * f * 0.53 + 0.4 + 3.0 * uBandPhase);
-  float band = 0.5 + 0.5 * (0.6 * b1 + 0.25 * b2 + 0.15 * b3);
-  albedo = mix(uColor0, uColor1, smoothstep(0.2, 0.8, band));
-  albedo = mix(albedo, uColor2, smoothstep(0.5, 1.0, 0.5 + 0.5 * b2) * 0.55);
-  // Fine streaks along the bands.
-  float s = fbm(vec3(q.x * 1.3, q.y * 16.0, q.z * 1.3) + uNoiseOffset.zxy, 3);
-  albedo *= 0.88 + 0.26 * s;
-  // The storm: an oval of the storm colour with a light collar.
-  float collar = stormOn * smoothstep(0.75, 0.95, e) * (1.0 - smoothstep(0.95, 1.25, e));
-  albedo = mix(albedo, uColor1, collar * 0.45);
-  albedo = mix(albedo, uColor3 * (0.85 + 0.15 * sin(e * 14.0)), storm * 0.85);
-  // Darker, hazier poles.
-  albedo *= mix(1.0, 0.72, smoothstep(0.78, 1.0, abs(p.y)));
-#else
-  // The pixel's footprint on the unit sphere filters the bump shading's gradient.
   vec3 heightGradient;
-  float h = terrain(p, max(length(dFdx(p)), length(dFdy(p))), heightGradient);
-  float fw = max(fwidth(h), 1e-4);
-  float sea = 1.0 - smoothstep(uSeaLevel - fw, uSeaLevel + fw, h);
-  float land = clamp((h - uSeaLevel) / (0.5 - uSeaLevel), 0.0, 1.0);
+  h = terrain(p, footprint, heightGradient);
+  float height = clamp((h - uSeaLevel) / (0.5 - uSeaLevel), 0.0, 1.0);
   // Large-scale colour variation so the lowlands are not one flat tone.
   float tone = snoise(q * 0.45 + 21.0);
   vec3 low = mix(uColor1, mix(uColor1, uColor2, 0.5), 0.5 + 0.5 * tone);
-  albedo = mix(low, uColor2, smoothstep(0.06, 0.5, land));
-  albedo = mix(albedo, uColor3, smoothstep(0.45, 0.95, land));
+  land = mix(low, uColor2, smoothstep(0.06, 0.5, height));
+  land = mix(land, uColor3, smoothstep(0.45, 0.95, height));
   // Fine grain.
-  albedo *= 0.9 + 0.1 * snoise(q * 13.0);
-  float depth = clamp((uSeaLevel - h) / 0.3, 0.0, 1.0);
-  vec3 seaColor = mix(uColor0 * 1.3, uColor0 * 0.55, depth);
-  albedo = mix(albedo, seaColor, sea);
+  land *= 0.9 + 0.1 * snoise(q * 13.0);
   // Polar ice with a ragged edge.
   float lat = abs(p.y) + 0.07 * snoise(q * 2.2 + 5.0);
-  float ice = step(0.0001, uIceCap) * smoothstep(1.0 - uIceCap, 1.0 - uIceCap + 0.04, lat);
-  albedo = mix(albedo, vec3(0.85, 0.89, 0.94), ice);
+  ice = step(0.0001, uIceCap) * smoothstep(1.0 - uIceCap, 1.0 - uIceCap + 0.04, lat);
+  // The gradient along the surface: the analytic one from terrain(), with its radial part removed.
+  gradient = heightGradient - p * dot(heightGradient, p);
+}
 
-  // Bump shading from the terrain gradient along the surface (the analytic gradient from terrain(),
-  // with its radial part removed).
-  vec3 gradient = heightGradient - p * dot(heightGradient, p);
-  // Seas and ice are flat.
-  float bumpiness = 0.045 * uRelief * (1.0 - sea) * (1.0 - ice);
-  vec3 gradientW = gradient.x * vRotX + gradient.y * vRotY + gradient.z * vRotZ;
-  n = normalize(ng - bumpiness * gradientW);
-  specular = uSpecular * sea * (1.0 - ice);
+// The seas over the land at height h, antialiased over fw (the height's change across the pixel):
+// the sea mask, and the colour with the seas and then the ice over the land.
+vec3 rockySurface(vec3 land, float ice, float h, float fw, out float sea) {
+  sea = 1.0 - smoothstep(uSeaLevel - fw, uSeaLevel + fw, h);
+  float depth = clamp((uSeaLevel - h) / 0.3, 0.0, 1.0);
+  vec3 seaColor = mix(uColor0 * 1.3, uColor0 * 0.55, depth);
+  vec3 albedo = mix(land, seaColor, sea);
+  return mix(albedo, vec3(0.85, 0.89, 0.94), ice);
+}
+
+// The bump vector: how far the shading normal leans (object space) for a terrain gradient, on land.
+vec3 bumpVector(vec3 gradient) {
+  return 0.045 * uRelief * gradient;
+}
 #endif
+`;
 
-  // Lighting: Lambert with a narrow, soft terminator. The day mask uses the geometric normal, so
-  // bumps never light up the night side.
+/** The lighting shared by the procedural and baked surfaces (it depends on the view and the light). */
+const surfaceShadeChunk = /* glsl */ `
+// Lighting: Lambert with a narrow, soft terminator. The day mask uses the geometric normal ng, so
+// bumps (in the shading normal n) never light up the night side.
+vec3 shade(vec3 albedo, vec3 n, vec3 ng, vec3 v, vec3 l, float specular) {
   float ndlGeo = dot(ng, l);
   float dayMask = smoothstep(-0.06, 0.14, ndlGeo);
   float diffuse = max(dot(n, l), 0.0) * dayMask;
@@ -911,23 +956,196 @@ void main() {
   // Atmospheric haze over the disc toward the limb, on the lit side.
   float rim = 1.0 - max(dot(ng, v), 0.0);
   float haze = pow(rim, 3.0) * uAtmosphereIntensity * smoothstep(-0.15, 0.45, ndlGeo);
-  color = mix(color, uAtmosphereColor, clamp(haze * 0.75, 0.0, 1.0));
-
-  gl_FragColor = vec4(color, uOpacity);
-  #include <colorspace_fragment>
+  return mix(color, uAtmosphereColor, clamp(haze * 0.75, 0.0, 1.0));
 }
 `;
 
+const surfaceVaryingsChunk = /* glsl */ `
+varying vec3 vObject;
+varying vec3 vWorld;
+varying vec3 vNormalW;
+varying vec3 vRotX;
+varying vec3 vRotY;
+varying vec3 vRotZ;
+varying vec3 vCenter;
+varying float vRadius;
+
+// The atmosphere's thin bright rim over the disc, in the output colour space, to add to the
+// surface's encoded colour. The atmosphere draws only past the limb (atmosphereGeometry), so the
+// surface adds what the shell's additive blending used to add over it: the same glow along the view ray as
+// atmosphereGlow() in the halo shader computes inside the limb, encoded on its own as the shell
+// encoded it, and divided by the surface's opacity, which the surface's own blending multiplies
+// it by again. 0 for an airless planet (and for the asteroid rocks and comet nuclei that share the
+// rocky program).
+vec3 discGlow() {
+  if (uAtmosphereIntensity <= 0.0) return vec3(0.0);
+  vec3 rd = normalize(vWorld - cameraPosition);
+  vec3 oc = vCenter - cameraPosition;
+  vec3 closest = cameraPosition + rd * dot(oc, rd);
+  float x = min(1.0, length(closest - vCenter) / vRadius);
+  vec3 toLimb = normalize(closest - vCenter + 1e-5);
+  float day = smoothstep(-0.3, 0.55, dot(toLimb, normalize(uLightDir)));
+  vec3 glow = uAtmosphereColor * pow(x, 10.0) * day * uAtmosphereIntensity * uOpacity;
+  return linearToOutputTexel(vec4(glow, 1.0)).rgb / max(uOpacity, 1e-3);
+}
+`;
+
+/** The procedural surface: the whole look per fragment (see above). */
+const surfaceFragmentShader = /* glsl */ `
+${surfaceUniformsChunk}
+${surfaceVaryingsChunk}
+${surfaceLookChunk}
+${surfaceShadeChunk}
+
+void main() {
+  vec3 p = normalize(vObject);
+  vec3 ng = normalize(vNormalW);
+  vec3 v = normalize(cameraPosition - vWorld);
+  vec3 l = normalize(uLightDir);
+  vec3 n = ng;
+  vec3 albedo;
+  float specular = 0.0;
+#ifdef PLANET_GAS
+  albedo = gasAlbedo(p);
+#else
+  // The pixel's footprint on the unit sphere filters the bump shading's gradient.
+  vec3 land;
+  float ice;
+  float h;
+  vec3 gradient;
+  rockyLand(p, max(length(dFdx(p)), length(dFdy(p))), land, ice, h, gradient);
+  float sea;
+  albedo = rockySurface(land, ice, h, max(fwidth(h), 1e-4), sea);
+  // Seas and ice are flat.
+  vec3 bump = bumpVector(gradient) * ((1.0 - sea) * (1.0 - ice));
+  n = normalize(ng - (bump.x * vRotX + bump.y * vRotY + bump.z * vRotZ));
+  specular = uSpecular * sea * (1.0 - ice);
+#endif
+  gl_FragColor = vec4(shade(albedo, n, ng, v, l, specular), uOpacity);
+  #include <colorspace_fragment>
+  gl_FragColor.rgb += discGlow();
+}
+`;
+
+/**
+ * The baked surface: samples the planet's cube maps (PlanetBake.ts) at the object-space direction,
+ * so they turn with the planet, and does the seas and the lighting. `uAlbedoMap` holds the gas
+ * giant's colour, or the rocky world's land colour (rgb) and ice cover (a); `uReliefMap` (rocky only)
+ * the bump vector (rgb, object space) and the terrain height (a). The albedo map is sRGB-encoded,
+ * so it is filtered, and read, in linear colour.
+ */
+const bakedSurfaceFragmentShader = /* glsl */ `
+${surfaceUniformsChunk}
+${surfaceVaryingsChunk}
+uniform samplerCube uAlbedoMap;
+#ifndef PLANET_GAS
+uniform samplerCube uReliefMap;
+#endif
+${surfaceShadeChunk}
+
+void main() {
+  vec3 p = normalize(vObject);
+  vec3 ng = normalize(vNormalW);
+  vec3 v = normalize(cameraPosition - vWorld);
+  vec3 l = normalize(uLightDir);
+  vec3 n = ng;
+  float specular = 0.0;
+  vec4 look = textureCube(uAlbedoMap, p);
+  vec3 albedo = look.rgb;
+#ifndef PLANET_GAS
+  vec4 relief = textureCube(uReliefMap, p);
+  float h = relief.a;
+  float ice = look.a;
+  // The seas from the height, antialiased over this pixel, as the procedural surface does.
+  float fw = max(fwidth(h), 1e-4);
+  float sea = 1.0 - smoothstep(uSeaLevel - fw, uSeaLevel + fw, h);
+  float depth = clamp((uSeaLevel - h) / 0.3, 0.0, 1.0);
+  albedo = mix(albedo, mix(uColor0 * 1.3, uColor0 * 0.55, depth), sea);
+  albedo = mix(albedo, vec3(0.85, 0.89, 0.94), ice);
+  // Seas and ice are flat.
+  vec3 bump = relief.rgb * ((1.0 - sea) * (1.0 - ice));
+  n = normalize(ng - (bump.x * vRotX + bump.y * vRotY + bump.z * vRotZ));
+  specular = uSpecular * sea * (1.0 - ice);
+#endif
+  gl_FragColor = vec4(shade(albedo, n, ng, v, l, specular), uOpacity);
+  #include <colorspace_fragment>
+  gl_FragColor.rgb += discGlow();
+}
+`;
+
+/** The bake's vertex shader: a quad covering the whole cube face being drawn. */
+const bakeVertexShader = /* glsl */ `
+void main() {
+  gl_Position = vec4(position.xy, 0.0, 1.0);
+}
+`;
+
+/**
+ * The bake: one texel of one cube face per fragment (PlanetBake.ts). `uFace` is the face (+X, −X,
+ * +Y, −Y, +Z, −Z, Three.js' and WebGL's order) and `uFaceSize` its size in texels; a texel's
+ * direction follows WebGL's cube map layout. `uPass` picks what a rocky world's bake writes: 0 the
+ * land colour and ice (the albedo map), 1 the bump vector and height (the relief map). Written as is:
+ * the albedo map's sRGB encoding is done by the GPU on write.
+ */
+const bakeFragmentShader = /* glsl */ `
+${surfaceUniformsChunk}
+uniform int uFace;
+uniform float uFaceSize;
+uniform int uPass;
+${surfaceLookChunk}
+
+// The unit-sphere direction through this fragment's texel of face uFace.
+vec3 texelDirection() {
+  vec2 c = gl_FragCoord.xy * (2.0 / uFaceSize) - 1.0;
+  vec3 d;
+  if (uFace == 0) d = vec3(1.0, -c.y, -c.x);
+  else if (uFace == 1) d = vec3(-1.0, -c.y, c.x);
+  else if (uFace == 2) d = vec3(c.x, 1.0, c.y);
+  else if (uFace == 3) d = vec3(c.x, -1.0, -c.y);
+  else if (uFace == 4) d = vec3(c.x, -c.y, 1.0);
+  else d = vec3(-c.x, -c.y, -1.0);
+  return normalize(d);
+}
+
+void main() {
+  vec3 p = texelDirection();
+#ifdef PLANET_GAS
+  gl_FragColor = vec4(gasAlbedo(p), 1.0);
+#else
+  // A texel's footprint on the unit sphere filters the bump vector, as a pixel's does on screen;
+  // mipmaps filter it further when the planet is small.
+  vec3 land;
+  float ice;
+  float h;
+  vec3 gradient;
+  rockyLand(p, max(length(dFdx(p)), length(dFdy(p))), land, ice, h, gradient);
+  gl_FragColor = uPass == 0 ? vec4(land, ice) : vec4(bumpVector(gradient), h);
+#endif
+}
+`;
+
+/**
+ * How far inside the limb the atmosphere's annulus starts, in planet radii (of the ray's closest
+ * approach to the centre): a little inside, so it also covers the fringe where a pixel's ray misses
+ * the tessellated sphere but not the true one, and the glow there is drawn by one of the two.
+ */
+const ATMOSPHERE_INNER_RADIUS = 0.98;
+
+/** Segments around the atmosphere's annulus. Its outer edge's chords lie outside the shell's outline. */
+const ATMOSPHERE_SEGMENTS = 128;
+
 /*
- * The halo program draws the atmosphere shell, the ring and a comet's coma and tails (`uRing` picks
+ * The halo program draws the atmosphere, the ring and a comet's coma and tails (`uRing` picks
  * which: 0, 1 and 2), so neither a ringed planet nor a comet needs a shader program of its own: the
  * program count stays the same from start-up on, and ProgramWarmup's atmosphere holder already keeps
- * it compiled (see `planetProgramMaterials`). Three.js keys a program on its sources, defines and a
- * few material flags (side, among them), not on blending or depth writes, so the three materials
- * share it. Uniforms keep their values per program, so every halo material sets `uRing` itself, and
- * the comet's uniforms are read only by the comet branch.
+ * it compiled (see `planetProgramMaterials`). Three.js keys a program on its sources, defines and a few
+ * material flags (side, among them), not on blending or depth writes, so the three materials share
+ * one program. Uniforms keep their values per program, so every halo material sets `uRing` itself
+ * (the vertex shader reads it too: the atmosphere's annulus is turned to face the camera), and the
+ * comet's uniforms are read only by the comet branch.
  */
 const haloVertexShader = /* glsl */ `
+const float ATMOSPHERE_INNER = ${ATMOSPHERE_INNER_RADIUS.toFixed(3)};
 varying vec3 vWorld;
 varying vec3 vCenter;
 varying float vShellRadius;
@@ -937,13 +1155,31 @@ varying vec3 vAxis;
 // (x, from 0 at the head to 1 at the end); unused by the atmosphere and the ring.
 varying vec2 vUv;
 
+uniform float uRing;
+uniform float uThickness;
+
 void main() {
   vec4 world = modelMatrix * vec4(position, 1.0);
-  vWorld = world.xyz;
   vCenter = modelMatrix[3].xyz;
   vShellRadius = length(modelMatrix[0].xyz);
   vAxis = normalize(modelMatrix[1].xyz);
   vUv = uv;
+  if (uRing < 0.5) {
+    // The atmosphere (issue #65): a flat annulus facing the camera through the planet's centre
+    // (atmosphereGeometry), covering on screen just the rays that pass between just inside the limb
+    // (uv.y = 0) and the shell's edge (uv.y = 1); the glow depends on the view ray alone. A ray
+    // passing r from the centre meets the plane r d / sqrt(d² − r²) from it, for the centre d away.
+    vec3 toCenter = vCenter - cameraPosition;
+    float d = length(toCenter);
+    vec3 n = toCenter / d;
+    vec3 helper = abs(n.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 e1 = normalize(cross(helper, n));
+    vec3 e2 = cross(n, e1);
+    float r = uv.y < 0.5 ? ATMOSPHERE_INNER * vShellRadius / (1.0 + uThickness) : vShellRadius;
+    float rho = r * d / sqrt(max(d * d - r * r, 1e-6 * d * d));
+    world = vec4(vCenter + (e1 * position.x + e2 * position.y) * rho, 1.0);
+  }
+  vWorld = world.xyz;
   gl_Position = projectionMatrix * viewMatrix * world;
 }
 `;
@@ -1135,6 +1371,7 @@ void main() {
 // ---------------------------------------------------------------------------------------------
 
 let sharedGeometry: SphereGeometry | null = null;
+let sharedAtmosphere: BufferGeometry | null = null;
 /** Number of live (not yet disposed) planets holding `sharedGeometry`. */
 let sharedGeometryRefs = 0;
 
@@ -1145,6 +1382,50 @@ let sharedGeometryRefs = 0;
 export function planetGeometry(): SphereGeometry {
   sharedGeometry ??= new SphereGeometry(1, PLANET_SPHERE_SEGMENTS[0], PLANET_SPHERE_SEGMENTS[1]);
   return sharedGeometry;
+}
+
+/**
+ * The annulus every planet's atmosphere draws with (issue #65), shared and freed with the planet
+ * sphere: a ring of ATMOSPHERE_SEGMENTS quads whose inner vertices (uv.y = 0) the halo vertex
+ * shader puts where rays ATMOSPHERE_INNER_RADIUS planet radii from the centre cross the plane
+ * through the centre facing the camera, and whose outer vertices (uv.y = 1) where rays graze the
+ * shell, scaled out so the chords between them stay outside it. `position.xy` is the unit direction
+ * (the outer one scaled); a normal along +Z and uvs, like the sphere, so the halo program is the
+ * same. Its bounding sphere is the shell's (radius 1 at the mesh's scale), for frustum culling.
+ * Created on first use; takes no reference (the planet's sphere reference holds both).
+ */
+export function atmosphereGeometry(): BufferGeometry {
+  if (sharedAtmosphere === null) {
+    const n = ATMOSPHERE_SEGMENTS;
+    const outer = 1 / Math.cos(Math.PI / n);
+    const positions: number[] = [];
+    const uvs: number[] = [];
+    const normals: number[] = [];
+    const index: number[] = [];
+    for (let i = 0; i <= n; i++) {
+      const a = (2 * Math.PI * i) / n;
+      const c = Math.cos(a);
+      const sn = Math.sin(a);
+      positions.push(c, sn, 0, c * outer, sn * outer, 0);
+      uvs.push(i / n, 0, i / n, 1);
+      normals.push(0, 0, 1, 0, 0, 1);
+      if (i < n) {
+        const k = 2 * i;
+        // Counter-clockwise seen from +Z, the side that faces the camera.
+        index.push(k, k + 2, k + 1, k + 1, k + 2, k + 3);
+      }
+    }
+    const geometry = new BufferGeometry();
+    geometry.setAttribute('position', new BufferAttribute(new Float32Array(positions), 3));
+    geometry.setAttribute('normal', new BufferAttribute(new Float32Array(normals), 3));
+    geometry.setAttribute('uv', new BufferAttribute(new Float32Array(uvs), 2));
+    geometry.setIndex(index);
+    geometry.computeBoundingSphere();
+    geometry.boundingSphere!.radius = 1;
+    geometry.boundingSphere!.center.set(0, 0, 0);
+    sharedAtmosphere = geometry;
+  }
+  return sharedAtmosphere;
 }
 
 /** Number of live planets currently holding the shared geometry. */
@@ -1168,6 +1449,8 @@ function releasePlanetGeometry(): void {
 function disposeUnreferencedGeometry(): void {
   sharedGeometry?.dispose();
   sharedGeometry = null;
+  sharedAtmosphere?.dispose();
+  sharedAtmosphere = null;
 }
 
 /**
@@ -1227,13 +1510,16 @@ export const ATMOSPHERE_RENDER_ORDER = STARFIELD_RENDER_ORDER + 1;
 
 type Uniforms = ShaderMaterial['uniforms'];
 
-/** The surface material of a planet of `type`. Its shader program depends only on the type. */
-function createSurfaceMaterial(type: PlanetType, uniforms: Uniforms): ShaderMaterial {
+/**
+ * The surface material of a planet of `type`: procedural, or with `baked` sampling the planet's
+ * cube maps (`bakedSurfaceFragmentShader`). Its shader program depends only on the type and which.
+ */
+function createSurfaceMaterial(type: PlanetType, uniforms: Uniforms, baked = false): ShaderMaterial {
   return new ShaderMaterial({
     uniforms,
-    defines: type === 'gas' ? { PLANET_GAS: 1 } : {},
+    defines: { ...(type === 'gas' ? { PLANET_GAS: 1 } : {}), ...(baked ? { PLANET_BAKED: 1 } : {}) },
     vertexShader: surfaceVertexShader,
-    fragmentShader: surfaceFragmentShader,
+    fragmentShader: baked ? bakedSurfaceFragmentShader : surfaceFragmentShader,
     side: FrontSide,
     // Transparent so the fade blends it over the background. Drawn after the far stars and before the
     // near starfield, and writes depth, so the near stars behind it fail their depth test (see
@@ -1245,10 +1531,35 @@ function createSurfaceMaterial(type: PlanetType, uniforms: Uniforms): ShaderMate
   });
 }
 
-/** The atmosphere shell's material: the halo program, additive. One shader program for every planet. */
+/**
+ * The bake material of a planet of `type` (see `bakeFragmentShader`): drawn into a cube map face, so
+ * no blending and no depth. Its shader program depends only on the type; `uFace`, `uFaceSize` and
+ * `uPass` are set per slice (PlanetBake.ts).
+ */
+function createBakeMaterial(type: PlanetType, uniforms: Uniforms): ShaderMaterial {
+  return new ShaderMaterial({
+    uniforms: { ...uniforms, uFace: { value: 0 }, uFaceSize: { value: PLANET_BAKE_FACE_SIZE }, uPass: { value: 0 } },
+    defines: type === 'gas' ? { PLANET_GAS: 1 } : {},
+    vertexShader: bakeVertexShader,
+    fragmentShader: bakeFragmentShader,
+    side: FrontSide,
+    transparent: false,
+    blending: NoBlending,
+    depthTest: false,
+    depthWrite: false,
+  });
+}
+
+/**
+ * The atmosphere's material: the halo program, additive. One shader program for every planet. It
+ * draws on `atmosphereGeometry`, an annulus the vertex shader turns to face the camera, so only the
+ * pixels past the limb are shaded; over the disc the surface adds the glow itself (`discGlow`).
+ * Drawn as a whole shell, as before issue #65, it was shaded over the disc as well, which doubled
+ * the planet's shaded pixels.
+ */
 function createAtmosphereMaterial(uniforms: Uniforms): ShaderMaterial {
   return new ShaderMaterial({
-    uniforms: { ...uniforms, uRing: { value: 0 } },
+    uniforms: { uThickness: { value: 0 }, ...uniforms, uRing: { value: 0 } },
     vertexShader: haloVertexShader,
     fragmentShader: haloFragmentShader,
     side: FrontSide,
@@ -1299,13 +1610,31 @@ export function rockySurfaceMaterial(uniforms: Uniforms): ShaderMaterial {
 }
 
 /**
- * One material per planet shader program (the rocky surface, the gas surface and the halo, which
- * draws both the atmosphere and the ring), built exactly as planets build theirs but with no
- * uniforms, so each compiles to the program the planets use. For keeping those programs compiled
- * between encounters (see ProgramWarmup.ts); they are never drawn. The caller owns and disposes them.
+ * One material per planet shader program drawn on screen (the procedural rocky and gas surfaces, the
+ * baked rocky and gas surfaces, and the halo, which draws the atmosphere, the ring and a comet's
+ * glow), built
+ * exactly as planets build theirs but with no uniforms, so each compiles to the program the planets
+ * use. For keeping those programs compiled between encounters (see ProgramWarmup.ts); they are never
+ * drawn. The caller owns and disposes them.
  */
 export function planetProgramMaterials(): ShaderMaterial[] {
-  return [createSurfaceMaterial('rocky', {}), createSurfaceMaterial('gas', {}), createAtmosphereMaterial({})];
+  return [
+    createSurfaceMaterial('rocky', {}),
+    createSurfaceMaterial('gas', {}),
+    createAtmosphereMaterial({}),
+    createSurfaceMaterial('rocky', {}, true),
+    createSurfaceMaterial('gas', {}, true),
+  ];
+}
+
+/**
+ * One material per bake program (the rocky and gas bakes), as `planetProgramMaterials` does for the
+ * programs drawn on screen. They draw into a render target, and Three.js builds a program for a
+ * render target apart from one for the screen (it writes linear colour there), so they must be
+ * compiled with one bound (ProgramWarmup's `target`).
+ */
+export function planetBakeProgramMaterials(): ShaderMaterial[] {
+  return [createBakeMaterial('rocky', {}), createBakeMaterial('gas', {})];
 }
 
 /**
@@ -1362,6 +1691,86 @@ export function ringAxis(ring: Readonly<Pick<PlanetRing, 'opening' | 'roll'>>, f
   return out;
 }
 
+/**
+ * A planet's surface bake (issue #65; drawn by PlanetBaker, PlanetBake.ts): the cube maps its
+ * surface is baked into, the material that bakes them, and how far it has got. Pure bookkeeping, so
+ * it is made (and freed) without a renderer.
+ *
+ * - `targets`: the albedo map (sRGB, 8 bits a channel: a gas giant's colour, or a rocky world's land
+ *   colour and ice cover) and, for a rocky world, the relief map (half float: the bump vector and the
+ *   terrain height). Each is a cube map of PLANET_BAKE_FACE_SIZE texels a side with a full mip chain,
+ *   filtered trilinearly and anisotropically (PLANET_BAKE_ANISOTROPY). Memory: 4 bytes a texel for
+ *   the albedo map and 8 for the relief map, × 6 faces × 4/3 for the mips: at 1024, 33.6 MB for a gas
+ *   giant and 100.7 MB for a rocky world, while the planet lives; `dispose()` frees them.
+ * - The bake goes target by target, face by face (+X, −X, +Y, −Y, +Z, −Z), row by row from the bottom;
+ *   `rowsDone` counts the rows drawn, over all of them. A target's mips are made when its last rows
+ *   are drawn.
+ */
+export class SurfaceBake {
+  /** Texels a side of each cube face. */
+  readonly size: number;
+  /** The albedo map, and for a rocky world the relief map, in bake order. */
+  readonly targets: readonly WebGLCubeRenderTarget[];
+  /** The material that draws the bake (its `uFace` and `uPass` are set per slice). */
+  readonly material: ShaderMaterial;
+  /** Rows drawn so far, over every target and face. */
+  rowsDone = 0;
+  /** Rows to draw in all: targets × 6 faces × `size`. */
+  readonly rowsTotal: number;
+
+  /** `size`: texels a side of each face (PLANET_BAKE_FACE_SIZE; another only for a stand-in, see Engine.ts). */
+  constructor(type: PlanetType, uniforms: Uniforms, size: number = PLANET_BAKE_FACE_SIZE) {
+    this.size = size;
+    const options = {
+      generateMipmaps: false,
+      minFilter: LinearMipmapLinearFilter,
+      magFilter: LinearFilter,
+      depthBuffer: false,
+      stencilBuffer: false,
+    } as const;
+    const albedo = new WebGLCubeRenderTarget(this.size, { ...options, type: UnsignedByteType, colorSpace: SRGBColorSpace });
+    const targets = [albedo];
+    if (type === 'rocky') targets.push(new WebGLCubeRenderTarget(this.size, { ...options, type: HalfFloatType, colorSpace: LinearSRGBColorSpace }));
+    for (const target of targets) target.texture.anisotropy = PLANET_BAKE_ANISOTROPY;
+    this.targets = targets;
+    this.rowsTotal = targets.length * 6 * this.size;
+    this.material = createBakeMaterial(type, uniforms);
+    this.material.uniforms.uFaceSize!.value = size;
+  }
+
+  /** Whether every row is drawn. */
+  get done(): boolean {
+    return this.rowsDone >= this.rowsTotal;
+  }
+
+  /** Starts over (the cube maps' contents were lost with the WebGL context, say). */
+  restart(): void {
+    this.rowsDone = 0;
+    for (const target of this.targets) target.texture.generateMipmaps = false;
+  }
+
+  /** Bytes the cube maps take on the GPU, mips included. */
+  get bytes(): number {
+    const texels = 6 * this.size * this.size * (4 / 3);
+    return texels * 4 + (this.targets.length > 1 ? texels * 8 : 0);
+  }
+
+  dispose(): void {
+    for (const target of this.targets) target.dispose();
+    this.material.dispose();
+  }
+}
+
+/** How a planet is built beyond its params (see `Planet`'s constructor). */
+export interface PlanetOptions {
+  /**
+   * Bake the surface into cube maps (`SurfaceBake`) and draw it from them once baked; until then it
+   * is drawn procedurally. Default: false (procedural throughout). The engine bakes where the GPU
+   * can render to half-float textures.
+   */
+  bake?: boolean;
+}
+
 export class Planet {
   readonly params: Readonly<PlanetParams>;
   /**
@@ -1372,10 +1781,16 @@ export class Planet {
   readonly uniforms: PlanetUniforms;
   private readonly tilt = new Group();
   private readonly surface: Mesh<SphereGeometry, ShaderMaterial>;
-  /** The atmosphere shell, or `null` for an airless planet; it draws with the shared sphere. */
-  readonly atmosphere: Mesh<SphereGeometry, ShaderMaterial> | null;
+  /** The atmosphere, or `null` for an airless planet; it draws with the shared annulus (`atmosphereGeometry`). */
+  readonly atmosphere: Mesh<BufferGeometry, ShaderMaterial> | null;
   /** The ring, or `null`; it owns its geometry. */
   readonly ring: Mesh<RingGeometry, ShaderMaterial> | null;
+  /** The surface bake, or `null` for a planet drawn procedurally throughout. */
+  readonly bake: SurfaceBake | null;
+  /** The procedural surface material, drawn until the bake is done (and always without one). */
+  private readonly proceduralMaterial: ShaderMaterial;
+  /** The baked surface material, sampling the bake's cube maps, or `null` without a bake. */
+  private readonly bakedMaterial: ShaderMaterial | null;
   private disposed = false;
 
   /**
@@ -1386,6 +1801,7 @@ export class Planet {
     params: Readonly<PlanetParams>,
     lightDirection: Readonly<Vec3> = PLANET_LIGHT_DIRECTION,
     frame: Readonly<PlanetFrame> = DEFAULT_PLANET_FRAME,
+    options: Readonly<PlanetOptions> = {},
   ) {
     this.params = params;
     const geometry = acquirePlanetGeometry();
@@ -1425,7 +1841,7 @@ export class Planet {
             uCraters: { value: params.craters },
           };
 
-    const surfaceMaterial = createSurfaceMaterial(params.type, {
+    const surfaceUniforms = {
       uColor0: u.uColor0,
       uColor1: u.uColor1,
       uColor2: u.uColor2,
@@ -1438,8 +1854,25 @@ export class Planet {
       uAtmosphereColor: u.uAtmosphereColor,
       uAtmosphereIntensity: u.uAtmosphereIntensity,
       ...typeUniforms,
-    });
-    this.surface = new Mesh(geometry, surfaceMaterial);
+    };
+    this.proceduralMaterial = createSurfaceMaterial(params.type, surfaceUniforms);
+    if (options.bake === true) {
+      this.bake = new SurfaceBake(params.type, surfaceUniforms);
+      const [albedo, relief] = this.bake.targets;
+      this.bakedMaterial = createSurfaceMaterial(
+        params.type,
+        {
+          ...surfaceUniforms,
+          uAlbedoMap: { value: albedo!.texture },
+          ...(relief === undefined ? {} : { uReliefMap: { value: relief.texture } }),
+        },
+        true,
+      );
+    } else {
+      this.bake = null;
+      this.bakedMaterial = null;
+    }
+    this.surface = new Mesh(geometry, this.proceduralMaterial);
     this.surface.renderOrder = SURFACE_RENDER_ORDER;
     const ring = params.ring;
     if (ring === null) {
@@ -1484,7 +1917,7 @@ export class Planet {
         uLightDir: u.uLightDir,
         uOpacity: u.uOpacity,
       });
-      this.atmosphere = new Mesh(geometry, atmosphereMaterial);
+      this.atmosphere = new Mesh(atmosphereGeometry(), atmosphereMaterial);
       this.atmosphere.scale.setScalar(1 + params.atmosphereThickness);
       this.atmosphere.renderOrder = ring === null ? ATMOSPHERE_RENDER_ORDER : RINGED_ATMOSPHERE_RENDER_ORDER;
       this.object.add(this.atmosphere);
@@ -1513,20 +1946,61 @@ export class Planet {
     this.uniforms.uLightDir.value.set(x, y, z).normalize();
   }
 
+  /** Whether the surface is drawn from its bake (false until the bake is done, and without one). */
+  isSurfaceBaked(): boolean {
+    return this.surface.material === this.bakedMaterial;
+  }
+
+  /** The surface's current material: the procedural one, or the baked one once the bake is done (read-only view). */
+  get surfaceMaterial(): ShaderMaterial {
+    return this.surface.material;
+  }
+
+  /**
+   * Switches the surface to its baked material; PlanetBaker calls it once the bake is done. No-op
+   * without a bake, or before it is done.
+   */
+  useBakedSurface(): void {
+    if (this.disposed || this.bakedMaterial === null || this.bake === null || !this.bake.done) return;
+    this.surface.material = this.bakedMaterial;
+  }
+
+  /**
+   * Back to the procedural surface, and the bake starts over (the cube maps' contents are lost with
+   * the WebGL context, so after a context restore). No-op without a bake.
+   */
+  restartBake(): void {
+    if (this.bake === null || this.disposed) return;
+    this.bake.restart();
+    this.surface.material = this.proceduralMaterial;
+  }
+
+  /** Every material this planet owns, drawn or not (the surface's two, the bake's, the atmosphere's and the ring's). */
+  materials(): ShaderMaterial[] {
+    const out = [this.proceduralMaterial];
+    if (this.bakedMaterial !== null) out.push(this.bakedMaterial);
+    if (this.bake !== null) out.push(this.bake.material);
+    if (this.atmosphere !== null) out.push(this.atmosphere.material);
+    if (this.ring !== null) out.push(this.ring.material);
+    return out;
+  }
+
   /** Turns the planet to its rotation at `time` seconds. Allocates nothing. */
   update(time: number): void {
     this.surface.rotation.y = this.params.rotationPhase + time * this.params.rotationSpeed;
   }
 
   /**
-   * Frees this planet's materials and drops its reference to the shared geometry, which is freed
-   * once no live planet holds it. Disposing twice is harmless.
+   * Frees this planet's materials and its bake's cube maps, and drops its reference to the shared
+   * geometry, which is freed once no live planet holds it. Disposing twice is harmless.
    */
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
     this.object.removeFromParent();
-    this.surface.material.dispose();
+    this.proceduralMaterial.dispose();
+    this.bakedMaterial?.dispose();
+    this.bake?.dispose();
     this.atmosphere?.material.dispose();
     this.ring?.material.dispose();
     this.ring?.geometry.dispose();

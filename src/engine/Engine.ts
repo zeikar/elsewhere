@@ -16,12 +16,24 @@
  * belong to the far layer and turn with the camera only, like the far stars.
  * Pausing stops the simulation, so the encounter freezes with it.
  *
- * Instrumentation (docs/PLAN.md section 6, Performance): every frame records its interval since the
+ * Planet surface bake (issue #65, PlanetBake.ts): where the GPU can render to half-float textures,
+ * each planet's surface is baked into cube maps a slice a frame, just before the frame's render,
+ * once the bake programs (compiled at start-up with a render target bound) and the planet's own
+ * compile are ready; until the bake is done the planet is drawn procedurally. After a WebGL context
+ * restore the planet bakes again.
+ *
+ * Frame-rate cap (docs/PLAN.md section 6, Performance): the loop draws at most about FRAME_RATE_CAP
+ * frames a second (FrameCap.ts), skipping display frames on faster displays; a skipped frame runs
+ * nothing, and the next drawn one steps the simulation by the real time since the last drawn one.
+ *
+ * Instrumentation (docs/PLAN.md section 6, Performance): every drawn frame records its interval since the
  * previous frame (from the frame clock, so a pause or a hidden period is never counted) and its work
  * time (simulation, encounter sync and render submission, on the main thread) into two fixed-size
- * `FrameStats` windows, read through `getFrameIntervals()` and `getFrameWork()`.
+ * `FrameStats` windows, read through `getFrameIntervals()` and `getFrameWork()`. On request
+ * (`EngineOptions.gpuTiming`) it also times each frame's GPU work where the browser can
+ * (`EXT_disjoint_timer_query_webgl2`, GpuTimer.ts), into a third window, `getGpuFrameTimes()`.
  */
-import { PerspectiveCamera, SRGBColorSpace, Scene, Vector3, WebGLRenderer, type WebGLInfo } from 'three';
+import { PerspectiveCamera, SRGBColorSpace, Scene, Vector3, WebGLRenderTarget, WebGLRenderer, type WebGLInfo } from 'three';
 import {
   CAMERA_FAR,
   CAMERA_FOV_DEG,
@@ -29,6 +41,8 @@ import {
   CLEAR_COLOR,
   DPR_CAP,
   ENCOUNTER_BASE_SEED,
+  FRAME_CAP_TOLERANCE_MS,
+  FRAME_RATE_CAP,
   SHIP_DEFAULT_SPEED_LEVEL,
   SHIP_SPEED_LEVELS,
   VIEW_WIDEST_ASPECT,
@@ -48,12 +62,15 @@ import { asteroidParams, prepareAsteroids, type Asteroid } from './Asteroid';
 import { cometParams, prepareComets, type Comet } from './Comet';
 import { EncounterView } from './EncounterView';
 import { FarStarfield } from './FarStarfield';
+import { FrameCap } from './FrameCap';
 import { FrameClock } from './FrameClock';
 import { FrameStats } from './FrameStats';
+import { GpuTimer } from './GpuTimer';
 import { Galaxies, generateGalaxies, type Galaxy } from './Galaxies';
 import { nebulaParams, nebulaProgramMaterials, type Nebula } from './Nebula';
 import { cameraFovDeg, cameraFrustum, computeRenderSize, type ViewFrustum } from './renderSize';
-import { planetParams, planetProgramMaterials, type Planet } from './Planet';
+import { SurfaceBake, planetBakeProgramMaterials, planetParams, planetProgramMaterials, type Planet } from './Planet';
+import { PlanetBaker } from './PlanetBake';
 import { ProgramWarmup } from './ProgramWarmup';
 import { DEFAULT_SHIP_PARAMS, type ShipState } from './Ship';
 import { DEFAULT_STARFIELD_OPTIONS, Starfield } from './Starfield';
@@ -83,6 +100,14 @@ export interface EngineOptions {
   starLayers?: StarLayers;
   /** Whether the heading drifts (the slow yaw and pitch). Default: true. Off, the heading stays at -Z. */
   headingDrift?: boolean;
+  /**
+   * Times each frame's GPU work with `EXT_disjoint_timer_query_webgl2` where the browser has it
+   * (GpuTimer.ts), read through `getGpuFrameTimes()`. Default: false (the e2e build turns it on with
+   * `?gpuTiming=1`).
+   */
+  gpuTiming?: boolean;
+  /** Frame-rate cap in frames per second (0: none). Default: FRAME_RATE_CAP. */
+  frameRateCap?: number;
 }
 
 /** Star layers to draw: the far stars, the near starfield, or both. */
@@ -97,10 +122,16 @@ export class Engine {
   private readonly scene = new Scene();
   private readonly camera: PerspectiveCamera;
   private readonly clock = new FrameClock();
+  /** Decides which display frames are drawn (FRAME_RATE_CAP). */
+  private readonly frameCap: FrameCap;
   /** Recent frame intervals, in milliseconds. */
   private readonly frameIntervals = new FrameStats();
   /** Recent frame work times (simulation step, encounter sync and render call), in milliseconds. */
   private readonly frameWork = new FrameStats();
+  /** Recent frames' GPU times, in milliseconds, when GPU timing is on and supported. */
+  private readonly gpuFrames = new FrameStats();
+  /** Times each frame's GPU work, or `null` with GPU timing off. */
+  private gpuTimer: GpuTimer | null = null;
   /** Ship, autopilot and their params, advanced by `stepTravel`. */
   private readonly travel: Travel;
   private readonly starfield: Starfield;
@@ -110,6 +141,12 @@ export class Engine {
   private readonly encounterView: EncounterView;
   /** Keeps every encounter shader program compiled for the whole run (see ProgramWarmup.ts). */
   private readonly programWarmup: ProgramWarmup;
+  /** Keeps the planet bake programs compiled (built for a render target), or `null` without baking. */
+  private readonly bakeWarmup: ProgramWarmup | null;
+  /** Draws each planet's surface bake a slice a frame (PlanetBake.ts), or `null` where the GPU cannot. */
+  private readonly planetBaker: PlanetBaker | null;
+  /** The planet the latest frame drew, if any: its bake starts from the frame after the first that drew it. */
+  private drawnPlanet: Planet | null = null;
   private readonly pausedListeners = new Set<PausedChangeListener>();
   /** Scratch look-at target, reused every frame. */
   private readonly lookTarget = new Vector3();
@@ -127,6 +164,7 @@ export class Engine {
 
   constructor(canvas: HTMLCanvasElement, options: EngineOptions = {}) {
     this.canvas = canvas;
+    this.frameCap = new FrameCap(options.frameRateCap ?? FRAME_RATE_CAP, FRAME_CAP_TOLERANCE_MS);
     this.starfield = new Starfield({
       ...DEFAULT_STARFIELD_OPTIONS,
       streakTime: options.streakTime ?? DEFAULT_STARFIELD_OPTIONS.streakTime,
@@ -142,33 +180,21 @@ export class Engine {
     this.renderer = new WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
     this.renderer.outputColorSpace = SRGBColorSpace;
     this.renderer.setClearColor(CLEAR_COLOR, 1);
+    if (options.gpuTiming === true) this.gpuTimer = new GpuTimer(this.renderer.getContext() as WebGL2RenderingContext);
     this.camera = new PerspectiveCamera(CAMERA_FOV_DEG, 1, CAMERA_NEAR, CAMERA_FAR);
     this.camera.position.set(0, 0, 0);
     this.speedLevel = clampSpeedLevel(options.speedLevel ?? SHIP_DEFAULT_SPEED_LEVEL, SHIP_DEFAULT_SPEED_LEVEL);
-    const interval = options.encounterInterval;
-    const kind = options.encounterKind;
-    const autopilotParams: AutopilotParams = {
-      ...DEFAULT_AUTOPILOT_PARAMS,
-      baseSeed: tripSeed,
-      interval: interval !== undefined && interval >= 0 ? interval : DEFAULT_AUTOPILOT_PARAMS.interval,
-      arrivalSpeed:
-        options.arrivalSpeed !== undefined && options.arrivalSpeed > 0 ? options.arrivalSpeed : DEFAULT_AUTOPILOT_PARAMS.arrivalSpeed,
-      planetFor: planetParams,
-      nebulaFor: nebulaParams,
-      asteroidFor: asteroidParams,
-      cometFor: cometParams,
-      nebulaShare: kind === undefined ? DEFAULT_AUTOPILOT_PARAMS.nebulaShare : kind === 'nebula' ? 1 : 0,
-      asteroidShare: kind === undefined ? DEFAULT_AUTOPILOT_PARAMS.asteroidShare : kind === 'asteroid' ? 1 : 0,
-      cometShare: kind === undefined ? DEFAULT_AUTOPILOT_PARAMS.cometShare : kind === 'comet' ? 1 : 0,
-    };
-    setCruiseSpeed(autopilotParams, SHIP_SPEED_LEVELS[this.speedLevel] ?? 0);
-    const shipParams =
-      options.headingDrift === false ? { ...DEFAULT_SHIP_PARAMS, yawAmplitude: 0, pitchAmplitude: 0 } : DEFAULT_SHIP_PARAMS;
-    this.travel = createTravel(autopilotParams, shipParams);
+    this.travel = createEngineTravel({ ...options, tripSeed, speedLevel: this.speedLevel });
     this.scene.add(this.farStarfield.mesh, this.galaxies.mesh, this.starfield.mesh);
+    // Planets bake their surfaces (PlanetBake.ts) where the GPU can render to half-float textures
+    // (the relief map); elsewhere they are drawn procedurally, as before.
+    const extensions = this.renderer.extensions;
+    const canBake = extensions.has('EXT_color_buffer_float') || extensions.has('EXT_color_buffer_half_float');
     // Each new encounter object's shaders compile (in parallel where supported) before it is first drawn.
-    this.encounterView = new EncounterView(this.scene, (object) =>
-      this.renderer.compileAsync(object, this.camera, this.scene),
+    this.encounterView = new EncounterView(
+      this.scene,
+      (object) => this.renderer.compileAsync(object, this.camera, this.scene),
+      { bakePlanets: canBake },
     );
     // Compile the planet and nebula programs once, now, and keep them, so no encounter compiles any.
     // Asteroid rocks and comet nuclei draw with the rocky planet surface program, and a comet's coma
@@ -176,6 +202,25 @@ export class Engine {
     // building blocks are made now too, so the first asteroid's or comet's frame does not.
     this.programWarmup = new ProgramWarmup([...planetProgramMaterials(), ...nebulaProgramMaterials()]);
     void this.programWarmup.compile(this.renderer, this.camera, this.scene);
+    // The bake programs draw into a render target, so they are compiled with one bound (a 1×1
+    // stand-in, freed as soon as the compile has started).
+    if (canBake) {
+      this.bakeWarmup = new ProgramWarmup(planetBakeProgramMaterials());
+      const stand = new WebGLRenderTarget(1, 1, { depthBuffer: false });
+      void this.bakeWarmup.compile(this.renderer, this.camera, this.scene, stand);
+      stand.dispose();
+      // Make a one-texel stand-in of a rocky planet's cube maps once, now: Three.js' first cube map
+      // of each kind queries the GPU (its anisotropy limit, among others) with calls that wait for it
+      // to finish everything queued, which in an encounter's first bake slice stalled the frame.
+      const probe = new SurfaceBake('rocky', {}, 1);
+      for (const target of probe.targets) this.renderer.initRenderTarget(target);
+      probe.dispose();
+      this.planetBaker = new PlanetBaker(this.renderer);
+    } else {
+      this.bakeWarmup = null;
+      this.planetBaker = null;
+    }
+    this.canvas.addEventListener('webglcontextrestored', this.onContextRestored);
     prepareAsteroids();
     prepareComets();
     this.applyHeading();
@@ -210,12 +255,18 @@ export class Engine {
     this.dprQuery = null;
     document.removeEventListener('visibilitychange', this.onVisibilityChange);
     this.pausedListeners.clear();
+    this.canvas.removeEventListener('webglcontextrestored', this.onContextRestored);
+    this.drawnPlanet = null;
     this.encounterView.dispose();
     this.programWarmup.dispose();
+    this.bakeWarmup?.dispose();
+    this.planetBaker?.dispose();
     this.scene.remove(this.starfield.mesh, this.farStarfield.mesh, this.galaxies.mesh);
     this.starfield.dispose();
     this.farStarfield.dispose();
     this.galaxies.dispose();
+    this.gpuTimer?.dispose();
+    this.gpuTimer = null;
     this.renderer.dispose();
   }
 
@@ -231,6 +282,7 @@ export class Engine {
     this.paused = false;
     // Forget the reference time so the paused duration never becomes a step.
     this.clock.reset();
+    this.frameCap.reset();
     if (this.running) this.requestFrame();
     this.notifyPausedChange();
   }
@@ -273,7 +325,12 @@ export class Engine {
     return this.appliedDpr;
   }
 
-  /** Number of frames the loop has run. */
+  /** The frame-rate cap in use, in frames per second (0: none). */
+  getFrameRateCap(): number {
+    return this.frameCap.fps;
+  }
+
+  /** Number of frames the loop has drawn (display frames skipped by the frame-rate cap are not counted). */
   getFrameCount(): number {
     return this.frameCount;
   }
@@ -297,11 +354,41 @@ export class Engine {
   }
 
   /**
+   * Recent frames' GPU times in milliseconds (the bake slice, if any, and the render), a rolling
+   * window, or `null` when GPU timing is off (`EngineOptions.gpuTiming`) or the browser has no
+   * `EXT_disjoint_timer_query_webgl2` (read-only view; do not record into it). Each result arrives a
+   * few frames after its frame.
+   */
+  getGpuFrameTimes(): Readonly<FrameStats> | null {
+    return this.gpuTimer?.supported === true ? this.gpuFrames : null;
+  }
+
+  /** Whether GPU timing was asked for (`EngineOptions.gpuTiming`), whether or not the browser supports it. */
+  isGpuTimingOn(): boolean {
+    return this.gpuTimer !== null;
+  }
+
+  /** The drawing buffer's size in device pixels (the CSS size times the applied DPR). */
+  getDrawingBufferSize(): { width: number; height: number } {
+    return { width: this.canvas.width, height: this.canvas.height };
+  }
+
+  /** The scene (read-only view; do not modify): the star layers, the galaxies and the encounter object. */
+  getScene(): Scene {
+    return this.scene;
+  }
+
+  /**
    * The latest frame's interval since the frame before it, in milliseconds, or NaN when it had none
    * (the first frame after a start, resume or the tab becoming visible again).
    */
   getLastFrameInterval(): number {
     return this.clock.lastIntervalMs;
+  }
+
+  /** Whether planets bake their surfaces here (the GPU can render to half-float textures). */
+  isPlanetBakeOn(): boolean {
+    return this.planetBaker !== null;
   }
 
   /** Whether the current encounter object, planet, nebula, asteroid or comet, is drawn; false with none. */
@@ -422,14 +509,22 @@ export class Engine {
     this.rafId = 0;
     if (this.paused || !this.running) return;
     this.requestFrame();
+    // Under the frame-rate cap this display frame may be skipped: nothing runs, and the next drawn
+    // frame steps the simulation by the whole time since the last drawn one.
+    if (!this.frameCap.due(now)) return;
+    this.gpuTimer?.poll(this.recordGpuTime);
     const dt = this.clock.tick(now);
     this.frameIntervals.record(this.clock.lastIntervalMs);
     const workStart = performance.now();
     stepTravel(this.travel, dt);
     this.encounterView.sync(this.travel.autopilot);
     this.frameCount++;
-    this.render();
+    this.render(true);
     this.frameWork.record(performance.now() - workStart);
+  };
+
+  private readonly recordGpuTime = (ms: number): void => {
+    this.gpuFrames.record(ms);
   };
 
   private readonly resize = (): void => {
@@ -478,17 +573,43 @@ export class Engine {
       this.clock.hide();
     } else {
       this.clock.show();
+      this.frameCap.reset();
     }
   };
 
-  private render(): void {
+  /** Draws the scene; with `bake` (the frame loop's frames), a slice of the planet's surface bake first. */
+  private render(bake = false): void {
     const { ship, autopilot, autopilotParams } = this.travel;
     this.applyHeading();
     this.starfield.update(ship);
     const kind = autopilot.encounter?.kind ?? 'planet';
     this.encounterView.place(autopilot, ship, encounterProfile(autopilotParams, kind));
+    this.gpuTimer?.begin();
+    // Only once the bake programs are compiled, so a bake never compiles anything, and from the frame
+    // after the one that first draws the planet, so neither the frame that creates it nor the one
+    // that first draws it does more than before (the first slice also allocates the cube maps).
+    const planet = this.encounterView.getPlanet();
+    if (bake && this.planetBaker !== null && this.bakeWarmup?.isReady() === true) {
+      this.planetBaker.step(planet !== null && planet === this.drawnPlanet ? planet : null);
+    }
     this.renderer.render(this.scene, this.camera);
+    this.gpuTimer?.end();
+    if (bake) this.drawnPlanet = planet !== null && planet.object.visible ? planet : null;
   }
+
+  /**
+   * After a WebGL context loss and restore, Three.js rebuilds its GPU resources as they are next
+   * used, but a render target's contents are gone: the current planet goes back to its procedural
+   * surface and bakes again. The GPU timer's queries died with the context too.
+   */
+  private readonly onContextRestored = (): void => {
+    if (this.disposed) return;
+    this.encounterView.getPlanet()?.restartBake();
+    if (this.gpuTimer !== null) {
+      this.gpuTimer.dispose();
+      this.gpuTimer = new GpuTimer(this.renderer.getContext() as WebGL2RenderingContext);
+    }
+  };
 
   /** Camera stays at the origin and looks along the ship heading. */
   private applyHeading(): void {
@@ -517,4 +638,35 @@ export class Engine {
 function clampSpeedLevel(level: number, fallback: number): number {
   const max = SHIP_SPEED_LEVELS.length - 1;
   return Math.min(max, Math.max(0, Math.round(Number.isFinite(level) ? level : fallback)));
+}
+
+/**
+ * The ship, autopilot and their params the engine travels with for `options` (its trip seed, speed
+ * level, encounter interval, kind and arrival speed, and heading drift), with the engine's seeded
+ * planets, nebulae, asteroids and comets. Shared with the e2e GPU benchmark (src/e2eGpuBench.ts), so
+ * it flies exactly the engine's encounters.
+ */
+export function createEngineTravel(options: Readonly<EngineOptions> = {}): Travel {
+  const tripSeed = options.tripSeed === undefined ? ENCOUNTER_BASE_SEED : options.tripSeed >>> 0;
+  const speedLevel = clampSpeedLevel(options.speedLevel ?? SHIP_DEFAULT_SPEED_LEVEL, SHIP_DEFAULT_SPEED_LEVEL);
+  const interval = options.encounterInterval;
+  const kind = options.encounterKind;
+  const autopilotParams: AutopilotParams = {
+    ...DEFAULT_AUTOPILOT_PARAMS,
+    baseSeed: tripSeed,
+    interval: interval !== undefined && interval >= 0 ? interval : DEFAULT_AUTOPILOT_PARAMS.interval,
+    arrivalSpeed:
+      options.arrivalSpeed !== undefined && options.arrivalSpeed > 0 ? options.arrivalSpeed : DEFAULT_AUTOPILOT_PARAMS.arrivalSpeed,
+    planetFor: planetParams,
+    nebulaFor: nebulaParams,
+    asteroidFor: asteroidParams,
+    cometFor: cometParams,
+    nebulaShare: kind === undefined ? DEFAULT_AUTOPILOT_PARAMS.nebulaShare : kind === 'nebula' ? 1 : 0,
+    asteroidShare: kind === undefined ? DEFAULT_AUTOPILOT_PARAMS.asteroidShare : kind === 'asteroid' ? 1 : 0,
+    cometShare: kind === undefined ? DEFAULT_AUTOPILOT_PARAMS.cometShare : kind === 'comet' ? 1 : 0,
+  };
+  setCruiseSpeed(autopilotParams, SHIP_SPEED_LEVELS[speedLevel] ?? 0);
+  const shipParams =
+    options.headingDrift === false ? { ...DEFAULT_SHIP_PARAMS, yawAmplitude: 0, pitchAmplitude: 0 } : DEFAULT_SHIP_PARAMS;
+  return createTravel(autopilotParams, shipParams);
 }

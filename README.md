@@ -86,6 +86,7 @@ npm run check:hook   # the e2e test hook is not in the production build
 
 - **Fullscreen on iPhone:** Safari on iPhone has no Fullscreen API for pages, so the Fullscreen button is hidden there and F does nothing.
 - **Mobile:** Phones and tablets work (tap shows the controls), but performance is tuned for desktop. Expect lower frame rates and more battery use on mobile.
+- **Frame rate is capped at 60 FPS:** A 120 Hz display draws every other frame (`FRAME_RATE_CAP` in `src/config.ts`), which halves the GPU work there; the motion is slow enough that more frames show nothing more. Planets draw their surfaces from cube maps baked once per planet (about 100 MB of GPU memory for a rocky world and 34 MB for a gas giant while it is on its way past), rather than evaluating the procedural surface for every pixel of every frame.
 - **Nebulae are the main GPU cost:** During a nebula encounter, large soft-blended layers cover much of the screen, so a weak GPU may drop frames there. Quality presets and adaptive resolution are an Optional item in PLAN.md section 5, and are not built.
 - **Screen Wake Lock:** Where the browser doesn't support it, the screen follows the device's own sleep settings. A failed request is logged to the console.
 - **Soak length:** CI runs the soak for 5 minutes, under SwiftShader (software rendering), so its frame times say nothing absolute about real hardware. The 30-minute run is started by hand from the Soak workflow ([.github/workflows/soak.yml](.github/workflows/soak.yml)).

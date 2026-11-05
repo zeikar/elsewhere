@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 const MARKERS = ['__elsewhere', 'installE2EHook'];
 // The overrides are read with `URLSearchParams.get('<name>')`; the engine options of the same names
 // stay in production, but nothing there reads them from the URL.
-const OVERRIDE_READ = /\.get\(\s*["'`](?:encounterInterval|encounterKind|starLayers|headingDrift|arrivalSpeed)["'`]\s*\)/;
+const OVERRIDE_READ = /\.get\(\s*["'`](?:encounterInterval|encounterKind|starLayers|headingDrift|arrivalSpeed|gpuTiming|perfOverlay|frameRateCap)["'`]\s*\)/;
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const distDir = join(root, 'dist');
 
