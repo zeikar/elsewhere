@@ -12,8 +12,11 @@
 import {
   ENCOUNTER_DESPAWN_DISTANCE,
   ENCOUNTER_DISTANCE,
-  ENCOUNTER_FADE_IN_DISTANCE,
+  ENCOUNTER_FADE_IN_SECONDS,
   ENCOUNTER_FADE_OUT_DISTANCE,
+  ENCOUNTER_FAR_ACCEL,
+  ENCOUNTER_FAR_MAX_ANGLE_DEG,
+  ENCOUNTER_FAR_SPEED,
   ENCOUNTER_MIN_SPEED,
   ENCOUNTER_MIN_SPEED_DISTANCE,
   ENCOUNTER_MIN_SPEED_FLOOR,
@@ -151,14 +154,31 @@ export interface EncounterProfile {
   minSpeedDistance: number;
   /** Distance after that band over which the target speed returns to cruise. */
   speedupDistance: number;
-  /** Distance after spawning over which opacity (and, below 1, the size scale) eases up. */
+  /**
+   * Distance after spawning over which opacity (and, below 1, the size scale) eases up; 0 for none
+   * (the fade-in is then `fadeInTime` alone). Nebulae fade in over a distance.
+   */
   fadeInDistance: number;
-  /** Size scale at spawn. 1 for planets, nebulae and asteroids: they keep their world size throughout. */
+  /**
+   * Seconds after spawning (the encounter's own time) over which opacity (and the size scale) eases
+   * up; 0 for none. Planets, asteroids and comets fade in over a time, the same at every level.
+   */
+  fadeInTime: number;
+  /** Size scale at spawn. 1 for every kind: they keep their world size throughout. */
   spawnScale: number;
   /** Distance before despawning over which opacity eases down. */
   fadeOutDistance: number;
   /** Distance past the closest approach at which the encounter ends with opacity 0. */
   despawnDistance: number;
+  /**
+   * Speed of the far stretch (`farStretchTargetSpeed`), in world units per second; at or below the
+   * encounter's cruise speed, no far stretch. Scaled with the level like `minSpeed`.
+   */
+  farSpeed: number;
+  /** About the far stretch's peak acceleration, in units per second per second (scaled with the level's square). */
+  farAccel: number;
+  /** Angular diameter, in radians, the object is back at the cruise speed by (`farStretchRoom`). */
+  farMaxAngle: number;
 }
 
 export const DEFAULT_ENCOUNTER_PROFILE: Readonly<EncounterProfile> = {
@@ -167,12 +187,16 @@ export const DEFAULT_ENCOUNTER_PROFILE: Readonly<EncounterProfile> = {
   slowdownDistance: ENCOUNTER_SLOWDOWN_DISTANCE,
   minSpeedDistance: ENCOUNTER_MIN_SPEED_DISTANCE,
   speedupDistance: ENCOUNTER_SPEEDUP_DISTANCE,
-  fadeInDistance: ENCOUNTER_FADE_IN_DISTANCE,
+  fadeInDistance: 0,
+  fadeInTime: ENCOUNTER_FADE_IN_SECONDS,
   // A planet keeps its world size from spawn to despawn, so its apparent size comes from
   // perspective alone; it starts as a distant dot because it is far away (see ENCOUNTER_DISTANCE).
   spawnScale: 1,
   fadeOutDistance: ENCOUNTER_FADE_OUT_DISTANCE,
   despawnDistance: ENCOUNTER_DESPAWN_DISTANCE,
+  farSpeed: ENCOUNTER_FAR_SPEED,
+  farAccel: ENCOUNTER_FAR_ACCEL,
+  farMaxAngle: (ENCOUNTER_FAR_MAX_ANGLE_DEG * Math.PI) / 180,
 };
 
 /**
@@ -306,37 +330,224 @@ export function encounterTargetSpeed(
 }
 
 /**
- * Fade-in progress: 0 at the encounter's spawn distance (and before it), 1 once `fadeInDistance` has
- * been travelled. The spawn distance comes from the encounter itself, so it always matches its `D`.
+ * Fade-in progress: 0 at the spawn, 1 once `fadeInDistance` has been travelled (from the encounter's
+ * own spawn distance, so it always matches its `D`) and `time` seconds have passed since the spawn
+ * reach `fadeInTime`, each a smoothstep; a zero length or time leaves that part out.
  */
-function fadeIn(encounter: Readonly<Encounter>, remaining: number, profile: Readonly<EncounterProfile>): number {
+function fadeIn(encounter: Readonly<Encounter>, remaining: number, profile: Readonly<EncounterProfile>, time: number): number {
   const { spawnDistance } = encounter;
-  return smoothstep(spawnDistance, spawnDistance - profile.fadeInDistance, remaining);
+  const byDistance = profile.fadeInDistance > 0 ? smoothstep(spawnDistance, spawnDistance - profile.fadeInDistance, remaining) : 1;
+  const byTime = profile.fadeInTime > 0 ? smoothstep(0, profile.fadeInTime, time) : 1;
+  return byDistance * byTime;
 }
 
 /**
- * Planet opacity in [0, 1] at `remaining` distance: 0 at the encounter's spawn distance, easing up
- * to 1 over `fadeInDistance`, and easing back down to 0 at `despawnDistance` past the closest approach.
+ * Object opacity in [0, 1] at `remaining` distance, `time` seconds after the spawn (the encounter's
+ * own time, `AutopilotState.encounterTime`; by default long past the fade-in): 0 at the spawn, easing
+ * up to 1 over `fadeInTime` seconds or over `fadeInDistance` travelled, and easing back down to 0 at
+ * `despawnDistance` past the closest approach.
  */
 export function encounterOpacity(
   encounter: Readonly<Encounter>,
   remaining: number,
   profile: Readonly<EncounterProfile> = DEFAULT_ENCOUNTER_PROFILE,
+  time = Number.POSITIVE_INFINITY,
 ): number {
   const fadeOut = smoothstep(-profile.despawnDistance, profile.fadeOutDistance - profile.despawnDistance, remaining);
-  return fadeIn(encounter, remaining, profile) * fadeOut;
+  return fadeIn(encounter, remaining, profile, time) * fadeOut;
 }
 
 /**
- * Size scale in [spawnScale, 1] at `remaining` distance: `spawnScale` at the encounter's spawn
- * distance, easing up to 1 over `fadeInDistance` and staying 1 after that. Both default profiles
- * (planets, nebulae and asteroids) have a spawn scale of 1, so it is 1 throughout: the object keeps its world
- * size and only its opacity fades.
+ * Size scale in [spawnScale, 1] at `remaining` distance, `time` seconds after the spawn:
+ * `spawnScale` at the spawn, easing up to 1 with the fade-in and staying 1 after that. Every default
+ * profile has a spawn scale of 1, so it is 1 throughout: the object keeps its world size and only
+ * its opacity fades.
  */
 export function encounterScale(
   encounter: Readonly<Encounter>,
   remaining: number,
   profile: Readonly<EncounterProfile> = DEFAULT_ENCOUNTER_PROFILE,
+  time = Number.POSITIVE_INFINITY,
 ): number {
-  return profile.spawnScale + (1 - profile.spawnScale) * fadeIn(encounter, remaining, profile);
+  return profile.spawnScale + (1 - profile.spawnScale) * fadeIn(encounter, remaining, profile, time);
+}
+
+/*
+ * The far stretch (config.ts, ENCOUNTER_FAR_SPEED): from the spawn, the ship's speed follows a curve
+ * in the distance travelled, `x`, from its speed at the spawn up to a peak, held there, and back down
+ * to the encounter's cruise speed by the end of the stretch, `room` past the spawn. Each change is a
+ * smootherstep in `x`. With `v(x) = a + (b - a) S(x / L)`, the acceleration is `v dv/dx`, whose peak
+ * is about `(a + b) / 2 × |b - a| × 1.875 / L` (the smootherstep's steepest slope is 1.875), so a
+ * change between `a` and `b` takes `L = FAR_LENGTH_FACTOR × |b² - a²| / accel` for a peak
+ * acceleration of about `accel`.
+ */
+
+/** `L = FAR_LENGTH_FACTOR × |b² − a²| / accel`: a far-stretch change's length (see above). */
+const FAR_LENGTH_FACTOR = 1.875 / 2;
+
+/**
+ * A rise to the peak smaller than this share of the peak's height above the cruise speed is left
+ * out (the stretch holds the start speed instead): a small rise is short, so its jerk, which grows
+ * as the rise shrinks (about 1.6 × accel² / the rise), would be large. Such starts come only from a
+ * speed change during the cruise before the spawn: otherwise the ship is at the cruise speed there,
+ * or at the cruise before's own speed, which at the top level is the far speed itself and so has no
+ * rise at all (`farStretchRoom`, `farHandoverSpeed`).
+ */
+const FAR_MIN_RISE = 0.15;
+
+/** Smootherstep on [0, 1]: no step in value, slope or curvature at either end. */
+function smootherstep01(u: number): number {
+  return u * u * u * (u * (6 * u - 15) + 10);
+}
+
+/** The slope of `smootherstep01`. */
+function smootherstepSlope01(u: number): number {
+  const w = u * (1 - u);
+  return 30 * w * w;
+}
+
+/**
+ * The remaining distance at which the far stretch ends for an object that a sphere of `drawnRadius`
+ * holds, planned `closestDistance` from the path: where the sphere's angular diameter seen from the
+ * path, `2 asin(drawnRadius / distance)`, reaches `profile.farMaxAngle`, or the start of the
+ * slowdown, whichever is further.
+ */
+export function farStretchEnd(closestDistance: number, drawnRadius: number, profile: Readonly<EncounterProfile>): number {
+  const half = profile.farMaxAngle / 2;
+  const distance = half > 0 && half < Math.PI / 2 ? drawnRadius / Math.sin(half) : Number.POSITIVE_INFINITY;
+  const atAngle = distance > closestDistance ? Math.sqrt(distance * distance - closestDistance * closestDistance) : 0;
+  return Math.max(atAngle, profile.slowdownDistance);
+}
+
+/**
+ * The shortest far stretch: the length of the whole fall from `profile.farSpeed` to `cruiseSpeed`
+ * at about `profile.farAccel`. It is the same at every level (about 1,480 units by default): the
+ * speeds scale with the level and the acceleration with its square.
+ */
+export function farStretchMinRoom(cruiseSpeed: number, profile: Readonly<EncounterProfile>): number {
+  if (!(profile.farSpeed > cruiseSpeed) || !(profile.farAccel > 0)) return Number.POSITIVE_INFINITY;
+  return (FAR_LENGTH_FACTOR * (profile.farSpeed * profile.farSpeed - cruiseSpeed * cruiseSpeed)) / profile.farAccel;
+}
+
+/**
+ * The far stretch's length, `room`, in world units travelled from the spawn at `spawnDistance`:
+ * from the spawn to `farStretchEnd`, for a stretch flown down to `cruiseSpeed` (the encounter's
+ * cruise speed). It is 0, so the encounter has no far stretch, where the object is already past the
+ * threshold at the spawn, for a profile with no far stretch (`farSpeed` at most the cruise speed),
+ * and where the stretch would be shorter than the whole fall from the far speed
+ * (`farStretchMinRoom`). Without that minimum the cruise before a short stretch would drop only
+ * partly out of warp (`farHandoverSpeed`), and its lag at the spawn would step the ship's
+ * acceleration there, and a short stretch from the cruise speed would rise and fall again within a
+ * second or so, with a large jerk; with it, the cruise before either stays in warp up to the far
+ * speed or drops out of it to the cruise speed as without a far stretch, and every stretch is long
+ * enough to be gentle.
+ */
+export function farStretchRoom(
+  spawnDistance: number,
+  closestDistance: number,
+  drawnRadius: number,
+  profile: Readonly<EncounterProfile>,
+  cruiseSpeed: number,
+): number {
+  const room = spawnDistance - farStretchEnd(closestDistance, drawnRadius, profile);
+  return room >= farStretchMinRoom(cruiseSpeed, profile) ? room : 0;
+}
+
+/**
+ * The highest speed the far stretch can start at and still fall to `cruiseSpeed` (the encounter's
+ * cruise speed) within `room` at about `profile.farAccel`, capped at `profile.farSpeed` and at
+ * `shipCruiseSpeed` (the cruise before it), and never below `cruiseSpeed`: what the cruise before an
+ * encounter with that room drops out of warp to (`cruiseTargetSpeed`'s hand-over speed). For any
+ * room `farStretchRoom` gives (0, or at least `farStretchMinRoom`) it is the cruise speed, or the
+ * lower of the cruise before's speed and the far speed.
+ */
+export function farHandoverSpeed(room: number, shipCruiseSpeed: number, cruiseSpeed: number, profile: Readonly<EncounterProfile>): number {
+  if (!(room > 0) || !(profile.farSpeed > cruiseSpeed) || !(profile.farAccel > 0)) return cruiseSpeed;
+  const fall = Math.sqrt((room * profile.farAccel) / FAR_LENGTH_FACTOR + cruiseSpeed * cruiseSpeed);
+  return Math.max(cruiseSpeed, Math.min(shipCruiseSpeed, profile.farSpeed, fall));
+}
+
+/**
+ * The far stretch's peak speed and the lengths of its rise and fall, for a stretch of `room` from a
+ * start speed of `start` down to `cruiseSpeed`: the peak is `profile.farSpeed`, or lower where a
+ * rise and a fall at about `profile.farAccel` would not fit, and never below the start (a start too
+ * fast to fall within the room, after a speed change, falls over the whole room, more steeply); a
+ * start within FAR_MIN_RISE of the peak is held instead of rising to it.
+ * Writes `[peak, rise, fall]` into `out`.
+ */
+function farStretchShape(
+  room: number,
+  start: number,
+  cruiseSpeed: number,
+  profile: Readonly<EncounterProfile>,
+  out: [number, number, number],
+): [number, number, number] {
+  const accel = profile.farAccel;
+  const top = Math.max(profile.farSpeed, cruiseSpeed);
+  const fit = Math.max(cruiseSpeed, Math.min(top, Math.sqrt(((room * accel) / FAR_LENGTH_FACTOR + start * start + cruiseSpeed * cruiseSpeed) / 2)));
+  const peak = start >= fit - FAR_MIN_RISE * (fit - cruiseSpeed) ? Math.max(start, cruiseSpeed) : fit;
+  const rise = Math.min(room, (FAR_LENGTH_FACTOR * Math.abs(peak * peak - start * start)) / accel);
+  out[0] = peak;
+  out[1] = rise;
+  out[2] = Math.min(room - rise, (FAR_LENGTH_FACTOR * (peak * peak - cruiseSpeed * cruiseSpeed)) / accel);
+  return out;
+}
+
+const shapeScratch: [number, number, number] = [0, 0, 0];
+
+/**
+ * The ship's speed on the far stretch, and its rate of change in time, `travelled` world units past
+ * the spawn of a stretch of `room` that started at the ship's speed `start` and ends at `cruiseSpeed`
+ * (see the section comment). Past the stretch, the cruise speed and 0. Writes `[speed, rate]`.
+ */
+export function farStretchCurve(
+  travelled: number,
+  room: number,
+  start: number,
+  cruiseSpeed: number,
+  profile: Readonly<EncounterProfile>,
+  out: [number, number],
+): [number, number] {
+  out[0] = cruiseSpeed;
+  out[1] = 0;
+  if (!(room > 0) || !(travelled < room) || !(profile.farAccel > 0)) return out;
+  const [peak, rise, fall] = farStretchShape(room, start, cruiseSpeed, profile, shapeScratch);
+  const x = Math.max(0, travelled);
+  let from = peak;
+  let to = peak;
+  let u = 0;
+  let length = 0;
+  if (x < rise) {
+    from = start;
+    length = rise;
+    u = x / rise;
+  } else if (x >= room - fall && fall > 0) {
+    to = cruiseSpeed;
+    length = fall;
+    u = (x - (room - fall)) / fall;
+  }
+  const speed = from + (to - from) * smootherstep01(u);
+  out[0] = speed;
+  out[1] = length > 0 ? (speed * (to - from) * smootherstepSlope01(u)) / length : 0;
+  return out;
+}
+
+const curveScratch: [number, number] = [0, 0];
+
+/**
+ * Target speed on the far stretch (config.ts, ENCOUNTER_FAR_SPEED): the curve's speed plus its rate
+ * of change times the ship's speed time constant `speedTau`, so the ship's exponential approach turns
+ * it back into the curve itself, and the ship is at `cruiseSpeed` with no acceleration where the
+ * stretch ends. Continuous with the cruise speed there. Pure and allocation-free.
+ */
+export function farStretchTargetSpeed(
+  travelled: number,
+  room: number,
+  start: number,
+  cruiseSpeed: number,
+  profile: Readonly<EncounterProfile>,
+  speedTau: number,
+): number {
+  const [speed, rate] = farStretchCurve(travelled, room, start, cruiseSpeed, profile, curveScratch);
+  return speed + speedTau * rate;
 }

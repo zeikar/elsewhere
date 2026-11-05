@@ -33,5 +33,8 @@ export const SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS = 100;
  * browser by e2e/warp.spec.ts, which runs without this override and flies the real drop out of warp
  * and return to it at the top speed. The mid-encounter ArrowUp spec in e2e/encounter.spec.ts also
  * runs without it, but cruises at the default speed and switches to the top speed only in APPROACH.
+ * Since issue #64 the encounters spawn 8,000 out and are longer (their far stretch is flown at 2.5×
+ * the far speed with this override): with it, the ten-encounter spec took 36 s (28 s before) and the
+ * three-encounter spec 4.6 min (3.2 min) in a full parallel run here.
  */
 export const FAST_ENCOUNTERS_ARRIVAL_SPEED = 150;

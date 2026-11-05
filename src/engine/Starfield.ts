@@ -179,17 +179,19 @@ export interface FadeParams {
   cubeSize: number;
   edgeFadeWidth: number;
   nearFadeDistance: number;
+  /** Camera near plane: the near fade runs from there, so a star is 0 by the time it reaches it. */
+  near: number;
 }
 
 /**
- * TS mirror of the shader's `starFade`: 0 on the cube boundary and at the camera, 1 in the interior.
- * (x, y, z) is the wrapped position relative to the camera.
+ * TS mirror of the shader's `starFade`: 0 on the cube boundary and within the near plane's distance
+ * of the camera, 1 in the interior. (x, y, z) is the wrapped position relative to the camera.
  */
 export function starFade(x: number, y: number, z: number, params: Readonly<FadeParams>): number {
   const half = 0.5 * params.cubeSize;
   const toBoundary = half - Math.max(Math.abs(x), Math.abs(y), Math.abs(z));
   const edge = smoothstep(0, params.edgeFadeWidth, toBoundary);
-  const near = smoothstep(0, params.nearFadeDistance, Math.hypot(x, y, z));
+  const near = smoothstep(params.near, params.near + params.nearFadeDistance, Math.hypot(x, y, z));
   return edge * near;
 }
 
@@ -320,7 +322,7 @@ float starFade(vec3 rel) {
   vec3 a = abs(rel);
   float toBoundary = 0.5 * uCubeSize - max(a.x, max(a.y, a.z));
   float edge = smoothstep(0.0, uEdgeFadeWidth, toBoundary);
-  float near = smoothstep(0.0, uNearFadeDistance, length(rel));
+  float near = smoothstep(uNear, uNear + uNearFadeDistance, length(rel));
   return edge * near;
 }
 

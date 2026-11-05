@@ -167,6 +167,11 @@ export interface E2EHookSnapshot {
     arrivalSpeed: number;
     /** Planned closest distance between the path and the planet centre, or `null` with no encounter. */
     closestDistance: number | null;
+    /**
+     * Remaining distance at which the encounter's far stretch ends (its spawn distance less its
+     * `farRoom`), or `null` with no encounter or none (a nebula, or an object too large at the spawn).
+     */
+    farEnd: number | null;
     /** Kind of the encounter in progress, or `null` in CRUISE. */
     kind: EncounterKind | null;
     /** Side of the path the encounter object sits on, or `null` in CRUISE. */
@@ -287,7 +292,8 @@ export interface E2EHook {
    * Draws the `nth` (default 0) encounter planet of `type` at a fixed position in front of the camera
    * on an overlay canvas (`#planet-preview`), replacing any planet already shown. With
    * `{ farStars: true }` the far-star layer is drawn behind it, as in the engine, and with
-   * `{ galaxies: true }` a galaxy straight behind the disc and one beside it.
+   * `{ galaxies: true }` a galaxy straight behind the disc and one beside it. `{ distance }` moves it
+   * out to that distance (`farFraming` says how it is framed there; see PlanetPreviewOptions).
    */
   showPlanet(type: PlanetType, nth?: number, options?: PlanetPreviewOptions): PlanetPreviewInfo;
   /**
@@ -300,9 +306,11 @@ export interface E2EHook {
    * Draws the ringed planet for appearance seed `seed` as `showEncounter` does, with and without its
    * ring, and reports how the pixels differ where the ring lies in front of the disc, behind it and
    * over the sky, and the atmosphere's glow where the ring crosses the halo (see `checkRingDepth` in
-   * src/e2ePlanetPreview.ts).
+   * src/e2ePlanetPreview.ts). With `distance`, the planet is that far out (as at its spawn, for
+   * ENCOUNTER_DISTANCE) and the camera zoomed in to frame it the same, so the depth buffer works as it
+   * does there.
    */
-  checkRingDepth(seed: number): RingDepthInfo;
+  checkRingDepth(seed: number, distance?: number): RingDepthInfo;
   /** Removes the planet overlay canvas. */
   hidePlanet(): void;
 }
@@ -527,6 +535,10 @@ export function installE2EHook(engine: Engine): void {
           interval: engine.getEncounterInterval(),
           arrivalSpeed: engine.getArrivalSpeed(),
           closestDistance: autopilot.encounter?.plan.closestDistance ?? null,
+          farEnd:
+            autopilot.encounter !== null && (autopilot.encounter.farRoom ?? 0) > 0
+              ? autopilot.encounter.plan.spawnDistance - autopilot.encounter.farRoom!
+              : null,
           kind: autopilot.encounter?.kind ?? null,
           side: autopilot.encounter?.side ?? null,
           viewMargin: Number.isFinite(autopilot.viewMargin) ? autopilot.viewMargin : null,
@@ -561,7 +573,7 @@ export function installE2EHook(engine: Engine): void {
     setSpeed: (level) => engine.setSpeed(level),
     showPlanet: (type, nth, options) => showPlanetPreview(type, nth, options),
     showEncounter: (kind, seed) => showEncounterPreview(kind, seed),
-    checkRingDepth: (seed) => checkRingDepth(seed),
+    checkRingDepth: (seed, distance) => checkRingDepth(seed, distance),
     hidePlanet: () => hidePlanetPreview(),
   };
   Object.defineProperty(window, '__elsewhere', { value: Object.freeze(hook), configurable: false });

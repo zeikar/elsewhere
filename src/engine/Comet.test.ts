@@ -1,6 +1,7 @@
 import { Group, Scene, Vector3 } from 'three';
 import { describe, expect, it } from 'vitest';
 import {
+  CAMERA_FAR,
   CAMERA_FOV_DEG,
   CAMERA_NEAR,
   COMET_COMA_SEGMENTS,
@@ -13,6 +14,7 @@ import {
   COMET_RANGES,
   COMET_TAIL_SEGMENTS,
   COMET_TAIL_SIDES,
+  ENCOUNTER_BASE_SEED,
   ENCOUNTER_CLEARANCE_MARGIN,
   PLANET_MIN_PASS_DISTANCE,
   SHIP_DEFAULT_SPEED_LEVEL,
@@ -87,6 +89,19 @@ function plannedComet(params: Readonly<CometParams>, heading: Vec3 = { x: 0, y: 
 /** The world-space position, relative to the nucleus, of an encounter-frame point. */
 function toWorld(v: readonly [number, number, number], frame: Readonly<Encounter>): Vec3 {
   return frameToWorld(v, frame, { x: 0, y: 0, z: 0 });
+}
+
+/**
+ * Projected diameter, in pixels at 1080p, of a sphere of radius `r` whose centre is `D` ahead and
+ * `offset` to the side, with the offset taken as vertical, the worst case for the height (as for
+ * planets, Planet.test.ts).
+ */
+function spawnPx(r: number, offset: number, D: number): number {
+  const centre = Math.hypot(D, offset);
+  const half = Math.asin(r / centre);
+  const offAxis = Math.atan2(offset, D);
+  const tanHalfFov = Math.tan(((CAMERA_FOV_DEG / 2) * Math.PI) / 180);
+  return (1080 * (Math.tan(offAxis + half) - Math.tan(offAxis - half))) / (2 * tanHalfFov);
 }
 
 describe('cometParams', () => {
@@ -168,6 +183,17 @@ describe('cometParams', () => {
     // Most pass close (u² skew): measured median about 124.
     expect(quantile(closest, 0.5)).toBeLessThan(COMET_MIN_PASS_DISTANCE * 1.2);
     expect(Math.min(...closest)).toBeGreaterThan(PLANET_MIN_PASS_DISTANCE);
+  });
+
+  it('at first appearance (the spawn) the coma is at most 10 px across at 1080p, and the whole comet is inside the far plane', () => {
+    // Measured over 20,000 seeds (px at 1080p, p10/p50/p90/max) with the spawn at 8,000: 6.5/8.0/9.5/9.8
+    // (at 2,400 before #64: 21.5/26.5/31.5/32.8).
+    const seeded = Array.from({ length: 20_000 }, (_, i) => cometParams(hash(ENCOUNTER_BASE_SEED, i)));
+    const comae = seeded.map((p) => spawnPx(p.radius, p.radius * p.passFactor, COMET_ENCOUNTER_DISTANCE)).sort((a, b) => a - b);
+    expect(comae[comae.length >> 1]!).toBeLessThanOrEqual(8.5);
+    expect(comae.at(-1)!).toBeLessThanOrEqual(10);
+    // The tails trail back toward the ship and away from the path, so nothing lies beyond the coma.
+    expect(Math.hypot(COMET_ENCOUNTER_DISTANCE, COMET_MIN_PASS_DISTANCE * (1 + COMET_PASS_EXTRA)) + COMET_RANGES.comaRadius[1]).toBeLessThan(CAMERA_FAR);
   });
 
   it('both tails point away from the sun in the encounter frame; the ion tail is straight, the dust tail curves away from the path', () => {

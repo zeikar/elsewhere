@@ -158,6 +158,7 @@ describe('sky legibility', () => {
       cubeSize: STAR_CUBE_SIZE,
       edgeFadeWidth: STAR_EDGE_FADE_WIDTH,
       nearFadeDistance: STAR_NEAR_FADE_DISTANCE,
+      near: CAMERA_NEAR,
     });
     return nearLuminance[i]! * fade * starDim(Math.hypot(x, y, z), STAR_DIM_DISTANCE);
   });

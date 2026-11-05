@@ -5,7 +5,9 @@
  *   must change exactly where the ring is in front of its disc or against the sky, and nowhere else;
  *   the disc hides the ring's far side. Drawn airless too: where the ring crosses the atmosphere's
  *   halo past the limb, the glow shows through the ring in front of it, dimmed, and over the ring
- *   behind it, whole.
+ *   behind it, whole. Checked again with the planet out at its spawn distance (ENCOUNTER_DISTANCE)
+ *   and the camera zoomed in to frame it the same, so the 24-bit depth buffer, with CAMERA_NEAR and
+ *   CAMERA_FAR, resolves the ring and the disc as it does at the spawn: no z-fighting there.
  * - The look: a ringed gas giant, a ringed rocky planet and an icy dwarf, screenshotted for review.
  * - Performance under SwiftShader: a ringed encounter against a plain one of a similar planet, in
  *   the engine, with no program compiled during either (the ring draws with the atmosphere's
@@ -14,7 +16,7 @@
  */
 import { writeFileSync } from 'node:fs';
 import { expect, test, type Page } from '@playwright/test';
-import { ENCOUNTER_BASE_SEED } from '../src/config';
+import { ENCOUNTER_BASE_SEED, ENCOUNTER_DISTANCE } from '../src/config';
 import { planetParams, type PlanetParams } from '../src/engine/Planet';
 import { hash } from '../src/engine/seed';
 import { formatTripSeed } from '../src/tripSeed';
@@ -62,11 +64,13 @@ test('a ring shows in front of its planet and against the sky, and the planet hi
     firstSeed((p) => p.type === 'rocky' && p.ring !== null && p.ring.opening < 0.5),
   ];
   const results = [];
-  for (const [index, seed] of seeds.entries()) {
-    const info = await page.evaluate((s) => window.__elsewhere!.checkRingDepth(s), seed);
-    results.push(info);
-    await savePreview(page, `ringed-${info.family}-${seed}.png`);
-    const label = `${info.family} ${seed}: ${JSON.stringify(info)}`;
+  // As framed for review, and out at the spawn distance with the camera zoomed in to frame it the same.
+  const cases = seeds.flatMap((seed, index) => [null, ENCOUNTER_DISTANCE].map((distance) => ({ index, seed, distance })));
+  for (const { index, seed, distance } of cases) {
+    const info = await page.evaluate(({ s, d }) => window.__elsewhere!.checkRingDepth(s, d ?? undefined), { s: seed, d: distance });
+    results.push({ distance, ...info });
+    await savePreview(page, `ringed-${info.family}-${seed}${distance === null ? '' : `-at-${distance}`}.png`);
+    const label = `${info.family} ${seed} at ${distance ?? 'the preview distance'}: ${JSON.stringify(info)}`;
     // Every class sampled.
     for (const cls of [info.frontOfDisc, info.behindDisc, info.overSky, info.elsewhere]) expect(cls.n, label).toBeGreaterThan(30);
     // The ring shows where it is in front of the disc and against the sky…

@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CAMERA_FOV_DEG,
+  CAMERA_NEAR,
   DPR_CAP,
   STAR_BASE_SIZE_PX,
   STAR_BRIGHTNESS_MAX,
@@ -13,6 +15,7 @@ import {
   STAR_NEAR_FADE_DISTANCE,
   STAR_SIZE_MAX,
   STAR_SIZE_MIN,
+  VIEW_WIDEST_ASPECT,
 } from '../config';
 import { computeRenderSize } from './renderSize';
 import {
@@ -86,6 +89,7 @@ describe('starFade', () => {
     cubeSize: L,
     edgeFadeWidth: STAR_EDGE_FADE_WIDTH,
     nearFadeDistance: STAR_NEAR_FADE_DISTANCE,
+    near: CAMERA_NEAR,
   };
   const half = L / 2;
 
@@ -101,14 +105,23 @@ describe('starFade', () => {
     }
   });
 
-  it('is 0 at the camera', () => {
+  it('is 0 at the camera and at the near plane, so no mote is cut off by it while still visible', () => {
     expect(starFade(0, 0, 0, params)).toBe(0);
+    expect(starFade(0, 0, -CAMERA_NEAR, params)).toBe(0);
+    expect(starFade(0.6 * CAMERA_NEAR, 0, -0.8 * CAMERA_NEAR, params)).toBe(0);
+    expect(starFade(0, 0, -CAMERA_NEAR - 0.01, params)).toBeGreaterThan(0);
+    expect(starFade(0, 0, -CAMERA_NEAR - 0.01, params)).toBeLessThan(1e-4);
+    // Where a head reaches the plane (just past it, as the shader collapses the quad) in a corner of
+    // the widest view: at most about 10% bright (config.ts, CAMERA_NEAR).
+    const tanV = Math.tan((CAMERA_FOV_DEG * Math.PI) / 360);
+    const z = CAMERA_NEAR * 1.001;
+    expect(starFade(tanV * VIEW_WIDEST_ASPECT * z, tanV * z, -z, params)).toBeLessThan(0.1);
   });
 
   it('reaches 1 in the interior', () => {
     expect(starFade(0, 0, -half / 2, params)).toBe(1);
     expect(starFade(100, -50, 200, params)).toBe(1);
-    expect(starFade(STAR_NEAR_FADE_DISTANCE, 0, 0, params)).toBe(1);
+    expect(starFade(CAMERA_NEAR + STAR_NEAR_FADE_DISTANCE, 0, 0, params)).toBe(1);
     expect(starFade(half - STAR_EDGE_FADE_WIDTH, 0, 0, params)).toBe(1);
   });
 

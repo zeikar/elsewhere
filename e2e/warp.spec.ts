@@ -2,8 +2,9 @@
  * Dropping out of warp at the top speed level (docs/PLAN.md section 1), on the real path: no
  * `?arrivalSpeed=` override, so the engine flies the encounter from ENCOUNTER_ARRIVAL_SPEED. A fake
  * clock steps the real engine one capped frame at a time, so simulated time runs as fast as
- * SwiftShader can draw the frames. The drop out of warp at the end of the first cruise and the
- * return to warp at the start of the next are both checked here; their shape and bounds at every
+ * SwiftShader can draw the frames. The drop out of warp, which for a planet with a far stretch
+ * (config.ts, ENCOUNTER_FAR_SPEED) happens during the far stretch rather than in the cruise before
+ * it, and the return to warp at the start of the next cruise are both checked here; their shape and bounds at every
  * level are checked in src/engine/Autopilot.test.ts. So is the quick return to warp once a planet
  * has left the screen, at the default level (docs/PLAN.md section 9, Phase 4).
  */
@@ -42,8 +43,10 @@ function collectErrors(page: Page): string[] {
 interface WarpLog {
   /** Highest ship speed in the first cruise, before the first encounter starts. */
   firstCruiseMax: number;
-  /** Ship speed on the first frame the encounter object's opacity reaches 0.1, or `null` until then. */
-  speedAtVisible: number | null;
+  /** Ship speed on the first frame of the first encounter (its spawn), or `null` until then. */
+  speedAtSpawn: number | null;
+  /** Ship speed on the first frame past the end of the planet's far stretch, or `null` until then. */
+  speedAtFarEnd: number | null;
   /** Ship time at which the first encounter ended (back to CRUISE), or `null` until then. */
   endedAt: number | null;
   /** Ship time at which the ship was back in warp (95% of the top speed) after it, or `null`. */
@@ -59,7 +62,7 @@ declare global {
   }
 }
 
-test('at the top speed the ship drops out of warp before a planet encounter and returns to warp after it', async ({ page }) => {
+test('at the top speed the ship stays in warp into a planet encounter, is out of it by the end of the far stretch, and returns to warp after it', async ({ page }) => {
   test.setTimeout(300_000);
   const errors = collectErrors(page);
   // Each 100 ms clock step runs exactly one engine frame of the capped dt; a tiny viewport keeps the
@@ -81,7 +84,7 @@ test('at the top speed the ship drops out of warp before a planet encounter and 
 
   await page.evaluate((warp) => {
     const hook = window.__elsewhere!;
-    const log: WarpLog = { firstCruiseMax: 0, speedAtVisible: null, endedAt: null, backInWarpAt: null, afterMax: 0, kinds: [] };
+    const log: WarpLog = { firstCruiseMax: 0, speedAtSpawn: null, speedAtFarEnd: null, endedAt: null, backInWarpAt: null, afterMax: 0, kinds: [] };
     window.__warpLog = log;
     let state = hook.snapshot().autopilot.state;
     let frames = hook.snapshot().frames;
@@ -98,7 +101,10 @@ test('at the top speed the ship drops out of warp before a planet encounter and 
         state = a.state;
       }
       if (a.encounterCount === 0) log.firstCruiseMax = Math.max(log.firstCruiseMax, speed);
-      if (log.speedAtVisible === null && a.encounterCount === 1 && a.fade >= 0.1) log.speedAtVisible = speed;
+      if (log.speedAtSpawn === null && a.encounterCount === 1) log.speedAtSpawn = speed;
+      if (log.speedAtFarEnd === null && a.encounterCount === 1 && a.farEnd !== null && a.remaining !== null && a.remaining <= a.farEnd) {
+        log.speedAtFarEnd = speed;
+      }
       if (log.endedAt !== null && a.state === 'CRUISE' && a.encounterCount === 1) {
         log.afterMax = Math.max(log.afterMax, speed);
         if (log.backInWarpAt === null && speed > warp) log.backInWarpAt = now.ship.time;
@@ -120,11 +126,14 @@ test('at the top speed the ship drops out of warp before a planet encounter and 
   });
 
   expect(log.kinds).toEqual(['planet']);
-  // In warp during the first cruise, out of it by the time the planet is noticeably visible (the ship
-  // lags its target by under 0.5 units per second there), and back in warp after the encounter.
+  // In warp during the first cruise and still at the spawn (the test default trip's first planet,
+  // small enough to have a far stretch, which the ship flies on from the top speed), out of it by the
+  // end of the far stretch (the planet 3° across), and back in warp after the encounter.
   expect(log.firstCruiseMax).toBeGreaterThan(0.95 * TOP_SPEED);
-  expect(log.speedAtVisible).not.toBeNull();
-  expect(log.speedAtVisible!).toBeLessThanOrEqual(ENCOUNTER_ARRIVAL_SPEED + 0.5);
+  expect(log.speedAtSpawn).not.toBeNull();
+  expect(log.speedAtSpawn!).toBeGreaterThan(0.95 * TOP_SPEED);
+  expect(log.speedAtFarEnd).not.toBeNull();
+  expect(log.speedAtFarEnd!).toBeLessThanOrEqual(ENCOUNTER_ARRIVAL_SPEED + 0.5);
   expect(log.endedAt).not.toBeNull();
   expect(log.afterMax).toBeGreaterThan(0.95 * TOP_SPEED);
   // The quick return to warp after a planet that left the screen leads the ship's lag; one target per

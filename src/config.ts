@@ -7,12 +7,26 @@
 export const DPR_CAP = 2;
 
 /**
- * Camera vertical field of view in degrees, and clip planes in world units. Placeholders until the
- * starfield is tuned. The vertical field of view is CAMERA_FOV_DEG up to 21:9 and narrower beyond it
- * (VIEW_WIDEST_ASPECT, `cameraFovDeg` in engine/renderSize.ts); the live value is the camera's `fov`.
+ * Camera vertical field of view in degrees, and clip planes in world units. The vertical field of
+ * view is CAMERA_FOV_DEG up to 21:9 and narrower beyond it (VIEW_WIDEST_ASPECT, `cameraFovDeg` in
+ * engine/renderSize.ts); the live value is the camera's `fov`.
+ *
+ * Depth precision: the encounter objects spawn far out (ENCOUNTER_DISTANCE, 8,000), and a 24-bit
+ * depth buffer resolves about z² / (CAMERA_NEAR × 2²⁴) world units at distance z: about 3.8 units
+ * at 8,000 with the near plane at 1 (it was 38 with 0.1, more than the 11-unit gap, at the least,
+ * between a ring's far side and the disc in front of it, so the far side could show through). The
+ * surface, its atmosphere shell and its ring never meet, and the shell and the ring's near side lie
+ * strictly in front of the disc, so the depth order, which the quantisation keeps, is always right;
+ * only the ring's far side needs the gap to be several steps (Planet.test.ts, e2e/rings.spec.ts).
+ * Nothing drawn comes within 1 unit of the camera: the near dust fades out over the
+ * STAR_NEAR_FADE_DISTANCE units beyond the near plane's distance, so a mote is gone as its head
+ * reaches the plane in the middle of the view and is at most about 10% bright where it does in a
+ * corner, and its streaks are clipped to the plane; nebula layers are hidden within
+ * NEBULA_NEAR_FADE_MIN_DISTANCE, and every object is passed at a clearance of more than 10 units. The far stars and galaxies are drawn at infinity, before everything else and with
+ * no depth writes, so the encounter objects, all inside CAMERA_FAR, paint over them.
  */
 export const CAMERA_FOV_DEG = 60;
-export const CAMERA_NEAR = 0.1;
+export const CAMERA_NEAR = 1;
 export const CAMERA_FAR = 10000;
 
 /** Renderer clear colour (deep space). */
@@ -113,7 +127,7 @@ export const STAR_TINT_STRENGTH = 0.3;
 /**
  * Fading, so wrapping never pops a star in or out. A star fades to 0 over the last
  * STAR_EDGE_FADE_WIDTH units before the cube boundary, and over the last STAR_NEAR_FADE_DISTANCE
- * units before the camera.
+ * units before the camera's near plane (CAMERA_NEAR), so none is cut off by it while visible.
  */
 export const STAR_EDGE_FADE_WIDTH = 150;
 export const STAR_NEAR_FADE_DISTANCE = 4;
@@ -248,23 +262,28 @@ export const ENCOUNTER_DRIFT_SETTLE_SECONDS = 5;
  * Dropping out of warp (docs/PLAN.md section 1: cruise is the screensaver, an encounter is the
  * exploration). Every encounter is flown as if the cruise speed were at most this arrival speed, in
  * units per second: `setCruiseSpeed` scales the encounter speed profile for min(cruise speed, arrival
- * speed), so at every speed level at or above the default the encounter, from its spawn to its end,
- * has exactly the default level's speed profile, and the slower levels (the reduced-motion start)
- * keep theirs. It is the default level's cruise speed (checked in Autopilot.test.ts).
+ * speed), so at every speed level at or above the default the encounter, from the end of its far
+ * stretch (ENCOUNTER_FAR_SPEED) to its end, has exactly the default level's speed profile, and the
+ * slower levels (the reduced-motion start) keep theirs. It is the default level's cruise speed
+ * (checked in Autopilot.test.ts).
  *
  * Above the arrival speed, the target speed eases (smoothstep) from the cruise speed down to the
- * arrival speed over ENCOUNTER_WARP_EXIT_SECONDS at the end of the cruise, and that ease ends
- * ENCOUNTER_WARP_EXIT_LEAD_SECONDS before the encounter starts. The ship lags its target by about
- * SHIP_SPEED_TAU_SECONDS, so the lead lets the lag settle: from the top speed the ship is within
- * about 3 units per second of the arrival speed at the spawn, and within 0.5 when the object
- * reaches opacity 0.1 (the spawn bound is checked in Autopilot.test.ts, the opacity bound in both
- * Autopilot.test.ts and EncounterView.test.ts). After the encounter, the target eases back
+ * hand-over speed over ENCOUNTER_WARP_EXIT_SECONDS at the end of the cruise, and that ease ends
+ * ENCOUNTER_WARP_EXIT_LEAD_SECONDS before the encounter starts. The hand-over speed is the arrival
+ * speed before a nebula or an object already too large at its spawn for a far stretch, and
+ * otherwise the speed the far stretch can fly on from (`farHandoverSpeed`): at the top level the
+ * cruise speed itself for most planets, asteroids and comets, which then drop out of warp on their
+ * far stretch instead. The ship lags its target by about SHIP_SPEED_TAU_SECONDS, so the lead lets the
+ * lag settle: from the top speed the ship is within about 3 units per second of the hand-over speed
+ * at the spawn, and within 0.5 of the arrival speed when a nebula reaches opacity 0.1 or a solid body
+ * leaves its far stretch (checked in Autopilot.test.ts, the far stretch in EncounterView.test.ts and
+ * e2e/warp.spec.ts too). After the encounter, the target eases back
  * up to the cruise speed at the start of the next cruise: quickly once the object has left the screen
  * (ENCOUNTER_VIEW_ENTRY_SECONDS, see VIEW_WIDEST_ASPECT), over ENCOUNTER_WARP_ENTRY_SECONDS otherwise
  * (the first cruise, from load, starts at the cruise speed: the ship accelerates from rest). All
  * three are cruise time, so they count toward the encounter interval. A cruise too short for them (an
  * interval below their sum, as in tests) never reaches the full cruise speed, and is still back at
- * the arrival speed ENCOUNTER_WARP_EXIT_LEAD_SECONDS before the encounter starts.
+ * the hand-over speed ENCOUNTER_WARP_EXIT_LEAD_SECONDS before the encounter starts.
  */
 export const ENCOUNTER_ARRIVAL_SPEED = 60;
 export const ENCOUNTER_WARP_EXIT_SECONDS = 10;
@@ -353,14 +372,20 @@ export const ENCOUNTER_BASE_SEED = 0x91b3_a5ba;
 
 /**
  * `D`: the planet is placed this far ahead along the heading when the encounter starts, so it is
- * also the spawn distance. Kept well inside CAMERA_FAR. A planet keeps its world size for the whole
- * encounter, so this and the planet radii (PLANET_ROCKY_RANGES, PLANET_GAS_RANGES, PLANET_ICY_RADIUS)
- * set how small it first appears: at spawn a median planet's disc spans under 3.5% of the view
- * height and the largest under 9% (about 37 and 97 px at 1080p), and the widest ring, thin and
- * translucent, under 23%; it fades in from opacity 0 there (checked in Planet.test.ts). At the default speed level and above
- * (every level at or above the arrival speed) the spawn is about 54 s before the closest approach.
+ * also the spawn distance (docs/PLAN.md section 6, Planets: it first appears as a star-like dot and
+ * grows). Inside CAMERA_FAR with room to spare, ring and side offset included (see CAMERA_NEAR for
+ * the depth precision there). A planet keeps its world size for the whole encounter, so this and the
+ * planet radii (PLANET_ROCKY_RANGES, PLANET_GAS_RANGES, PLANET_ICY_RADIUS) set how small it first
+ * appears. At 1080p, over 20,000 seeded planets, the disc with its atmosphere first spans p10/p50/p90/max
+ * 4.7/11.3/24.3/28.8 px (15.6/37.7/81.5/99.0 from 2,400 before #64), and no configured planet more
+ * than 30 px; ring included, 4.7/11.5/31.2/66.7 px: a ring is thin and translucent, and under 30 px
+ * the widest would need a spawn about 18,500 out, past CAMERA_FAR (checked in Planet.test.ts). It fades in from opacity 0 there over
+ * ENCOUNTER_FADE_IN_SECONDS, and the far stretch (ENCOUNTER_FAR_SPEED) flies most of the way
+ * there faster while it is still small. Asteroids and comets spawn as far out
+ * (ASTEROID_ENCOUNTER_DISTANCE, COMET_ENCOUNTER_DISTANCE); nebulae keep their own approach
+ * (NEBULA_ENCOUNTER_DISTANCE).
  */
-export const ENCOUNTER_DISTANCE = 2400;
+export const ENCOUNTER_DISTANCE = 8000;
 
 /**
  * `k`: the planet centre sits `radius × k` to the side of the path, which is the closest approach.
@@ -387,11 +412,12 @@ export const ENCOUNTER_CLEARANCE_MARGIN = 0.25;
  * The minimum speed and its band are tuned for the planet radii: the closest approach is
  * `radius × k`, so how fast the planet sweeps past in angle there is the speed over that distance.
  * At the default speed level the Phase 3 median planet (radius about 41, k = 2) peaks at about
- * 4.4°/s, and the ship reaches the closest approach about 54 s after the spawn (both checked in
+ * 4.4°/s, and the ship reaches the closest approach about 97 s after the spawn 8,000 out, its far
+ * stretch included (about 54 s after the spawn 2,400 out before #64; both checked in
  * EncounterView.test.ts). Seeded planets vary their radius and k, and pass at least
  * PLANET_MIN_PASS_DISTANCE from the path: none peaks above about 5°/s, under the 5.1°/s guard.
- * Faster levels drop to the arrival speed before the spawn (ENCOUNTER_ARRIVAL_SPEED), so they fly
- * this same profile and the same flyby. The slowdown and speed-up distances are not scaled down with
+ * Faster levels are back at the arrival speed by the end of the far stretch (ENCOUNTER_ARRIVAL_SPEED,
+ * ENCOUNTER_FAR_SPEED), so they fly this same profile and the same flyby. The slowdown and speed-up distances are not scaled down with
  * the radii: the ship needs that distance to slow down from the arrival speed within a few time
  * constants.
  */
@@ -402,8 +428,9 @@ export const ENCOUNTER_MIN_SPEED = 6;
  * reduced-motion start): one encounter would take about 350 s, about 69 s of it in FLYBY. With this
  * floor it took about 285 s, about 44 s in FLYBY, and a median planet peaks at about 2.8°/s, as it
  * did before the planets were made smaller; ending once the planet is off the screen (see
- * VIEW_WIDEST_ASPECT) brings it down to about 151 s for the first default-seed planet. Nebulae have
- * their own floor (NEBULA_MIN_SPEED_FLOOR).
+ * VIEW_WIDEST_ASPECT) brought it down to about 151 s for the first default-seed planet, spawned 2,400
+ * out; spawned 8,000 out (ENCOUNTER_DISTANCE) with its far stretch flown at about 50, about 316 s for
+ * a median planet. Nebulae have their own floor (NEBULA_MIN_SPEED_FLOOR).
  */
 export const ENCOUNTER_MIN_SPEED_FLOOR = 4;
 export const ENCOUNTER_SLOWDOWN_DISTANCE = 520;
@@ -411,19 +438,85 @@ export const ENCOUNTER_MIN_SPEED_DISTANCE = 16;
 export const ENCOUNTER_SPEEDUP_DISTANCE = 800;
 
 /**
- * Fade. From the spawn distance (the encounter's `D`, ENCOUNTER_DISTANCE by default), opacity eases
- * up from 0 to 1 over ENCOUNTER_FADE_IN_DISTANCE. The planet's size does not change (its spawn scale
- * is 1, as for nebulae), so it starts as a distant dot because it is far away, and grows on screen by
- * perspective alone. After passing, opacity eases back down to 0 over ENCOUNTER_FADE_OUT_DISTANCE,
- * reaching 0 at ENCOUNTER_DESPAWN_DISTANCE past the closest approach, where DEPARTURE ends at the
- * latest; in practice a planet encounter ends once the planet is off the screen (VIEW_WIDEST_ASPECT),
- * around the closest approach, and the planet is removed unseen before it fades. The fade
- * distances are long enough that at the top cruise speed one capped frame changes opacity by less
- * than 2%.
+ * Fade. From the spawn, opacity eases (smoothstep) up from 0 to 1 over ENCOUNTER_FADE_IN_SECONDS of
+ * the encounter's own time (`AutopilotState.encounterTime`), the same at every speed level, while the
+ * object is still a dot: it reads as a dot appearing, never as an object turning from dark to
+ * bright. Planets, asteroids and comets share it; nebulae keep their distance-based fade
+ * (NEBULA_FADE_IN_DISTANCE). The object's size does not change (its spawn scale is 1), so it starts
+ * as a distant dot because it is far away, and grows on screen by perspective alone. Short as it
+ * is, the fade is still smooth: a smoothstep over 4 s changes opacity by at most 1.5 × dt / 4 per
+ * frame, 0.6% at 60 FPS and 3.75% in a capped frame (DT_CAP_SECONDS; no ease that reaches 1 within
+ * 4 s could keep every capped frame under 2%, which takes 5 s even for a linear ramp), at every speed
+ * level. The view keeps a new object hidden until its shaders are ready (EncounterView), which with
+ * every program kept compiled (ProgramWarmup) is the first frame or two, when the fade is still under
+ * 1e-3, so nothing pops in.
+ *
+ * After passing, opacity eases back down to 0 over ENCOUNTER_FADE_OUT_DISTANCE, reaching 0 at
+ * ENCOUNTER_DESPAWN_DISTANCE past the closest approach, where DEPARTURE ends at the latest; in
+ * practice a planet encounter ends once the planet is off the screen (VIEW_WIDEST_ASPECT), around
+ * the closest approach, and the planet is removed unseen before it fades. The fade-out distance is
+ * long enough that at the top cruise speed one capped frame changes opacity by less than 2%.
  */
-export const ENCOUNTER_FADE_IN_DISTANCE = 1200;
+export const ENCOUNTER_FADE_IN_SECONDS = 4;
 export const ENCOUNTER_FADE_OUT_DISTANCE = 1200;
 export const ENCOUNTER_DESPAWN_DISTANCE = 1500;
+
+/**
+ * The far stretch (docs/PLAN.md section 6, Time and speed): spawned far out, a planet, an asteroid or
+ * a comet would take minutes to reach at the arrival speed, so the ship flies the first part of the
+ * approach faster, while the object is still small, and is back at the arrival speed, with no
+ * acceleration left, by the time the object's angular diameter reaches ENCOUNTER_FAR_MAX_ANGLE_DEG
+ * (or by the start of the slowdown, ENCOUNTER_SLOWDOWN_DISTANCE and the other kinds' equivalents,
+ * whichever comes first). From there on everything is exactly as before: the near-approach speed
+ * profile, the bearing-rate guard, the clearance and the off-screen speed-up (VIEW_WIDEST_ASPECT).
+ * The angular diameter is that of the sphere holding what is drawn of the object: a planet's
+ * atmosphere or its ring (`PlanetSpec.extent`), an asteroid field's bounding sphere, a comet's coma
+ * (its faint tails reach several degrees from the spawn on, and are left out). Nebulae have no far
+ * stretch.
+ *
+ * The ship's speed follows a curve in the distance travelled since the spawn: from its speed at the
+ * spawn up to ENCOUNTER_FAR_SPEED, held there, and back down to the arrival speed, each change a
+ * smootherstep in distance (no step in speed, acceleration or jerk) whose peak acceleration is about
+ * ENCOUNTER_FAR_ACCEL; the curve takes a lower peak where the stretch is too short for the whole rise
+ * and fall. A stretch shorter than the whole fall from ENCOUNTER_FAR_SPEED (about 1,480 units) is left
+ * out, as where the object is already past the threshold at the spawn (the largest planets and
+ * rings): the whole approach is then flown on the arrival speed's profile, as every approach was
+ * before #64, and no stretch is short enough to rise and fall again within a second or so, with a
+ * large jerk.
+ * The target speed leads the curve by the ship's lag (`target = v + SHIP_SPEED_TAU_SECONDS × dv/dt`,
+ * as the quick warp entry does), so the ship's speed itself follows it and arrives at the threshold
+ * at the arrival speed. Like the rest of the profile, the speeds scale with the level
+ * (`setCruiseSpeed`: about 50 at the slowest level) and the distances do not, so the acceleration
+ * scales with its square.
+ *
+ * Above the arrival speed the cruise drops out of warp only as far as the far stretch can fly on
+ * from (the highest speed it can fall from within its length; `farHandoverSpeed`): every far stretch
+ * is long enough to fall from the far speed, so at the top level the ship stays in warp, steady, to
+ * the spawn of every object with one and slows down during the far stretch, rather than slowing
+ * down, speeding up again and slowing down once more; before a nebula, or an object with no far
+ * stretch, it drops out of warp to the arrival speed as before.
+ *
+ * Measured over 200 seeded encounters of each kind on a 16:9 screen, from the spawn to the closest
+ * approach, p10/p50/p90/max in seconds (before #64, spawned 2,400 or 1,600 out: in brackets):
+ *
+ *   level   planet                  asteroid                comet
+ *   20      250/280/365/430 [150]   280/280/301/319 [148]   288/294/301/303 [180]
+ *   60      87/97/125/147 [54]      111/111/118/124 [67]    108/110/112/113 [72]
+ *   150     81/91/119/147 [53]      105/105/112/118 [67]    102/104/106/107 [72]
+ *
+ * A median planet is reached within twice the 54 s of before at the default level; a large or ringed
+ * one is past the threshold soon after its spawn (or at it), so it has little or no far stretch, and
+ * takes the longest. Nebulae are unchanged (55 s at the default level). The object first reaches 2°
+ * across, the end of the window in which it is still a tiny dot, p10/p50/p90 12/41/53 s after a
+ * planet's spawn at the default level (6/35/48 s at the top level, 36/123/160 s at the slowest), and
+ * at a median of about 59 s for an asteroid and 47 s for a comet. The ship's acceleration on the far
+ * stretch peaks at about 12.8 units per second per second at the default and top levels (1.4 at the
+ * slowest), and its jerk at about 5 per second cubed (6.7 at most, for a stretch just over the
+ * shortest, at the default level), with no step in the target speed at the spawn.
+ */
+export const ENCOUNTER_FAR_SPEED = 150;
+export const ENCOUNTER_FAR_ACCEL = 12;
+export const ENCOUNTER_FAR_MAX_ANGLE_DEG = 3;
 
 /*
  * Planets (docs/PLAN.md section 6, Planets). `planetParams(seed)` in engine/Planet.ts draws every
@@ -764,9 +857,9 @@ export const NEBULA_NOISE_OFFSET_RANGE = [-100, 100] as const;
  * bounding radius 5.5/11.9/33.4 (51.5 at most); the closest approach to the field centre
  * 31/41/57, and of each rock's centre 32/46/67 (never under ASTEROID_MIN_PASS_DISTANCE; a planet
  * passes at least 75 off); the main rock 13°/21°/35° across at its closest approach. At the default
- * level an asteroid encounter lasts about 53–70 s from its spawn and ends once the field is off the
- * screen, before its closest approach or within about 4 s after it (about 131–152 s at the slowest
- * level).
+ * level an asteroid encounter lasts about 96–128 s from its spawn 8,000 out, its far stretch included
+ * (53–70 s from 1,600 before #64), and ends once the field is off the screen, before its closest
+ * approach or within about 4 s after it (about 263–324 s at the slowest level, 131–152 s before).
  */
 
 /** Share of all encounters that are asteroids, in the long run (see the section comment). */
@@ -776,11 +869,13 @@ export const ENCOUNTER_ASTEROID_SHARE = 0.15;
 export const ENCOUNTER_ASTEROID_SHARE_BOUNDS = [0.1, 0.2] as const;
 
 /**
- * `D` for asteroids: the field centre is placed this far ahead, which is also the spawn distance.
- * Closer than for planets: a rock is small (the largest main rock, 24 across, is under 0.9° across
- * from here, about 16 px at 1080p), so it still starts as a dot.
+ * `D` for asteroids: the field centre is placed this far ahead, which is also the spawn distance. As
+ * for planets (ENCOUNTER_DISTANCE): at 1080p the field's bounding sphere first spans p10/p50/p90/max
+ * 1.3/2.8/7.9/12.3 px and the main rock 1–3 px (6.5/13.9/39.3/61.7 px and 6–14 px from 1,600 before
+ * #64; Asteroid.test.ts), so it first appears as a faint, star-like
+ * dot, and the far stretch (ENCOUNTER_FAR_SPEED) flies most of the way.
  */
-export const ASTEROID_ENCOUNTER_DISTANCE = 1600;
+export const ASTEROID_ENCOUNTER_DISTANCE = 8000;
 
 /**
  * `k` for an asteroid that brings no pass factor of its own (`AsteroidSpec.passFactor`); every
@@ -817,10 +912,10 @@ export const ASTEROID_MIN_SPEED_DISTANCE = 40;
 export const ASTEROID_SPEEDUP_DISTANCE = 800;
 
 /**
- * Asteroid fade (see the planet one). An asteroid encounter ends once the field is out of view, a
- * little after the closest approach, so the fade-out is not seen.
+ * Asteroid fade (see the planet one: it fades in over ENCOUNTER_FADE_IN_SECONDS). An asteroid
+ * encounter ends once the field is out of view, a little after the closest approach, so the fade-out
+ * is not seen.
  */
-export const ASTEROID_FADE_IN_DISTANCE = 1200;
 export const ASTEROID_FADE_OUT_DISTANCE = 1000;
 export const ASTEROID_DESPAWN_DISTANCE = 1200;
 
@@ -919,8 +1014,9 @@ export const ASTEROID_DETAIL = { main: 8, satellite: 3 } as const;
  * Measured over 2,000 seeds (Comet.test.ts checks the bounds): the nucleus 2.5–5 in radius, the
  * coma radius 26–42, the closest approach to the nucleus 110–165 (p10/p50/p90 about 110/122/155),
  * no vertex of either tail's tube nearer the path than 99, the ion tail 800–1,200 long and the dust
- * tail 450–750. With its longer slowdown (COMET_SLOWDOWN_DISTANCE), a comet is about 72 s from its
- * spawn to its closest approach at the default level and above (180 s at the slowest level); on a
+ * tail 450–750. With its longer slowdown (COMET_SLOWDOWN_DISTANCE), a comet is about 110 s from its
+ * spawn 8,000 out to its closest approach at the default level and 104 s at the top level, its far
+ * stretch included (294 s at the slowest level; 72 s and 180 s from 2,400 before #64); on a
  * 16:9 screen it leaves the screen, and the encounter ends, 2–4 s before that (3.3–7.5 s at the
  * slowest level), and the ship is at 50% of the cruise speed within 1.9 s of it leaving the screen
  * and at 90% within 3 s (3.4 s and 5.1 s at the top level; Autopilot.test.ts).
@@ -946,10 +1042,12 @@ export const ENCOUNTER_COMET_SHARE_BOUNDS = [0.06, 0.14] as const;
 
 /**
  * `D` for comets: the nucleus is placed this far ahead, which is also the spawn distance. As for
- * planets: the coma (at most 80 across) starts under 2° across, and the tails reach back toward the
- * ship to at most about 1,600 ahead of it, so the whole comet starts small and fades in from 0.
+ * planets (ENCOUNTER_DISTANCE): the coma (at most 84 across) starts under 0.6° across, about 10 px at
+ * 1080p, and the tails reach back toward the ship to at most about 7,200 ahead of it, so the whole
+ * comet starts small and fades in from 0, and the far stretch (ENCOUNTER_FAR_SPEED) flies most of
+ * the way.
  */
-export const COMET_ENCOUNTER_DISTANCE = 2400;
+export const COMET_ENCOUNTER_DISTANCE = 8000;
 
 /**
  * `k` for a comet that brings no pass factor of its own (`CometSpec.passFactor`); every seeded comet
@@ -978,9 +1076,9 @@ export const COMET_PASS_EXTRA = 0.5;
  * the planets' slowdown it would still be fast there (the tails measured up to 7.5°/s; no aim of the
  * comet's sun fixes that). Slowing from 1,000 out, the nucleus, at least COMET_MIN_PASS_DISTANCE off,
  * peaks at about 3.1°/s and the tails at about 4.3°/s at the default and top levels (Comet.test.ts).
- * The cost is a longer approach, a deliberate choice for a passively watched view: about 72 s from the
- * spawn to the closest approach at the default level and above (a planet takes about 54 s), 180 s at
- * the slowest. Like the other kinds, a comet encounter is flown from the arrival speed at the faster
+ * The cost is a longer approach, a deliberate choice for a passively watched view: about 110 s from
+ * the spawn to the closest approach at the default level (a median planet takes about 97 s) and 294 s
+ * at the slowest (72 s and 180 s from 2,400 before #64). Like the other kinds, a comet encounter is flown from the arrival speed at the faster
  * levels.
  */
 export const COMET_MIN_SPEED = 6;
@@ -991,10 +1089,10 @@ export const COMET_MIN_SPEED_DISTANCE = 16;
 export const COMET_SPEEDUP_DISTANCE = 800;
 
 /**
- * Comet fade (see the planet one). A comet encounter ends once the coma and both tails are off the
- * screen, a few seconds before the closest approach, so the fade-out is not seen.
+ * Comet fade (see the planet one: it fades in over ENCOUNTER_FADE_IN_SECONDS). A comet encounter ends
+ * once the coma and both tails are off the screen, a few seconds before the closest approach, so the
+ * fade-out is not seen.
  */
-export const COMET_FADE_IN_DISTANCE = 1200;
 export const COMET_FADE_OUT_DISTANCE = 1000;
 export const COMET_DESPAWN_DISTANCE = 1200;
 

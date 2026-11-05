@@ -6,6 +6,7 @@ import {
   ENCOUNTER_BASE_SEED,
   ENCOUNTER_CLEARANCE_MARGIN,
   ENCOUNTER_DISTANCE,
+  ENCOUNTER_FADE_IN_SECONDS,
   ENCOUNTER_MIN_SPEED,
   ENCOUNTER_MIN_SPEED_FLOOR,
   ENCOUNTER_SIDE_OFFSET_FACTOR,
@@ -22,6 +23,7 @@ import {
 } from '../config';
 import {
   DEFAULT_AUTOPILOT_PARAMS,
+  activeEncounterTargetSpeed,
   planetPassFactor,
   planetViewRadiusFactor,
   createTravel,
@@ -242,7 +244,10 @@ describe('EncounterView', () => {
         // Opacity follows the fade curve, and the planet keeps its world size (its full radius)
         // from spawn to despawn, so only perspective changes its size on screen.
         const remaining = travel.autopilot.remaining;
-        expect(planet.uniforms.uOpacity.value).toBeCloseTo(encounterOpacity(encounter.plan, remaining), 12);
+        expect(planet.uniforms.uOpacity.value).toBeCloseTo(
+          encounterOpacity(encounter.plan, remaining, DEFAULT_ENCOUNTER_PROFILE, travel.autopilot.encounterTime),
+          12,
+        );
         expect(encounterScale(encounter.plan, remaining)).toBe(1);
         expect(planet.object.scale.toArray()).toEqual([planet.params.radius, planet.params.radius, planet.params.radius]);
         expect(planet.object.visible).toBe(travel.autopilot.fade > 0);
@@ -534,7 +539,8 @@ function onSomeScreen(closest: number, remaining: number, viewRadius: number): b
  * One median-radius planet encounter at speed level `level`, simulated from load at dt = 1/60 with
  * the default (jittered) interval: the peak bearing rate (°/s) while the planet may be on some screen
  * (`onSomeScreen`), the 30°→80° bearing sweep, the times from the spawn to the closest approach and
- * to the end (s), and the ship's speed when the planet first reaches opacity 0.1 and at the closest
+ * to the end (s) and from the end of the far stretch to the closest approach, and the ship's speed
+ * when the planet first reaches opacity 0.1, at the end of the far stretch and at the closest
  * approach. The bearing is the angle between the planned path and the line of sight to the planet
  * centre. The encounter's slow phase ends once the planet is off the screen, which on a narrow screen
  * may be before the closest approach; until then the speed profile is the same on every screen. To
@@ -556,6 +562,8 @@ function medianPlanetFlyby(level: number, planet: PlanetSpec = { radius: medianP
   let at80 = Number.NaN;
   let speedAtVisible = Number.NaN;
   let speedAtClosest = Number.NaN;
+  let farEndAt = Number.NaN;
+  let speedAtFarEnd = Number.NaN;
   let prevBearing = Number.NaN;
   let peak = 0;
   for (let i = 0; i < 1e6 && Number.isNaN(endedAt); i++) {
@@ -568,6 +576,10 @@ function medianPlanetFlyby(level: number, planet: PlanetSpec = { radius: medianP
     if (encounter === null) continue;
     expect(encounter.plan.radius).toBe(radius);
     if (Number.isNaN(speedAtVisible) && autopilot.fade >= 0.1) speedAtVisible = ship.speed;
+    if (Number.isNaN(farEndAt) && encounter.plan.spawnDistance - autopilot.remaining >= (encounter.farRoom ?? 0)) {
+      farEndAt = ship.time;
+      speedAtFarEnd = ship.speed;
+    }
     if (Number.isNaN(closestAt) && autopilot.remaining <= 0) {
       closestAt = ship.time;
       speedAtClosest = ship.speed;
@@ -588,7 +600,10 @@ function medianPlanetFlyby(level: number, planet: PlanetSpec = { radius: medianP
     sweep: at80 - at30,
     approach: closestAt - spawnedAt,
     duration: endedAt - spawnedAt,
+    /** From the end of the far stretch (the planet at the threshold angle, or the slowdown) to the closest approach. */
+    nearApproach: closestAt - farEndAt,
     speedAtVisible,
+    speedAtFarEnd,
     speedAtClosest,
   };
 }
@@ -629,8 +644,12 @@ describe('the travel step', () => {
       const factor = encounterSpeed / base.cruiseSpeed;
       const scaledMin = DEFAULT_ENCOUNTER_PROFILE.minSpeed * factor;
       expect(params.cruiseSpeed).toBe(speed);
-      // Distances, and so the fades and transitions, are unchanged.
-      expect({ ...params.profile, minSpeed: 0 }).toEqual({ ...DEFAULT_ENCOUNTER_PROFILE, minSpeed: 0 });
+      // Distances, and so the fades and transitions, are unchanged; the far stretch's speed scales
+      // like the rest, and its acceleration with the square (its distances are unchanged too).
+      const speeds = { minSpeed: 0, farSpeed: 0, farAccel: 0 };
+      expect({ ...params.profile, ...speeds }).toEqual({ ...DEFAULT_ENCOUNTER_PROFILE, ...speeds });
+      expect(params.profile.farSpeed).toBeCloseTo(DEFAULT_ENCOUNTER_PROFILE.farSpeed * factor, 12);
+      expect(params.profile.farAccel).toBeCloseTo(DEFAULT_ENCOUNTER_PROFILE.farAccel * factor * factor, 12);
       if (speed >= ENCOUNTER_ARRIVAL_SPEED) {
         // At and above the arrival speed (the default level's), exactly the default level's profile.
         if (speed > ENCOUNTER_ARRIVAL_SPEED) outOfWarp++;
@@ -714,56 +733,67 @@ describe('the travel step', () => {
       expect(minClearance).toBeGreaterThanOrEqual(radius * (1 + ENCOUNTER_CLEARANCE_MARGIN));
       expect(minClearance).toBeGreaterThanOrEqual(closest * (1 - 1e-9));
       expect(minClearance).toBeCloseTo(closest, 0);
-      // Fades in gradually: no frame changes the opacity by more than 2% while it is in view.
+      // Fades in gradually, over ENCOUNTER_FADE_IN_SECONDS of its own time whatever the level: no
+      // frame changes the opacity by more than a smoothstep's steepest slope over that time (0.6% at
+      // 60 FPS, 3.75% in a capped frame), and the fade-out is never seen.
       expect(worstFadeStep).toBeGreaterThan(0);
-      expect(worstFadeStep).toBeLessThan(0.02);
+      expect(worstFadeStep).toBeLessThan((1.5 * dt) / ENCOUNTER_FADE_IN_SECONDS + 1e-9);
       // Slows to the floor, not below it, so it does not crawl, and ends once the planet is off the
-      // screen, about at its closest approach: one encounter takes about 151 s (about 153 s when it
-      // waited for the closest approach, about 285 s when it ran on to the despawn distance, and about
-      // 350 s with the unfloored minimum of 2).
+      // screen, about at its closest approach: from its spawn 8,000 out, one encounter takes about
+      // 316 s at this level, its far stretch flown at about 50 (about 151 s from the 2,400 spawn before
+      // #64; about 285 s when it ran on to the despawn distance, and about 350 s with the unfloored
+      // minimum of 2).
       expect(slowest).toBeCloseTo(ENCOUNTER_MIN_SPEED_FLOOR, 9);
-      expect(endedAt - startedAt).toBeLessThan(170);
+      expect(endedAt - startedAt).toBeLessThan(330);
     },
   );
 
   // Measured with this same simulation before #36, for that median planet (radius about 102, at
   // D = 1600, minimum speed 15) at the default speed level: the bearing peaked at 4.25°/s, 38.6 s
-  // after the spawn.
+  // after the spawn. Before #64 (spawned at D = 2400 and flown at the arrival speed from there), the
+  // median planet was reached 53.5 s after the spawn at the default level and above.
   const BEFORE_PEAK_DEG_PER_S = 4.25;
-  const BEFORE_APPROACH_S = 38.6;
+  const BEFORE_64_APPROACH_S = 53.5;
   const fasterLevels = SHIP_SPEED_LEVELS.map((cruiseSpeed, level) => ({ level, cruiseSpeed })).filter(
     ({ level }) => level >= SHIP_DEFAULT_SPEED_LEVEL,
   );
 
   it.each(fasterLevels)(
-    'at speed level $level ($cruiseSpeed u/s) a median planet sweeps past no faster in angle than before #36, and is reached within 1.5× the time',
+    'at speed level $level ($cruiseSpeed u/s) a median planet sweeps past no faster in angle than before #36, and is reached within 2× the time it was before #64',
     ({ level }) => {
       const flyby = medianPlanetFlyby(level);
       // The closest approach is 0.4× as far as before, so the ship passes it 0.4× as fast: about
-      // 4.4°/s. Faster levels drop out of warp first, so they fly the same flyby.
+      // 4.4°/s. Faster levels are out of warp by the end of the far stretch, so they fly the same flyby.
       expect(flyby.peak).toBeGreaterThan(BEFORE_PEAK_DEG_PER_S * 0.8);
       expect(flyby.peak).toBeLessThanOrEqual(BEFORE_PEAK_DEG_PER_S * 1.2);
-      // About 54 s.
-      expect(flyby.approach).toBeLessThanOrEqual(BEFORE_APPROACH_S * 1.5);
-      // Out of warp before the planet is noticeably visible, and past it at near the minimum speed
-      // (the ship lags the profile by about its time constant).
-      expect(flyby.speedAtVisible).toBeLessThanOrEqual(ENCOUNTER_ARRIVAL_SPEED + 0.5);
+      // From the spawn 8,000 out, about 98 s at the default level (its far stretch rises from the
+      // arrival speed) and 92 s at the top level (it holds the top speed from the spawn).
+      expect(flyby.approach).toBeLessThanOrEqual(BEFORE_64_APPROACH_S * 2);
+      // At the arrival speed, and no longer accelerating, as the far stretch ends (the planet 3°
+      // across), and past it at near the minimum speed (the ship lags the profile by about its time
+      // constant).
+      expect(flyby.speedAtFarEnd).toBeLessThanOrEqual(ENCOUNTER_ARRIVAL_SPEED + 0.05);
+      expect(flyby.speedAtFarEnd).toBeGreaterThanOrEqual(ENCOUNTER_ARRIVAL_SPEED - 0.05);
       expect(flyby.speedAtClosest).toBeGreaterThanOrEqual(ENCOUNTER_MIN_SPEED);
       expect(flyby.speedAtClosest).toBeLessThan(ENCOUNTER_MIN_SPEED * 1.5);
     },
   );
 
-  it("at the top speed level a median planet's flyby matches the default level's: peak bearing rate within ±20%, the same sweep and approach time", () => {
+  it("at the top speed level a median planet's flyby matches the default level's: peak bearing rate within ±20%, the same sweep and near approach", () => {
     const top = medianPlanetFlyby(SHIP_SPEED_LEVELS.length - 1);
     const normal = medianPlanetFlyby(SHIP_DEFAULT_SPEED_LEVEL);
     // Before the drop out of warp the top level peaked at about 37°/s (8.4× the default level),
     // swept from 30° to 80° in 1.7 s and reached the planet 17 s after the spawn.
     expect(Math.abs(top.peak - normal.peak)).toBeLessThanOrEqual(0.2 * normal.peak);
-    // The same within a few frames: from the spawn on the profile is the same, and the ship has
-    // settled to the arrival speed by the time the planet is noticeably visible.
+    // The same within a few frames from the end of the far stretch on: the profile is the same, and
+    // the ship is back at the arrival speed there at both levels.
     expect(Math.abs(top.sweep - normal.sweep)).toBeLessThanOrEqual(0.1);
-    expect(Math.abs(top.approach - normal.approach)).toBeLessThanOrEqual(0.5);
-    expect(Math.abs(top.duration - normal.duration)).toBeLessThanOrEqual(0.5);
+    expect(Math.abs(top.nearApproach - normal.nearApproach)).toBeLessThanOrEqual(0.5);
+    // The top level stays in warp into the far stretch, so it skips the rise to the far speed the
+    // default level flies first: a few seconds sooner there, and never later.
+    expect(top.approach).toBeLessThanOrEqual(normal.approach);
+    expect(normal.approach - top.approach).toBeLessThan(10);
+    expect(Math.abs(normal.duration - top.duration - (normal.approach - top.approach))).toBeLessThanOrEqual(0.5);
   });
 
   // Every seeded planet, as the engine plans it: its radius and the k it is planned with.
@@ -797,10 +827,12 @@ describe('the travel step', () => {
   it.each(fasterLevels)(
     'at speed level $level no seeded planet sweeps past faster in angle than the guard allows a median planet before #36 (1.2 × 4.25°/s)',
     ({ level }) => {
-      // The speed profile depends only on the remaining distance, so the ship flies the same
-      // remaining distances at the same times past every planet, and a planet passed at `c` is at
-      // bearing atan2(c, remaining). One flown trace then gives every seeded planet's peak bearing
-      // rate, exactly as `medianPlanetFlyby` measures it.
+      // From the end of its far stretch on (the planet still small and far beyond any bearing-rate
+      // concern), the speed profile depends only on the remaining distance, so the ship flies the
+      // same remaining distances at the same times past every planet, and a planet passed at `c` is
+      // at bearing atan2(c, remaining). One flown trace then gives every seeded planet's peak bearing
+      // rate as `medianPlanetFlyby` measures it (within the 1e-6 of speed each planet's own far
+      // stretch leaves behind).
       const dt = 1 / 60;
       // Flown to the despawn distance (no view): the profile any planet is flown with while on screen.
       const travel = createTravel({ ...DEFAULT_AUTOPILOT_PARAMS, nebulaShare: 0, asteroidShare: 0, cometShare: 0, planetFor: () => ({ radius: 50 }), view: null }, DEFAULT_SHIP_PARAMS);
@@ -827,12 +859,14 @@ describe('the travel step', () => {
       // at about 4.66°/s, at its closest approach, and so does the median planet.
       expect(worst.peak).toBeLessThanOrEqual(BEFORE_PEAK_DEG_PER_S * 1.2);
       expect(closest.closest).toBeCloseTo(PLANET_MIN_PASS_DISTANCE, 6);
-      // Flown for real, the worst and the closest planet peak exactly as computed; and with the live
-      // view (the default 16:9 screen), whose encounter ends once the planet is off it, no higher.
+      // Flown for real, the worst and the closest planet peak as computed; and with the live view (the
+      // default 16:9 screen), whose encounter ends once the planet is off it, no higher.
       for (const p of [worst, closest]) {
         const flyby = medianPlanetFlyby(level, p.planet);
-        expect(flyby.peak).toBeCloseTo(p.peak, 6);
-        expect(medianPlanetFlyby(level, p.planet, DEFAULT_AUTOPILOT_PARAMS.view).peak).toBeLessThanOrEqual(p.peak + 1e-9);
+        expect(flyby.peak).toBeCloseTo(p.peak, 4);
+        // (Each planet flies its own far stretch, which leaves the ship within about 1e-6 of the same
+        // speed from the threshold on.)
+        expect(medianPlanetFlyby(level, p.planet, DEFAULT_AUTOPILOT_PARAMS.view).peak).toBeLessThanOrEqual(p.peak + 1e-5);
       }
     },
   );
@@ -874,9 +908,7 @@ describe('the travel step', () => {
       step(0);
       expect(travel.autopilot.state).toBe('APPROACH');
       expect(travel.autopilot.remaining).toBe(remainingBefore);
-      expect(travel.shipParams.targetSpeed).toBe(
-        encounterTargetSpeed(remainingBefore, encounterCruiseSpeed(travel.autopilotParams), travel.autopilotParams.profile),
-      );
+      expect(travel.shipParams.targetSpeed).toBe(activeEncounterTargetSpeed(travel.autopilot.encounter!, remainingBefore, travel.autopilotParams));
       expect(travel.shipParams.targetSpeed).toBe(frozen.autopilot.targetSpeed);
 
       // (Read through a function: TypeScript would otherwise keep the narrowing from the loop above.)
