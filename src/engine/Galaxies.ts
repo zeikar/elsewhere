@@ -12,7 +12,10 @@
  * - Each galaxy's direction is fixed for the trip, and so is the heading (SHIP_HEADING), so the sky
  *   never turns. They sit inside the camera's view on a 16:9 screen (GALAXY_PLACEMENT_ASPECT), their
  *   centres within the middle GALAXY_PLACEMENT_SCREEN_SHARE of its width and height, so every one is
- *   wholly on screen from the first frame, at least GALAXY_MIN_SEPARATION_DEG apart.
+ *   wholly on such a screen from the first frame, at least GALAXY_MIN_SEPARATION_DEG apart. The first
+ *   is drawn over the same share of a 9:16 screen (GALAXY_FIRST_PLACEMENT_ASPECT) instead, so every
+ *   trip with a galaxy shows one on any screen from 9:16 to 21:9. No galaxy's edge comes within
+ *   GALAXY_CENTRE_CLEARANCE_DEG of the screen centre, where the encounters first appear.
  * - All galaxies are instances of one quad (InstancedBufferGeometry + ShaderMaterial): one draw call.
  *   Each quad is laid out in direction space, around the galaxy's unit direction, along two tangent
  *   axes whose lengths are the tangents of its half-sizes. Its angular size is therefore a property
@@ -36,11 +39,13 @@
 import { AdditiveBlending, BufferAttribute, InstancedBufferAttribute, InstancedBufferGeometry, Mesh, ShaderMaterial, type Matrix4 } from 'three';
 import {
   CAMERA_FOV_DEG,
+  GALAXY_CENTRE_CLEARANCE_DEG,
   GALAXY_CORE_BRIGHTNESS_MAX,
   GALAXY_CORE_BRIGHTNESS_MIN,
   GALAXY_COUNT_WEIGHTS,
   GALAXY_DISC_BRIGHTNESS_MAX,
   GALAXY_DISC_BRIGHTNESS_MIN,
+  GALAXY_FIRST_PLACEMENT_ASPECT,
   GALAXY_MIN_SEPARATION_DEG,
   GALAXY_PLACEMENT_ASPECT,
   GALAXY_PLACEMENT_SCREEN_SHARE,
@@ -92,6 +97,10 @@ export interface GalaxyOptions {
    */
   tanX: number;
   tanY: number;
+  /** `tanX` for the first galaxy of the trip only (a narrower band, so it is on narrower screens too). */
+  firstTanX: number;
+  /** Smallest angle between a galaxy's centre and -Z (the screen centre), in radians. */
+  centreClearance: number;
   /** Smallest angle between two galaxies, in radians. */
   minSeparation: number;
   coreBrightnessMin: number;
@@ -105,6 +114,8 @@ const DEG = Math.PI / 180;
 /** The view galaxies are placed in: the camera's on a GALAXY_PLACEMENT_ASPECT screen, looking along -Z. */
 const PLACEMENT_VIEW = cameraFrustum(CAMERA_FOV_DEG, GALAXY_PLACEMENT_ASPECT, VIEW_WIDEST_ASPECT);
 const PLACEMENT_TAN_Y = Math.tan(PLACEMENT_VIEW.halfFovY);
+/** The view the first galaxy is placed in: the camera's on a GALAXY_FIRST_PLACEMENT_ASPECT screen. */
+const FIRST_PLACEMENT_VIEW = cameraFrustum(CAMERA_FOV_DEG, GALAXY_FIRST_PLACEMENT_ASPECT, VIEW_WIDEST_ASPECT);
 
 export const DEFAULT_GALAXY_OPTIONS: Readonly<GalaxyOptions> = {
   countWeights: GALAXY_COUNT_WEIGHTS,
@@ -113,6 +124,9 @@ export const DEFAULT_GALAXY_OPTIONS: Readonly<GalaxyOptions> = {
   spiralShare: GALAXY_SPIRAL_SHARE,
   tanX: GALAXY_PLACEMENT_SCREEN_SHARE * PLACEMENT_TAN_Y * PLACEMENT_VIEW.aspect,
   tanY: GALAXY_PLACEMENT_SCREEN_SHARE * PLACEMENT_TAN_Y,
+  firstTanX: GALAXY_PLACEMENT_SCREEN_SHARE * Math.tan(FIRST_PLACEMENT_VIEW.halfFovY) * FIRST_PLACEMENT_VIEW.aspect,
+  // The size is drawn after the direction, so this allows for the largest.
+  centreClearance: (GALAXY_SIZE_MAX_DEG / 2 + GALAXY_CENTRE_CLEARANCE_DEG) * DEG,
   minSeparation: GALAXY_MIN_SEPARATION_DEG * DEG,
   coreBrightnessMin: GALAXY_CORE_BRIGHTNESS_MIN,
   coreBrightnessMax: GALAXY_CORE_BRIGHTNESS_MAX,
@@ -127,7 +141,7 @@ export const DEFAULT_GALAXY_OPTIONS: Readonly<GalaxyOptions> = {
  */
 export const GALAXY_SEED_INDEX = 0xffff_ffff;
 
-/** Draws to try for each galaxy's direction before giving up on that galaxy (min separation). */
+/** Draws to try for each galaxy's direction before giving up on that galaxy (min separation, centre clearance). */
 const PLACEMENT_TRIES = 32;
 
 /** The galaxies' seed for a trip seed (a uint32). */
@@ -173,16 +187,22 @@ export function generateGalaxies(tripSeed: number, options: Readonly<GalaxyOptio
   const count = galaxyCount(random(), options.countWeights);
   const galaxies: Galaxy[] = [];
   const cosSeparation = Math.cos(options.minSeparation);
+  const cosCentreClearance = Math.cos(options.centreClearance);
   for (let i = 0; i < count; i++) {
-    // A direction in the view along the fixed heading (-Z, world +Y up), clear of the galaxies before
-    // it: a point drawn uniformly over the placement rectangle one unit ahead, normalised.
+    // A direction in the view along the fixed heading (-Z, world +Y up), clear of the screen centre
+    // and of the galaxies before it: a point drawn uniformly over the placement rectangle one unit
+    // ahead (the narrower first one for the first galaxy), normalised.
+    const tanX = i === 0 ? options.firstTanX : options.tanX;
     let direction: Vec3 | null = null;
     for (let t = 0; t < PLACEMENT_TRIES && direction === null; t++) {
-      const x = options.tanX * (2 * random() - 1);
+      const x = tanX * (2 * random() - 1);
       const y = options.tanY * (2 * random() - 1);
       const l = Math.hypot(x, y, 1);
       const d = { x: x / l, y: y / l, z: -1 / l };
-      const clear = galaxies.every((g) => g.direction.x * d.x + g.direction.y * d.y + g.direction.z * d.z < cosSeparation);
+      // -d.z is the cosine of the angle from -Z.
+      const clear =
+        -d.z < cosCentreClearance &&
+        galaxies.every((g) => g.direction.x * d.x + g.direction.y * d.y + g.direction.z * d.z < cosSeparation);
       if (clear) direction = d;
     }
     if (direction === null) break;

@@ -4,10 +4,13 @@ import {
   CAMERA_FAR,
   CAMERA_FOV_DEG,
   CAMERA_NEAR,
+  VIEW_WIDEST_ASPECT,
   DT_CAP_SECONDS,
   ENCOUNTER_BASE_SEED,
   FAR_STAR_BRIGHTNESS_MAX,
+  GALAXY_CENTRE_CLEARANCE_DEG,
   GALAXY_COUNT_WEIGHTS,
+  GALAXY_FIRST_PLACEMENT_ASPECT,
   GALAXY_MIN_SEPARATION_DEG,
   GALAXY_PLACEMENT_ASPECT,
   GALAXY_SIZE_MAX_DEG,
@@ -31,8 +34,9 @@ import {
   type Galaxy,
 } from './Galaxies';
 import { NEBULA_RENDER_ORDER } from './Nebula';
+import { cameraFovDeg } from './renderSize';
 import { ATMOSPHERE_RENDER_ORDER, SURFACE_RENDER_ORDER } from './Planet';
-import { hash } from './seed';
+import { hash, mulberry32 } from './seed';
 import { DEFAULT_SHIP_PARAMS, type Vec3 } from './Ship';
 import { STARFIELD_RENDER_ORDER } from './Starfield';
 
@@ -145,6 +149,7 @@ describe('galaxy generation', () => {
     for (const g of galaxies) {
       const d = g.direction;
       expect(Math.hypot(d.x, d.y, d.z)).toBeCloseTo(1, 12);
+      // (The first of each trip within the narrower first band: see the 9:16 test below.)
       // The centre within the placement rectangle one unit ahead of the camera.
       expect(d.z).toBeLessThan(0);
       expect(Math.abs(d.x / -d.z)).toBeLessThanOrEqual(DEFAULT_GALAXY_OPTIONS.tanX + 1e-12);
@@ -191,6 +196,58 @@ describe('galaxy generation', () => {
       for (const g of set) expect(ndcExtent(g, camera), `seed ${seed}`).toBeLessThan(1);
     }
     expect(trips).toBeGreaterThan(1500);
+  });
+
+  it('places the first galaxy of every trip wholly on every screen from 9:16 to 21:9, so every trip with a galaxy shows one there', () => {
+    // The same share of a 9:16 screen's width (the vertical field of view stays CAMERA_FOV_DEG up to
+    // 21:9), and of the 16:9 height.
+    expect(GALAXY_FIRST_PLACEMENT_ASPECT).toBe(9 / 16);
+    expect(DEFAULT_GALAXY_OPTIONS.firstTanX).toBeCloseTo(0.8 * Math.tan(30 * DEG) * (9 / 16), 12);
+    expect(DEFAULT_GALAXY_OPTIONS.firstTanX).toBeLessThan(DEFAULT_GALAXY_OPTIONS.tanX);
+    const aspects = [9 / 16, 3 / 4, 1, 4 / 3, 16 / 10, 16 / 9, VIEW_WIDEST_ASPECT];
+    const views = aspects.map((aspect) => engineCamera(SHIP_HEADING, cameraFovDeg(CAMERA_FOV_DEG, aspect, VIEW_WIDEST_ASPECT), aspect));
+    let trips = 0;
+    let widest = 0;
+    let widestX = 0;
+    for (const seed of manySeeds(4000)) {
+      const first = generateGalaxies(seed)[0];
+      if (first === undefined) continue;
+      trips++;
+      const d = first.direction;
+      expect(Math.abs(d.x / -d.z)).toBeLessThanOrEqual(DEFAULT_GALAXY_OPTIONS.firstTanX + 1e-12);
+      widestX = Math.max(widestX, Math.abs(d.x / -d.z));
+      for (const camera of views) {
+        const extent = ndcExtent(first, camera);
+        expect(extent, `seed ${seed}, aspect ${camera.aspect}`).toBeLessThan(0.97);
+        widest = Math.max(widest, extent);
+      }
+    }
+    expect(trips).toBeGreaterThan(3000);
+    // Spread over the band, out toward its sides (measured: the farthest corner at 0.914, on a 9:16 screen).
+    expect(widestX).toBeGreaterThan(0.95 * DEFAULT_GALAXY_OPTIONS.firstTanX);
+    expect(widest).toBeGreaterThan(0.9);
+  });
+
+  it('keeps every galaxy’s edge at least GALAXY_CENTRE_CLEARANCE_DEG from the screen centre, where encounters appear, with the count drawn for every seed', () => {
+    // Every planet, asteroid and comet first appears 0.2–4° off the centre (-Z, the fixed heading).
+    expect(GALAXY_CENTRE_CLEARANCE_DEG).toBeGreaterThan(4);
+    expect(DEFAULT_GALAXY_OPTIONS.centreClearance).toBeCloseTo((GALAXY_SIZE_MAX_DEG / 2 + GALAXY_CENTRE_CLEARANCE_DEG) * DEG, 12);
+    let nearest = Number.POSITIVE_INFINITY;
+    let galaxies = 0;
+    for (const seed of manySeeds(10_000)) {
+      const set = generateGalaxies(seed);
+      // The retry budget never runs out: every seed has the count its first draw gives.
+      expect(set.length, `seed ${seed}`).toBe(galaxyCount(mulberry32(galaxySeed(seed))(), GALAXY_COUNT_WEIGHTS));
+      for (const g of set) {
+        const edge = angleBetween(g.direction, SHIP_HEADING) - g.size / 2;
+        expect(edge, `seed ${seed}`).toBeGreaterThanOrEqual(GALAXY_CENTRE_CLEARANCE_DEG * DEG - 1e-12);
+        nearest = Math.min(nearest, edge);
+        galaxies++;
+      }
+    }
+    expect(galaxies).toBeGreaterThan(14_000);
+    // Not a loose bound: some galaxy's edge comes within a degree of it (the size is drawn after the direction).
+    expect(nearest).toBeLessThan((GALAXY_CENTRE_CLEARANCE_DEG + 1) * DEG);
   });
 });
 

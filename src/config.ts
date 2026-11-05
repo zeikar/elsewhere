@@ -202,16 +202,36 @@ export const GALAXY_SIZE_MAX_DEG = 3.5;
 export const GALAXY_SPIRAL_SHARE = 0.65;
 
 /**
- * The heading is fixed (SHIP_HEADING), so a galaxy is seen only if it is in the view. Each sits in
- * the camera's view on a screen of GALAXY_PLACEMENT_ASPECT (16:9, VIEW_DEFAULT_ASPECT; the vertical
- * field of view CAMERA_FOV_DEG): its centre is drawn uniformly over the middle
- * GALAXY_PLACEMENT_SCREEN_SHARE of the screen's width and height (normalised device coordinates within
- * ±this), which leaves room for its own size, so every galaxy is wholly on such a screen from the
- * first frame (Galaxies.test.ts). A wider screen shows them all too, up to VIEW_WIDEST_ASPECT; a
- * narrower one, or one much wider, may cut off one near the side or the top and bottom.
+ * The heading is fixed (SHIP_HEADING), so a galaxy is seen only if it is in the view, and the
+ * placement depends on the trip seed only, never on the screen. Each sits in the camera's view on a
+ * screen of GALAXY_PLACEMENT_ASPECT (16:9, VIEW_DEFAULT_ASPECT; the vertical field of view
+ * CAMERA_FOV_DEG): its centre is drawn uniformly over the middle GALAXY_PLACEMENT_SCREEN_SHARE of the
+ * screen's width and height (normalised device coordinates within ±this), which leaves room for its
+ * own size, so every galaxy is wholly on such a screen from the first frame (Galaxies.test.ts).
+ *
+ * The vertical field of view stays CAMERA_FOV_DEG on a narrower screen, so it shows less at the
+ * sides: a 9:16 phone held upright shows only about ±18° of the ±39° the galaxies span. The first
+ * galaxy of every trip is therefore drawn over the same share of a GALAXY_FIRST_PLACEMENT_ASPECT
+ * (9:16) screen instead, so it is wholly on every screen from 9:16 to VIEW_WIDEST_ASPECT (21:9), and
+ * every trip with a galaxy shows at least one there (Galaxies.test.ts). The others keep the 16:9
+ * placement, so a narrower screen misses those toward the sides (measured over 4,000 seeds: about
+ * 26% of all galaxies are never seen at 9:16, 20% at 3:4, 12% at 1:1 and 2% at 4:3). A screen wider
+ * than 21:9 narrows the vertical field of view, so one much wider cuts off those toward the top and
+ * bottom, the first galaxy included (at 32:9, 15% are never seen and 7% of trips with a galaxy show
+ * none).
  */
 export const GALAXY_PLACEMENT_ASPECT = 16 / 9;
+export const GALAXY_FIRST_PLACEMENT_ASPECT = 9 / 16;
 export const GALAXY_PLACEMENT_SCREEN_SHARE = 0.8;
+
+/**
+ * Smallest angle, in degrees, between the screen centre (the fixed heading, -Z) and the edge of any
+ * galaxy. Every planet, asteroid and comet first appears 0.2–4° off the centre and lingers there
+ * through the far stretch, so none fades in on top of a galaxy. A galaxy's size is drawn after its
+ * direction, so the check takes the largest (GALAXY_SIZE_MAX_DEG): a centre within
+ * GALAXY_SIZE_MAX_DEG / 2 + this of -Z is drawn again.
+ */
+export const GALAXY_CENTRE_CLEARANCE_DEG = 4.5;
 
 /** Smallest angle between two galaxies, in degrees, so they never overlap. */
 export const GALAXY_MIN_SEPARATION_DEG = 10;
@@ -324,9 +344,8 @@ export const ENCOUNTER_WARP_ENTRY_SECONDS = 8;
  *   all do; its tails trail back and away from the path, so it leaves with its coma (see Comets).
  * - A nebula is large and soft, and its layers reach across the path, so it is off the screen only
  *   once every layer lies behind the camera: the ship is past the farthest any layer reaches along the
- *   path (`nebulaViewExtent`, a bound drawn from NEBULA_RANGES in core radii), and the heading has not
- *   turned so far back that the view could reach behind (checked from the heading against the cone
- *   around the view).
+ *   path (`nebulaViewExtent`, a bound drawn from NEBULA_RANGES in core radii), along the fixed
+ *   heading.
  *
  * The heading is fixed (SHIP_HEADING), and moving forward along it never brings an object back into
  * the view, so an object once off screen would stay off; it is removed then. Until then the target

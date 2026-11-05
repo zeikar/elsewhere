@@ -53,7 +53,7 @@ Each automated check is written as `file` — `test title`, using the title as i
 - `src/engine/encounter.test.ts` — `a ship flying the straight path never gets closer than radius × k`
 - `src/engine/Autopilot.test.ts` — `keeps clear of the planet, never jumps and never turns (radius $radius, cruise $cruiseSpeed)`
 - `src/engine/Autopilot.test.ts` — `the heading is the fixed -Z at every step, in every state and at every state change`
-- `src/engine/fixedHeading.test.ts` — `every %s target (the planet, each asteroid rock, the comet nucleus) is passed at its planned closest distance, within 0.5%%, at every level and screen shape`
+- `src/engine/fixedHeading.test.ts` — `every %s target (the planet, each asteroid rock, the comet nucleus) is passed at its planned closest distance, within half a percent, at every level and screen shape`
 - `src/engine/fixedHeading.test.ts` — `over 600 s of the default trip, through planet and nebula encounters, every state and speed-level changes, the camera's world rotation never changes, so neither do the far stars and galaxies on screen`
 - `src/engine/Autopilot.test.ts` — `%s: clearance ≥ radius × (1 + margin) and no frame jumps`
 - `src/engine/Autopilot.test.ts` — `the drop out of warp and the return to it are smooth around $kind encounters: no step in the target speed or the speed at any frame (dt $dt)`

@@ -135,7 +135,6 @@ import {
 } from '../config';
 import {
   DEFAULT_ENCOUNTER_PROFILE,
-  angleBetween,
   encounterOffset,
   encounterOpacity,
   encounterRemaining,
@@ -143,7 +142,6 @@ import {
   farHandoverSpeed,
   farStretchRoom,
   farStretchTargetSpeed,
-  frustumConeHalfAngle,
   frustumSphereMargin,
   planEncounter,
   smoothstep,
@@ -1130,10 +1128,8 @@ const viewScratch: Vec3 = { x: 0, y: 0, z: 0 };
  *   them: it is out of view only once every one of those spheres is.
  * - Nebula: its layers reach across the path, so every layer is on screen until the ship is past it.
  *   In world units, how far the ship is past every layer (`-(remaining + depth)`, from
- *   `nebulaViewExtent`), and only once the heading has not turned so far from the planned direction
- *   that the view could reach a layer: every point of a layer is then at least
- *   π/2 + atan(past / lateral) from the planned direction, so at least that minus the heading's turn
- *   from the forward axis, which must exceed the view's corner half-angle (`frustumConeHalfAngle`).
+ *   `nebulaViewExtent`). The heading is fixed, so it is the planned direction, and every layer is then
+ *   behind the camera.
  *
  * The heading is fixed (SHIP_HEADING), so the margin only grows as the ship moves on, for every kind
  * (`frustumSphereMargin`; a nebula's `past` grows with the distance travelled): once out of view, the
@@ -1156,11 +1152,7 @@ export function encounterViewMargin(
   }
   if (encounter.kind === 'comet') return cometViewMargin(encounter, ship, view);
   if (encounter.kind === 'nebula') {
-    const { depth, lateral } = nebulaViewExtent(plan.radius, plan.closestDistance);
-    const past = -(remaining + depth);
-    if (!(past > 0)) return past;
-    const nearest = Math.PI / 2 + Math.atan(past / lateral);
-    return nearest - angleBetween(ship.heading, plan.direction) > frustumConeHalfAngle(view) ? past : 0;
+    return -(remaining + nebulaViewExtent(plan.radius, plan.closestDistance).depth);
   }
   // Every kind is handled above: a new kind fails to compile here until it names its bounds.
   const unhandled: never = encounter;

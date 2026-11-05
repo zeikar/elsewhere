@@ -158,7 +158,7 @@ describe('the real pass (flown with the live view, past the end of the encounter
   const TRIPS = 4;
 
   it.each(['planet', 'asteroid', 'comet'] as const)(
-    'every %s target (the planet, each asteroid rock, the comet nucleus) is passed at its planned closest distance, within 0.5%%, at every level and screen shape',
+    'every %s target (the planet, each asteroid rock, the comet nucleus) is passed at its planned closest distance, within half a percent, at every level and screen shape',
     (kind) => {
       let worstLow = Number.POSITIVE_INFINITY;
       let worstHigh = 0;
