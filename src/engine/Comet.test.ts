@@ -378,7 +378,8 @@ describe('the camera never passes through a comet (docs/PLAN.md section 6, Varie
     // nucleus and the tails are measured from the captured plan until the ship is a coma radius past
     // the closest approach. Measured (105 comets, 4:3 to 32:9): at level 0 the nucleus at 0.969 × the
     // planned distance at the nearest, at levels 1 and 2 at 0.990 ×; tail vertices at 0.96 × (closest
-    // − coma radius) at the nearest.
+    // − coma radius) at the nearest. This set (54 comets, 6 per level and aspect): at level 0 the
+    // nucleus at 0.974 ×, at levels 1 and 2 at 0.997 ×; tail vertices at 0.978 × at the nearest.
     const aspects = [4 / 3, 16 / 9, 32 / 9];
     let checked = 0;
     let endedEarly = 0;

@@ -5,9 +5,10 @@
  *   production reads no such override) makes every encounter a comet: it runs the full state cycle,
  *   draws the coma and tails on the engine canvas, fading in from nothing, never brings the camera
  *   within the minimum pass distance of the nucleus while the encounter lasts (and, measured on past
- *   its end, keeps the real pass near the planned distance and outside the coma), compiles no program (the nucleus draws with the
- *   rocky planet surface program and the coma and tails with the halo program, both kept compiled by
- *   ProgramWarmup), and leaves every GPU resource at its baseline. The engine canvas is screenshotted
+ *   its end, keeps the real pass near the planned distance and outside the coma), compiles no
+ *   program (the nucleus draws with the rocky planet surface program and the coma and tails with
+ *   the halo program, both kept compiled by ProgramWarmup), and leaves every GPU resource at its
+ *   baseline. The engine canvas is screenshotted
  *   mid-approach and on the frame the comet has left the screen (the first DEPARTURE frame; the
  *   encounter ends as soon as the coma and the tails are off the screen, a few seconds short of the
  *   closest approach), and the share of the view the glow brightens is measured at both.
@@ -329,11 +330,16 @@ test('a forced comet encounter draws its coma and tails, runs the full cycle, co
   expect(log.minDistance).toBeLessThan(Math.hypot(params.radius * params.passFactor, log.remainingAtMin!) * 1.01);
   // The real pass, measured on until the ship is a coma radius past the closest approach: the comet
   // left the scene short of it, and the next cruise eases the heading drift back up while the ship is
-  // still short of the nucleus, so the real pass can be a little nearer than the planned one (at least
-  // 0.969 × it at the slowest level, Comet.test.ts; issue #62 removes the drift), and well outside the coma.
+  // still short of the nucleus, so the real pass can be a little nearer than the planned one (issue
+  // #62 removes the drift), and well outside the coma. A smoke check of the measurement: this flies
+  // at the top level with encounterInterval=1 (measured 0.998 × the planned distance);
+  // Comet.test.ts covers the dip at level 0. The upper bound fails unless the post-end samples
+  // reach the closest approach: the in-encounter ones alone stay near hypot(planned,
+  // remainingAtEnd), well above it (the widest real pass is 1.013 × at level 0, 1.004 × at the top).
   expect(log.remainingAtEnd).not.toBeNull();
   expect(log.remainingAtEnd!).toBeGreaterThan(0);
   expect(log.realMinDistance).toBeGreaterThanOrEqual(0.95 * params.radius * params.passFactor);
+  expect(log.realMinDistance).toBeLessThan(1.02 * params.radius * params.passFactor);
   expect(log.realMinDistance).toBeGreaterThan(params.radius * (1 + ENCOUNTER_CLEARANCE_MARGIN));
   // While it lasts: two geometries (the nucleus and the glow), at most two draw calls more, no program.
   expect(log.peak.geometries).toBe(log.baseline.geometries + 2);
