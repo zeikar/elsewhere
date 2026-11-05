@@ -51,7 +51,7 @@ import { FrameClock } from './FrameClock';
 import { FrameStats } from './FrameStats';
 import { Galaxies, generateGalaxies, type Galaxy } from './Galaxies';
 import { nebulaParams, nebulaProgramMaterials, type Nebula } from './Nebula';
-import { cameraFovDeg, computeRenderSize } from './renderSize';
+import { cameraFovDeg, cameraFrustum, computeRenderSize, type ViewFrustum } from './renderSize';
 import { planetParams, planetProgramMaterials, type Planet } from './Planet';
 import { ProgramWarmup } from './ProgramWarmup';
 import { DEFAULT_SHIP_PARAMS, type ShipState } from './Ship';
@@ -329,6 +329,11 @@ export class Engine {
     return this.travel.autopilotParams.arrivalSpeed;
   }
 
+  /** The view the autopilot tests encounter objects against: the camera's, set on every resize (read-only view). */
+  getAutopilotView(): Readonly<ViewFrustum> | null {
+    return this.travel.autopilotParams.view;
+  }
+
   /** The current encounter's planet, or `null` outside planet encounters (read-only view; do not modify). */
   getPlanet(): Planet | null {
     return this.encounterView.getPlanet();
@@ -426,10 +431,13 @@ export class Engine {
     // updateStyle = false: CSS keeps the canvas at full viewport size.
     this.renderer.setSize(size.cssWidth, size.cssHeight, false);
     this.camera.aspect = size.cssWidth / size.cssHeight;
-    // Beyond 21:9 the vertical field of view narrows, so the view never reaches past the autopilot's
-    // view cone (config.ts, VIEW_WIDEST_ASPECT).
+    // Beyond 21:9 the vertical field of view narrows, so the horizontal one stays at the 21:9 one
+    // (config.ts, VIEW_WIDEST_ASPECT).
     this.camera.fov = cameraFovDeg(CAMERA_FOV_DEG, this.camera.aspect, VIEW_WIDEST_ASPECT);
     this.camera.updateProjectionMatrix();
+    // The autopilot ends an encounter's slow phase once its object is off this screen, so encounter
+    // timing follows the screen's shape (config.ts, VIEW_DEFAULT_ASPECT).
+    this.travel.autopilotParams.view = cameraFrustum(CAMERA_FOV_DEG, this.camera.aspect, VIEW_WIDEST_ASPECT);
     this.starfield.setRenderSize(size);
     this.farStarfield.setRenderSize(size);
     // Setting the canvas size clears it; redraw now so a paused view stays correct.

@@ -171,6 +171,15 @@ export interface E2EHookSnapshot {
     kind: EncounterKind | null;
     /** Side of the path the encounter object sits on, or `null` in CRUISE. */
     side: EncounterSide | null;
+    /**
+     * How far the encounter object is off the autopilot's view (`encounterViewMargin`): positive once
+     * no part of it is on screen; `null` with no encounter.
+     */
+    viewMargin: number | null;
+    /** The view the autopilot tests against (the camera's: aspect and half the vertical field of view, radians). */
+    view: { aspect: number; halfFovY: number } | null;
+    /** Whether the latest encounter ended off screen, so this cruise returns to warp with the quick entry. */
+    entryQuick: boolean;
   };
   /** Objects in the scene besides the two star layers and the galaxies (the encounter planet, nebula or asteroid). */
   planets: number;
@@ -344,6 +353,7 @@ export function installE2EHook(engine: Engine): void {
       const ship = engine.getShip();
       const info = engine.getRendererInfo();
       const autopilot = engine.getAutopilot();
+      const autopilotView = engine.getAutopilotView();
       const planet = engine.getPlanet();
       let planetView: E2EHookSnapshot['planet'] = null;
       if (planet !== null && autopilot.encounter !== null) {
@@ -472,6 +482,9 @@ export function installE2EHook(engine: Engine): void {
           closestDistance: autopilot.encounter?.plan.closestDistance ?? null,
           kind: autopilot.encounter?.kind ?? null,
           side: autopilot.encounter?.side ?? null,
+          viewMargin: Number.isFinite(autopilot.viewMargin) ? autopilot.viewMargin : null,
+          view: autopilotView === null ? null : { aspect: autopilotView.aspect, halfFovY: autopilotView.halfFovY },
+          entryQuick: autopilot.entryQuick,
         },
         planets: engine.getPlanetCount(),
         planet: planetView,

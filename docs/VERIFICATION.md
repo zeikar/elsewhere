@@ -51,6 +51,9 @@ Each automated check is written as `file` — `test title`, using the title as i
 - `src/engine/Autopilot.test.ts` — `keeps clear of the planet, never jumps and turns smoothly (radius $radius, cruise $cruiseSpeed)`
 - `src/engine/Autopilot.test.ts` — `%s: clearance ≥ radius × (1 + margin) and no frame jumps`
 - `src/engine/Autopilot.test.ts` — `the drop out of warp and the return to it are smooth around $kind encounters: no step in the target speed or the speed at any frame (dt $dt)`
+- `src/engine/Autopilot.test.ts` — `the quick entry (after an object left the screen): the ship itself follows a smootherstep to the cruise speed, no steeper than its max rate, with no step and a bounded jerk`
+- `src/engine/Autopilot.test.ts` — `level %i: over the default trip’s first 20 planets the ship is at 50% and 90% of the cruise speed within the limits of leaving the screen`
+- `e2e/warp.spec.ts` — `at the default speed the ship is at 50% and 90% of the cruise speed within 2.5 s and 5 s of the planet leaving the screen`
 - `src/engine/Planet.test.ts` — `the atmosphere shell stays inside the guaranteed clearance, so the camera never enters it`
 - `src/engine/EncounterView.test.ts` — `the planned straight path crosses the ring plane of 1,000 seeded ringed planets only beyond the ring, at any heading and elevation`
 - `src/engine/EncounterView.test.ts` — `the ship, flown frame by frame at every level, never crosses a ring or comes within its clearance: 90 ringed encounters`
@@ -76,12 +79,14 @@ Each automated check is written as `file` — `test title`, using the title as i
 - `src/engine/Nebula.test.ts` — `every layer fades out continuously and is 0 before the camera is within the minimum of its plane (dt $dt, level $level)`
 - `src/engine/EncounterView.test.ts` — `keeps a new planet hidden until its compile settles, then follows the fade`
 - `src/engine/EncounterView.test.ts` — `keeps a new nebula hidden until its compile settles`
-- `src/engine/Autopilot.test.ts` — `planets at level %i, k from 1.6 to 6 and elevations from -0.6 to 0.6: while in the 21:9 view the ship is never faster than on main, and it is never in view again after the encounter ends`
-- `src/engine/Autopilot.test.ts` — `ringed planets at level %i, the widest ring, k from its clearance to 6, tilts and elevations from -0.6 to 0.6: while the planet or its ring is in the 21:9 view the ship is never faster than on main, and neither is in view again after the encounter ends`
-- `src/engine/Autopilot.test.ts` — `nebulae at level %i, elevations from -0.6 to 0.6: while any layer is in the 21:9 view the ship is never faster than on main, and none is in view again after the encounter ends`
-- `src/engine/Autopilot.test.ts` — `asteroids at level %i, seeded single rocks and fields, elevations from -0.6 to 0.6: while any rock is in the 21:9 view the ship is never faster than on main, and none is in view again after the encounter ends`
+- `src/engine/Autopilot.test.ts` — `planets at level %i, k from 1.6 to 6, elevations from -0.6 to 0.6, at every aspect: while on screen the ship is never faster than on main, and it is never on screen again after the encounter ends`
+- `src/engine/Autopilot.test.ts` — `ringed planets at level %i, the widest ring, k from its clearance to 6, tilts and elevations from -0.6 to 0.6: while the planet or its ring is on screen the ship is never faster than on main, and neither is on screen again after the encounter ends`
+- `src/engine/Autopilot.test.ts` — `nebulae at level %i, elevations from -0.6 to 0.6: while any layer is on screen the ship is never faster than on main, and none is on screen again after the encounter ends`
+- `src/engine/Autopilot.test.ts` — `asteroids at level %i, seeded single rocks and fields, elevations from -0.6 to 0.6: while any rock is on screen the ship is never faster than on main, and none is on screen again after the encounter ends`
 - `e2e/rings.spec.ts` — `a ring shows in front of its planet and against the sky, and the planet hides the ring behind it`
-- `src/engine/renderSize.test.ts` — `keeps the whole view inside the autopilot view cone at every aspect ratio`
+- `src/engine/Autopilot.test.ts` — `frustumSphereMargin matches a real camera: positive exactly when no point of the sphere projects on screen`
+- `src/engine/Autopilot.test.ts` — `at $name, with the heading held, an object once off screen would stay off screen for the rest of its pass`
+- `src/engine/renderSize.test.ts` — `is the camera view the engine sets up: the aspect, and half the vertical field of view of cameraFovDeg`
 - `e2e/encounter.spec.ts` — `three encounters run CRUISE → APPROACH → FLYBY → DEPARTURE → CRUISE and free their GPU resources`
 - Manual: watch a few encounters, either on the live site (the first planet appears within about a minute) or on the e2e build with a short interval (`npm run build:e2e && npx vite preview --outDir dist-e2e`, then open `/elsewhere/?encounterInterval=5`, adding `&encounterKind=asteroid` for asteroids alone). Stars, planets, nebulae and asteroids should fade in and out with no visible pop. Smoothness on screen is a visual judgement. The `Starfield.test.ts` checks above test `starFade` in `src/engine/Starfield.ts`, the TypeScript mirror of the shader's star fade, so the GLSL that actually runs on the GPU is covered only by this manual step.
 
@@ -128,6 +133,7 @@ Each automated check is written as `file` — `test title`, using the title as i
 - `src/engine/Starfield.test.ts` — `are written into the Starfield material uniforms on setRenderSize`
 - `src/engine/FarStarfield.test.ts` — `setRenderSize writes the applied DPR, pixel size = base size × applied DPR and the viewport into its uniforms`
 - `src/engine/renderSize.test.ts` — `rounds fractional backing sizes down, like WebGLRenderer.setSize`
+- `src/engine/renderSize.test.ts` — `is the camera view the engine sets up: the aspect, and half the vertical field of view of cameraFovDeg`
 
 ## 12. After 30 minutes, memory and FPS have not degraded noticeably.
 

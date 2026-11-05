@@ -21,6 +21,7 @@ import {
   ENCOUNTER_SLOWDOWN_DISTANCE,
   ENCOUNTER_SPEEDUP_DISTANCE,
 } from '../config';
+import type { ViewFrustum } from './renderSize';
 import type { Vec3 } from './Ship';
 
 export interface Encounter {
@@ -181,7 +182,8 @@ export const DEFAULT_ENCOUNTER_PROFILE: Readonly<EncounterProfile> = {
  * on the camera's roll, and contains the view at every narrower aspect ratio too, since the vertical
  * field of view is fixed and a narrower screen only shows less at the sides. At `aspect` = 21:9
  * (config.ts, VIEW_WIDEST_ASPECT) it also contains the view at every wider aspect ratio, where the
- * engine narrows the vertical field of view instead (`cameraFovDeg` in renderSize.ts).
+ * engine narrows the vertical field of view instead (`cameraFovDeg` in renderSize.ts), so an object
+ * outside it is off every screen. The autopilot tests the live view itself (`frustumSphereMargin`).
  */
 export function viewConeHalfAngle(fovDeg: number, aspect: number): number {
   const tanHalf = Math.tan((fovDeg * Math.PI) / 360);
@@ -197,15 +199,80 @@ export function angleBetween(a: Readonly<Vec3>, b: Readonly<Vec3>): number {
 }
 
 /**
- * How far, in radians, a sphere of radius `radius` centred at `offset` from the camera lies outside
- * the cone of half-angle `halfAngle` around `forward`: the angle between `forward` and the centre,
- * minus the sphere's angular radius, minus `halfAngle`. Positive means no part of the sphere is in the
- * cone; zero or negative means some part may be. A camera inside the sphere gives -π.
+ * Half-angle, in radians, of the narrowest cone around the camera's forward axis that contains
+ * `view`: the angle from the forward axis to its corners (`viewConeHalfAngle` for that view).
  */
-export function sphereViewMargin(offset: Readonly<Vec3>, forward: Readonly<Vec3>, radius: number, halfAngle: number): number {
-  const distance = Math.hypot(offset.x, offset.y, offset.z);
-  if (!(distance > radius)) return -Math.PI;
-  return angleBetween(forward, offset) - Math.asin(radius / distance) - halfAngle;
+export function frustumConeHalfAngle(view: Readonly<ViewFrustum>): number {
+  return Math.atan(Math.tan(view.halfFovY) * Math.hypot(1, view.aspect));
+}
+
+/**
+ * How far, in world units, a sphere of radius `radius` centred at `offset` from the camera lies
+ * outside `view` for a camera looking along `forward` with world +Y up (as `lookAt` sets it): the
+ * distance from the centre to the view's infinite pyramid (bounded by its four side planes), minus
+ * the radius. Positive means no part of the sphere is on screen; zero or negative means some part may
+ * be (inside the pyramid the distance counts negative, to its nearest side plane). Exact, so it is
+ * positive as soon as the sphere has left the screen, also past a corner. Pure and allocation-free.
+ *
+ * Monotonic along the heading: with `forward` held, moving the camera forward never brings a sphere
+ * back into view. The pyramid `K` contains `forward`, so `K + t·forward ⊂ K` for t ≥ 0, and the
+ * distance from `c - t·forward` to `K` never decreases as t grows.
+ *
+ * A (nearly) vertical `forward`, where `lookAt` has no up to go by and the roll is undefined, falls
+ * back to the cone around the forward axis that contains the view whatever its roll
+ * (`frustumConeHalfAngle`), and measures the margin along that cone.
+ */
+export function frustumSphereMargin(
+  offset: Readonly<Vec3>,
+  forward: Readonly<Vec3>,
+  radius: number,
+  view: Readonly<ViewFrustum>,
+): number {
+  const fl = Math.hypot(forward.x, forward.y, forward.z);
+  const fx = forward.x / fl;
+  const fy = forward.y / fl;
+  const fz = forward.z / fl;
+  // right = forward × up(0, 1, 0), up' = right × forward: the camera basis lookAt builds.
+  let rx = -fz;
+  let rz = fx;
+  const rl = Math.hypot(rx, rz);
+  if (!(rl > 1e-9)) {
+    const d = Math.hypot(offset.x, offset.y, offset.z);
+    const angle = angleBetween(forward, offset) - frustumConeHalfAngle(view);
+    return angle >= Math.PI / 2 ? d - radius : d * Math.sin(Math.max(0, angle)) - radius;
+  }
+  rx /= rl;
+  rz /= rl;
+  const ux = -rz * fy;
+  const uy = rz * fx - rx * fz;
+  const uz = rx * fy;
+  // Camera coordinates, folded into the top-right quadrant: the pyramid is symmetric about both axes.
+  const a = Math.abs(offset.x * rx + offset.z * rz);
+  const b = Math.abs(offset.x * ux + offset.y * uy + offset.z * uz);
+  const c = offset.x * fx + offset.y * fy + offset.z * fz;
+  const ty = Math.tan(view.halfFovY);
+  const tx = ty * view.aspect;
+  // Signed distances to the right and top side planes (outward normals (1, 0, -tx) and (0, 1, -ty)).
+  const nx = Math.hypot(1, tx);
+  const ny = Math.hypot(1, ty);
+  const dR = (a - tx * c) / nx;
+  const dT = (b - ty * c) / ny;
+  if (dR <= 0 && dT <= 0) return Math.max(dR, dT) - radius;
+  // Outside: the nearest point of the pyramid lies inside a face, on the corner edge, or at the apex.
+  let best = Math.hypot(a, b, c);
+  if (dR > 0) {
+    // Foot on the right plane: (a, b, c) - dR × (1, 0, -tx) / nx; inside the face if within the top.
+    const zr = c + (dR * tx) / nx;
+    if (zr >= 0 && b <= ty * zr) best = Math.min(best, dR);
+  }
+  if (dT > 0) {
+    const zt = c + (dT * ty) / ny;
+    if (zt >= 0 && a <= tx * zt) best = Math.min(best, dT);
+  }
+  const el = Math.hypot(tx, ty, 1);
+  const t = (a * tx + b * ty + c) / el;
+  if (t > 0) best = Math.min(best, Math.hypot(a - (tx * t) / el, b - (ty * t) / el, c - t / el));
+  return best - radius;
 }
 
 /** Smoothstep: 0 at or below `edge0`, 1 at or beyond `edge1`, C¹ in between. `edge0 > edge1` is allowed. */

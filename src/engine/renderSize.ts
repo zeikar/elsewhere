@@ -47,3 +47,27 @@ export function cameraFovDeg(fovDeg: number, aspect: number, widestAspect: numbe
   const tanHalf = Math.tan((fovDeg * Math.PI) / 360);
   return (Math.atan((tanHalf * widestAspect) / aspect) * 360) / Math.PI;
 }
+
+/**
+ * The camera's view as the autopilot tests it (docs/PLAN.md section 9, Phase 4: the encounter's slow
+ * phase ends once its object is off the screen): the infinite pyramid from the camera along its
+ * forward axis, bounded by its four side planes. The camera looks along the heading with world +Y up
+ * (`lookAt`), so this and the heading fix it completely. Plain data, so the pure autopilot can take
+ * it in its params (`AutopilotParams.view`); the engine replaces it on every resize.
+ */
+export interface ViewFrustum {
+  /** Width / height of the view. */
+  aspect: number;
+  /** Half the vertical field of view, in radians, in (0, π/2). */
+  halfFovY: number;
+}
+
+/**
+ * The view of a camera with base vertical field of view `fovDeg` (degrees) on a screen of aspect
+ * ratio `aspect` (width / height), as the engine sets it up (`cameraFovDeg`: the vertical field of
+ * view narrows beyond `widestAspect`). An invalid aspect gives 1 (a square view).
+ */
+export function cameraFrustum(fovDeg: number, aspect: number, widestAspect: number): ViewFrustum {
+  const a = Number.isFinite(aspect) && aspect > 0 ? aspect : 1;
+  return { aspect: a, halfFovY: (cameraFovDeg(fovDeg, a, widestAspect) * Math.PI) / 360 };
+}

@@ -98,6 +98,9 @@ test.describe('at deviceScaleFactor 2', () => {
     const tanHalf = (deg: number): number => Math.tan((deg * Math.PI) / 360);
     expect(wide.cameraFov).toBeLessThan(CAMERA_FOV_DEG);
     expect(tanHalf(wide.cameraFov) * wide.cameraAspect).toBeCloseTo(tanHalf(CAMERA_FOV_DEG) * VIEW_WIDEST_ASPECT, 6);
+    // The autopilot tests encounter objects against this same, live view.
+    expect(wide.autopilot.view!.aspect).toBeCloseTo(wide.cameraAspect, 9);
+    expect(wide.autopilot.view!.halfFovY).toBeCloseTo((wide.cameraFov * Math.PI) / 360, 9);
     expect(errors).toEqual([]);
   });
 });
