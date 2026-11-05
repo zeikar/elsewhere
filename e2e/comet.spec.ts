@@ -7,8 +7,9 @@
  *   within the minimum pass distance of the nucleus, compiles no program (the nucleus draws with the
  *   rocky planet surface program and the coma and tails with the halo program, both kept compiled by
  *   ProgramWarmup), and leaves every GPU resource at its baseline. The engine canvas is screenshotted
- *   mid-approach and at the closest approach, and the share of the view the glow brightens is
- *   measured at both.
+ *   mid-approach and on the frame the comet has left the screen (the first DEPARTURE frame; the
+ *   encounter ends as soon as the coma and the tails are off the screen, a few seconds short of the
+ *   closest approach), and the share of the view the glow brightens is measured at both.
  * - The look: three seeded comets, one per family, on the preview canvas, screenshotted for review.
  * - Performance under SwiftShader: a comet encounter against a rocky planet's, in the engine, with no
  *   program compiled during either and no stall in the frames that create the object or first draw it.
@@ -102,14 +103,18 @@ interface CometLog {
   peak: Resources;
   /** Frames whose object count or kind does not match the state, or whose program count changed. */
   errors: string[];
-  /** Smallest distance from the camera to the nucleus, in world units. */
+  /** Smallest distance from the camera to the nucleus, in world units, and the remaining distance to the closest approach then. */
   minDistance: number;
+  remainingAtMin: number | null;
   /** The comet's opacity in the first frame it is drawn. */
   firstOpacity: number | null;
   /** Snapshot taken when the watcher paused the engine late in the approach (250 short of the closest approach), the tails stretched past the camera's side. */
   pausedAt: E2EHookSnapshot | null;
-  /** Snapshot taken when the watcher paused the engine at the closest approach (the first DEPARTURE frame). */
-  pausedAtClosest: E2EHookSnapshot | null;
+  /**
+   * Snapshot taken when the watcher paused the engine on the first DEPARTURE frame: once the comet is
+   * off the screen (before the closest approach), or at the closest approach should it still be on it.
+   */
+  pausedAtDeparture: E2EHookSnapshot | null;
 }
 
 declare global {
@@ -135,9 +140,10 @@ function watch(page: Page): Promise<void> {
       peak: { geometries: 0, textures: 0, programs: 0, calls: 0 },
       errors: [],
       minDistance: Number.POSITIVE_INFINITY,
+      remainingAtMin: null,
       firstOpacity: null,
       pausedAt: null,
-      pausedAtClosest: null,
+      pausedAtDeparture: null,
     };
     window.__cometLog = log;
     const tick = () => {
@@ -164,14 +170,17 @@ function watch(page: Page): Promise<void> {
           programs: Math.max(log.peak.programs, r.programs),
           calls: Math.max(log.peak.calls, r.calls),
         };
-        log.minDistance = Math.min(log.minDistance, comet.distance);
+        if (comet.distance < log.minDistance) {
+          log.minDistance = comet.distance;
+          log.remainingAtMin = a.remaining;
+        }
         if (log.firstOpacity === null && comet.visible) log.firstOpacity = comet.opacity;
         if (log.pausedAt === null && comet.visible && comet.opacity >= 0.9 && a.remaining !== null && a.remaining <= 250) {
           hook.pause();
           log.pausedAt = hook.snapshot();
-        } else if (log.pausedAt !== null && log.pausedAtClosest === null && a.state === 'DEPARTURE') {
+        } else if (log.pausedAt !== null && log.pausedAtDeparture === null && a.state === 'DEPARTURE') {
           hook.pause();
-          log.pausedAtClosest = hook.snapshot();
+          log.pausedAtDeparture = hook.snapshot();
         }
       }
       prev = s;
@@ -229,33 +238,37 @@ test('a forced comet encounter draws its coma and tails, runs the full cycle, co
   const approach = { lit: shareAbove(image, LIT_THRESHOLD), bright: shareAbove(image, BRIGHT_THRESHOLD) };
   const cruise = { lit: shareAbove(cruiseShot, LIT_THRESHOLD), bright: shareAbove(cruiseShot, BRIGHT_THRESHOLD) };
 
-  // The closest approach: the coma beside the camera, the tails behind it.
+  // DEPARTURE: the coma has left the screen to the side, and the tails, trailing back and away from
+  // the path, with it.
   await page.evaluate(() => window.__elsewhere!.resume());
-  await expect.poll(async () => (await cometLog(page)).pausedAtClosest !== null, { timeout: 300_000, intervals: [500] }).toBe(true);
-  const closestShot = await shot(page, '#scene');
-  writeFileSync(test.info().outputPath('comet-closest.png'), closestShot.png);
-  await test.info().attach('engine canvas at the closest approach (comet)', { body: closestShot.png, contentType: 'image/png' });
-  const closest = { lit: shareAbove(closestShot, LIT_THRESHOLD), bright: shareAbove(closestShot, BRIGHT_THRESHOLD) };
+  await expect.poll(async () => (await cometLog(page)).pausedAtDeparture !== null, { timeout: 300_000, intervals: [500] }).toBe(true);
+  const departureShot = await shot(page, '#scene');
+  writeFileSync(test.info().outputPath('comet-departure.png'), departureShot.png);
+  await test.info().attach('engine canvas once the comet has left the screen (comet)', { body: departureShot.png, contentType: 'image/png' });
+  const departure = { lit: shareAbove(departureShot, LIT_THRESHOLD), bright: shareAbove(departureShot, BRIGHT_THRESHOLD) };
+  const departed = (await cometLog(page)).pausedAtDeparture!;
   test.info().annotations.push({
     type: 'comet on screen (share of the view lit / washed out)',
-    description: JSON.stringify({ family: comet.family, comaPx, coma, cruise, approach, closest }),
+    description: JSON.stringify({ family: comet.family, comaPx, coma, cruise, approach, departure, remainingAtDeparture: departed.autopilot.remaining }),
   });
   expect(comaPx).toBeGreaterThan(4);
   expect(coma).toBeGreaterThan(0.9);
   // The glow lights up part of the view mid-approach (more than the stars alone), never most of it,
-  // and next to nothing is washed out; at the closest approach the comet is beside the camera and
-  // its tails behind it, so the view is back to the stars.
+  // and next to nothing is washed out; once the autopilot has found the comet off the screen, the view
+  // is back to the stars, tails and all.
   expect(approach.lit).toBeGreaterThan(cruise.lit + 0.02);
   expect(approach.lit).toBeLessThan(0.35);
   expect(approach.bright).toBeLessThan(0.01);
-  expect(closest.lit).toBeLessThan(cruise.lit + 0.02);
-  expect(closest.bright).toBeLessThan(0.005);
+  expect(departed.autopilot.viewMargin).not.toBeNull();
+  expect(departed.autopilot.viewMargin!).toBeGreaterThan(0);
+  expect(departure.lit).toBeLessThan(cruise.lit + 0.02);
+  expect(departure.bright).toBeLessThan(0.005);
 
   // The encounter carries on to CRUISE.
   await page.evaluate(() => window.__elsewhere!.resume());
   await expect.poll(async () => (await cometLog(page)).afterEncounters.length, { timeout: 300_000, intervals: [2_000] }).toBeGreaterThanOrEqual(1);
   const log = await cometLog(page);
-  test.info().annotations.push({ type: 'comet log', description: JSON.stringify({ ...log, pausedAt: undefined, pausedAtClosest: undefined }) });
+  test.info().annotations.push({ type: 'comet log', description: JSON.stringify({ ...log, pausedAt: undefined, pausedAtDeparture: undefined }) });
   expect(log.states.slice(0, 5)).toEqual([
     { state: 'CRUISE', index: null, kind: null },
     { state: 'APPROACH', index: 0, kind: 'comet' },
@@ -270,7 +283,11 @@ test('a forced comet encounter draws its coma and tails, runs the full cycle, co
   expect(log.firstOpacity!).toBeLessThan(0.1);
   // The camera never comes within the minimum pass distance of the nucleus (nor, with it, into the coma).
   expect(log.minDistance).toBeGreaterThanOrEqual(COMET_MIN_PASS_DISTANCE * (1 - 1e-6));
-  expect(log.minDistance).toBeLessThan(params.radius * params.passFactor * 1.01);
+  // The ship flies the planned path: its distance from the nucleus is the planned one for where it
+  // is along the path (the encounter ends a little short of the closest approach, once the comet is
+  // off the screen).
+  expect(log.remainingAtMin).not.toBeNull();
+  expect(log.minDistance).toBeLessThan(Math.hypot(params.radius * params.passFactor, log.remainingAtMin!) * 1.01);
   // While it lasts: two geometries (the nucleus and the glow), at most two draw calls more, no program.
   expect(log.peak.geometries).toBe(log.baseline.geometries + 2);
   expect(log.peak.calls).toBeLessThanOrEqual(log.baseline.calls + 2);

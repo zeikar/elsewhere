@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CAMERA_FOV_DEG, VIEW_WIDEST_ASPECT } from '../config';
 import { viewConeHalfAngle } from './encounter';
-import { cameraFovDeg, computeRenderSize } from './renderSize';
+import { cameraFovDeg, cameraFrustum, computeRenderSize } from './renderSize';
 
 describe('computeRenderSize', () => {
   it('caps the device pixel ratio: (1000, 500, 3, 2) gives 2000×1000 at DPR 2', () => {
@@ -79,5 +79,22 @@ describe('cameraFovDeg', () => {
     expect(cameraFovDeg(CAMERA_FOV_DEG, VIEW_WIDEST_ASPECT * (1 + 1e-9), VIEW_WIDEST_ASPECT)).toBeCloseTo(CAMERA_FOV_DEG, 6);
     expect(cameraFovDeg(CAMERA_FOV_DEG, Number.NaN, VIEW_WIDEST_ASPECT)).toBe(CAMERA_FOV_DEG);
     expect(cameraFovDeg(CAMERA_FOV_DEG, Number.POSITIVE_INFINITY, VIEW_WIDEST_ASPECT)).toBe(CAMERA_FOV_DEG);
+  });
+});
+
+describe('cameraFrustum', () => {
+  it('is the camera view the engine sets up: the aspect, and half the vertical field of view of cameraFovDeg', () => {
+    for (const aspect of [9 / 16, 1, 4 / 3, 16 / 9, VIEW_WIDEST_ASPECT, 32 / 9, 8]) {
+      const view = cameraFrustum(CAMERA_FOV_DEG, aspect, VIEW_WIDEST_ASPECT);
+      expect(view.aspect).toBe(aspect);
+      expect(view.halfFovY).toBeCloseTo((cameraFovDeg(CAMERA_FOV_DEG, aspect, VIEW_WIDEST_ASPECT) * Math.PI) / 360, 15);
+    }
+    // 16:9 keeps the base field of view; 32:9 narrows it (about 41.5° in all).
+    expect(cameraFrustum(CAMERA_FOV_DEG, 16 / 9, VIEW_WIDEST_ASPECT).halfFovY).toBeCloseTo(Math.PI / 6, 15);
+    expect((cameraFrustum(CAMERA_FOV_DEG, 32 / 9, VIEW_WIDEST_ASPECT).halfFovY * 360) / Math.PI).toBeCloseTo(41.5, 2);
+    // An invalid aspect falls back to a square view.
+    for (const aspect of [Number.NaN, 0, -1, Number.POSITIVE_INFINITY]) {
+      expect(cameraFrustum(CAMERA_FOV_DEG, aspect, VIEW_WIDEST_ASPECT)).toEqual({ aspect: 1, halfFovY: (CAMERA_FOV_DEG * Math.PI) / 360 });
+    }
   });
 });

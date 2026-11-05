@@ -4,7 +4,8 @@
  * clock steps the real engine one capped frame at a time, so simulated time runs as fast as
  * SwiftShader can draw the frames. The drop out of warp at the end of the first cruise and the
  * return to warp at the start of the next are both checked here; their shape and bounds at every
- * level are checked in src/engine/Autopilot.test.ts.
+ * level are checked in src/engine/Autopilot.test.ts. So is the quick return to warp once a planet
+ * has left the screen, at the default level (docs/PLAN.md section 9, Phase 4).
  */
 import { expect, test, type Page } from '@playwright/test';
 import {
@@ -12,6 +13,7 @@ import {
   ENCOUNTER_WARP_ENTRY_SECONDS,
   ENCOUNTER_WARP_EXIT_LEAD_SECONDS,
   ENCOUNTER_WARP_EXIT_SECONDS,
+  SHIP_DEFAULT_SPEED_LEVEL,
   SHIP_SPEED_LEVELS,
 } from '../src/config';
 import { appUrl } from './app';
@@ -125,6 +127,117 @@ test('at the top speed the ship drops out of warp before a planet encounter and 
   expect(log.speedAtVisible!).toBeLessThanOrEqual(ENCOUNTER_ARRIVAL_SPEED + 0.5);
   expect(log.endedAt).not.toBeNull();
   expect(log.afterMax).toBeGreaterThan(0.95 * TOP_SPEED);
-  expect(log.afterMax).toBeLessThanOrEqual(TOP_SPEED + 1e-6);
+  // The quick return to warp after a planet that left the screen leads the ship's lag; one target per
+  // capped frame can leave the ship a few hundredths of a unit per second over for a moment.
+  expect(log.afterMax).toBeLessThanOrEqual(TOP_SPEED + 0.05);
+  expect(errors).toEqual([]);
+});
+
+interface OffScreenLog {
+  /** Cruise speed at the default level. */
+  cruise: number;
+  /** Ship time of the first frame the autopilot saw the planet off screen, or `null` until then. */
+  offAt: number | null;
+  /** The planet's centre in normalised device coordinates on that frame. */
+  ndcAtOff: { x: number; y: number; z: number } | null;
+  /** Whether the planet was drawn on that frame (it is removed within three frames). */
+  drawnAtOff: boolean | null;
+  /** Remaining distance to the closest approach on that frame. */
+  remainingAtOff: number | null;
+  /** Ship time at which the encounter ended (back to CRUISE), or `null` until then. */
+  endedAt: number | null;
+  /** Ship times at which the ship was first at 50% and 90% of the cruise speed after that, or `null`. */
+  halfAt: number | null;
+  mostAt: number | null;
+  /** The autopilot's view and the camera's on the first frame. */
+  view: { aspect: number; halfFovY: number } | null;
+  camera: { aspect: number; fov: number };
+  /** Whether the cruise after the encounter used the quick entry. */
+  entryQuick: boolean | null;
+}
+
+declare global {
+  interface Window {
+    __offScreenLog?: OffScreenLog;
+  }
+}
+
+test('at the default speed the ship is at 50% and 90% of the cruise speed within 2.5 s and 5 s of the planet leaving the screen', async ({ page }) => {
+  test.setTimeout(300_000);
+  const errors = collectErrors(page);
+  // As above: one capped engine frame per 100 ms clock step, on a tiny 16:9 viewport.
+  await page.setViewportSize({ width: 96, height: 54 });
+  await page.clock.install({ time: 0 });
+  await page.clock.pauseAt(1000);
+  await page.goto(appUrl('encounterInterval=5&encounterKind=planet'));
+  await page.waitForFunction(() => window.__elsewhere !== undefined);
+  const start = await page.evaluate(() => window.__elsewhere!.snapshot());
+  expect(SHIP_SPEED_LEVELS[start.speed]).toBe(SHIP_SPEED_LEVELS[SHIP_DEFAULT_SPEED_LEVEL]);
+
+  await page.evaluate((cruise) => {
+    const hook = window.__elsewhere!;
+    const first = hook.snapshot();
+    const log: OffScreenLog = {
+      cruise,
+      offAt: null,
+      ndcAtOff: null,
+      drawnAtOff: null,
+      remainingAtOff: null,
+      endedAt: null,
+      halfAt: null,
+      mostAt: null,
+      view: first.autopilot.view,
+      camera: { aspect: first.cameraAspect, fov: first.cameraFov },
+      entryQuick: null,
+    };
+    window.__offScreenLog = log;
+    let frames = first.frames;
+    const tick = () => {
+      requestAnimationFrame(tick);
+      const now = hook.snapshot();
+      if (now.frames === frames) return;
+      frames = now.frames;
+      const a = now.autopilot;
+      if (log.offAt === null && a.encounterIndex === 0 && a.viewMargin !== null && a.viewMargin > 0) {
+        log.offAt = now.ship.time;
+        log.ndcAtOff = now.planet?.ndc ?? null;
+        log.drawnAtOff = now.planet?.visible ?? null;
+        log.remainingAtOff = a.remaining;
+      }
+      if (log.offAt === null) return;
+      if (log.endedAt === null && a.state === 'CRUISE') {
+        log.endedAt = now.ship.time;
+        log.entryQuick = a.entryQuick;
+      }
+      if (log.halfAt === null && now.ship.speed >= 0.5 * cruise) log.halfAt = now.ship.time;
+      if (log.mostAt === null && now.ship.speed >= 0.9 * cruise) log.mostAt = now.ship.time;
+    };
+    requestAnimationFrame(tick);
+  }, SHIP_SPEED_LEVELS[SHIP_DEFAULT_SPEED_LEVEL]!);
+
+  const done = () => page.evaluate(() => window.__offScreenLog!.mostAt !== null);
+  const startedAt = Date.now();
+  while (!(await done())) {
+    for (let i = 0; i < 50; i++) await page.clock.fastForward(100);
+    expect(Date.now() - startedAt, 'back at speed in time').toBeLessThan(240_000);
+  }
+  const log = await page.evaluate(() => window.__offScreenLog!);
+  test.info().annotations.push({ type: 'off screen', description: JSON.stringify({ wallSeconds: (Date.now() - startedAt) / 1000, ...log }) });
+
+  // The autopilot tests the live camera view: this screen's aspect and vertical field of view.
+  expect(log.view).not.toBeNull();
+  expect(log.view!.aspect).toBeCloseTo(log.camera.aspect, 9);
+  expect(log.view!.halfFovY).toBeCloseTo((log.camera.fov * Math.PI) / 360, 9);
+  expect(log.camera.aspect).toBeCloseTo(16 / 9, 6);
+  // Off screen when it said so: the planet's centre is outside the view (or behind the camera).
+  expect(log.offAt).not.toBeNull();
+  const ndc = log.ndcAtOff!;
+  expect(Math.abs(ndc.x) > 1 || Math.abs(ndc.y) > 1 || ndc.z > 1).toBe(true);
+  // The encounter ended within three capped frames, with the quick return to warp.
+  expect(log.endedAt! - log.offAt!).toBeLessThanOrEqual(0.3 + 1e-6);
+  expect(log.entryQuick).toBe(true);
+  // Back at speed within the limits (docs/PLAN.md section 9, Phase 4), in simulated seconds.
+  expect(log.halfAt! - log.offAt!).toBeLessThanOrEqual(2.5);
+  expect(log.mostAt! - log.offAt!).toBeLessThanOrEqual(5);
   expect(errors).toEqual([]);
 });

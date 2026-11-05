@@ -48,7 +48,7 @@ import {
 import { encounterOffset, encounterRemaining, planEncounter, type Encounter } from './encounter';
 import { EncounterView, encounterCometParams } from './EncounterView';
 import { ATMOSPHERE_RENDER_ORDER, DEFAULT_PLANET_FRAME, SURFACE_RENDER_ORDER, planetProgramMaterials } from './Planet';
-import { cameraFovDeg } from './renderSize';
+import { cameraFovDeg, cameraFrustum } from './renderSize';
 import { hash, mulberry32 } from './seed';
 import { DEFAULT_SHIP_PARAMS, type Vec3 } from './Ship';
 
@@ -305,7 +305,8 @@ describe('the camera never passes through a comet (docs/PLAN.md section 6, Varie
     for (let level = 0; level < SHIP_SPEED_LEVELS.length; level++) {
       for (let n = 0; n < 10; n++) {
         const p = SEEDED[37 * n + level]!;
-        const travel = createTravel(cometsOnly(level, { cometFor: () => p, interval: 1, baseSeed: 0xc0e7 + n }), DEFAULT_SHIP_PARAMS);
+        // Flown past the closest approach (no view), where a comet on a wide enough screen would still be.
+        const travel = createTravel(cometsOnly(level, { cometFor: () => p, interval: 1, baseSeed: 0xc0e7 + n, view: null }), DEFAULT_SHIP_PARAMS);
         let nearestNucleus = Number.POSITIVE_INFINITY;
         let nearestVertex = Number.POSITIVE_INFINITY;
         let vertices: Vec3[] = [];
@@ -345,9 +346,13 @@ describe('the camera never passes through a comet (docs/PLAN.md section 6, Varie
 describe('comet flybys never whip by', () => {
   const levels = SHIP_SPEED_LEVELS.map((cruiseSpeed, level) => ({ level, cruiseSpeed }));
 
-  /** The remaining distance at every step of one comet encounter flown at `level`, and the ship's speed at the closest approach. */
+  /**
+   * The remaining distance at every step of one comet encounter flown at `level`, and the ship's speed
+   * at the closest approach. Flown to the despawn distance (no view): the profile any comet is flown
+   * with while it is on screen.
+   */
   function trace(level: number, dt: number): { remaining: number[]; speedAtClosest: number } {
-    const travel = createTravel(cometsOnly(level, { cometFor: () => ({ radius: 30 }) }), DEFAULT_SHIP_PARAMS);
+    const travel = createTravel(cometsOnly(level, { cometFor: () => ({ radius: 30 }), view: null }), DEFAULT_SHIP_PARAMS);
     const remaining: number[] = [];
     let speedAtClosest = Number.NaN;
     for (let i = 0; i < 1e7 && !(remaining.length > 0 && travel.autopilot.encounter === null); i++) {
@@ -515,12 +520,12 @@ describe('comet GPU cost: screen coverage and fill', () => {
       let peak = 0;
       for (const remaining of remainings) {
         const ship = { x: 0, y: 0, z: -(COMET_ENCOUNTER_DISTANCE - remaining) };
-        // After the closest approach, only while the encounter still shows the comet.
         const shipState = { position: ship, heading: encounter.plan.direction } as Parameters<typeof encounterViewMargin>[1];
-        if (remaining < 0 && encounterViewMargin(encounter, shipState, DEFAULT_AUTOPILOT_PARAMS.viewHalfAngle) > 0) continue;
         expect(encounterRemaining(encounter.plan, ship)).toBeCloseTo(remaining, 6);
         const nucleus = encounterOffset(encounter.plan, ship, { x: 0, y: 0, z: 0 });
         for (const aspect of aspects) {
+          // Only while the encounter still shows the comet on that screen (it ends once the comet is off it).
+          if (encounterViewMargin(encounter, shipState, cameraFrustum(CAMERA_FOV_DEG, aspect, VIEW_WIDEST_ASPECT)) > 0) continue;
           const { coverage, fill } = glowCoverage(position, index, nucleus, aspect);
           if (fill > worst.fill) worst.fill = fill;
           if (coverage > worst.coverage) {
@@ -686,6 +691,6 @@ describe('Comet', () => {
     comet.dispose();
     // Without bounds the out-of-view test uses the coma's sphere.
     const ship = { position: { x: 0, y: 0, z: 0 }, heading: { x: 0, y: 0, z: -1 } } as Parameters<typeof encounterViewMargin>[1];
-    expect(encounterViewMargin(encounter, ship, 1)).toBeLessThan(0);
+    expect(encounterViewMargin(encounter, ship, DEFAULT_AUTOPILOT_PARAMS.view)).toBeLessThan(0);
   });
 });

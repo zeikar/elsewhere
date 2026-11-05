@@ -1,4 +1,4 @@
-import { Vector3 } from 'three';
+import { Frustum, Matrix4, PerspectiveCamera, Sphere, Vector3 } from 'three';
 import { describe, expect, it } from 'vitest';
 import {
   ASTEROID_DESPAWN_DISTANCE,
@@ -30,6 +30,8 @@ import {
   ENCOUNTER_SIDE_ELEVATION_RANGE,
   ENCOUNTER_SIDE_OFFSET_FACTOR,
   ENCOUNTER_SLOWDOWN_DISTANCE,
+  ENCOUNTER_VIEW_ENTRY_MAX_RATE,
+  ENCOUNTER_VIEW_ENTRY_SECONDS,
   ENCOUNTER_WARP_ENTRY_MAX_RATE,
   ENCOUNTER_WARP_ENTRY_SECONDS,
   ENCOUNTER_WARP_EXIT_LEAD_SECONDS,
@@ -49,6 +51,7 @@ import {
   SHIP_MAX_TURN_RATE_RAD_PER_S,
   SHIP_SPEED_LEVELS,
   SHIP_SPEED_TAU_SECONDS,
+  VIEW_DEFAULT_ASPECT,
   VIEW_WIDEST_ASPECT,
 } from '../config';
 import { Asteroid, asteroidParams, type AsteroidParams } from './Asteroid';
@@ -83,16 +86,19 @@ import {
   mixHasPlanets,
   nebulaViewExtent,
   nextEncounterKind,
+  planetViewRadiusFactor,
   runClass,
   setCruiseSpeed,
   stepTravel,
   updateAutopilot,
+  viewEntryDuration,
   warpEntryDuration,
   type ActiveEncounter,
   type AutopilotParams,
   type AutopilotState,
   type CometEncounter,
   type EncounterKind,
+  type PlanetEncounter,
   type Travel,
   type TravelState,
 } from './Autopilot';
@@ -100,15 +106,16 @@ import {
   encounterOffset,
   encounterRemaining,
   encounterTargetSpeed,
+  frustumConeHalfAngle,
+  frustumSphereMargin,
   planEncounter,
-  sphereViewMargin,
   viewConeHalfAngle,
   type Encounter,
 } from './encounter';
 import { cometGlowGeometry, cometParams, type CometParams } from './Comet';
 import { Nebula, nebulaParams, type NebulaParams } from './Nebula';
 import { Planet, planetParams, type PlanetParams } from './Planet';
-import { cameraFovDeg } from './renderSize';
+import { cameraFovDeg, cameraFrustum, type ViewFrustum } from './renderSize';
 import { hash, mulberry32 } from './seed';
 import { DEFAULT_SHIP_PARAMS, createShipState, updateShip, type ShipParams, type ShipState, type Vec3 } from './Ship';
 
@@ -196,7 +203,7 @@ function simulate(
  * up across encounters. A small O(dt) difference per encounter remains, because the target speed is
  * updated only once per frame: through the slowdown the ship's position drifts by about 0.1 units
  * between dt = 1/60 and 1/120, which is about 0.016 s at the planet's closest approach (6 units per
- * second). The encounter ends a few units after it (out of view), still at about that speed, so the
+ * second). The encounter ends around it (off screen), still at about that speed, so the
  * offset carries into the next cruise: about 0.011 s per encounter between 1/60 and 1/120 (measured:
  * 0.17 s after 15 encounters, with the frame rounding), about 1.3 × |dt1 - dt2|. Before Phase 4 the
  * encounter ran on to the despawn distance at the encounter speed, where the same offset was about
@@ -243,7 +250,7 @@ function endedOutOfView(
 ): boolean {
   const encounter = prevAutopilot.encounter;
   if (encounter === null || autopilot.encounter !== null) return false;
-  return encounterViewMargin(encounter, ship, params.viewHalfAngle) > 0;
+  return encounterViewMargin(encounter, ship, params.view) > 0;
 }
 
 describe('autopilot config', () => {
@@ -289,6 +296,13 @@ describe('autopilot config', () => {
     expect(DEFAULT_AUTOPILOT_PARAMS.warpExitTime).toBe(ENCOUNTER_WARP_EXIT_SECONDS);
     expect(DEFAULT_AUTOPILOT_PARAMS.warpExitLead).toBe(ENCOUNTER_WARP_EXIT_LEAD_SECONDS);
     expect(DEFAULT_AUTOPILOT_PARAMS.warpEntryTime).toBe(ENCOUNTER_WARP_ENTRY_SECONDS);
+    expect(DEFAULT_AUTOPILOT_PARAMS.viewEntryTime).toBe(ENCOUNTER_VIEW_ENTRY_SECONDS);
+    expect(DEFAULT_AUTOPILOT_PARAMS.viewEntryMaxRate).toBe(ENCOUNTER_VIEW_ENTRY_MAX_RATE);
+    // The quick warp entry leads the ship's own lag.
+    expect(DEFAULT_AUTOPILOT_PARAMS.shipSpeedTau).toBe(DEFAULT_SHIP_PARAMS.speedTau);
+    // The live view, until the engine reports the screen: a 16:9 screen at the base field of view.
+    expect(DEFAULT_AUTOPILOT_PARAMS.view).toEqual(cameraFrustum(CAMERA_FOV_DEG, VIEW_DEFAULT_ASPECT, VIEW_WIDEST_ASPECT));
+    expect(DEFAULT_AUTOPILOT_PARAMS.view).toEqual({ aspect: 16 / 9, halfFovY: (CAMERA_FOV_DEG * Math.PI) / 360 });
     expect(DEFAULT_AUTOPILOT_PARAMS.encounterDistance).toBe(ENCOUNTER_DISTANCE);
     expect(DEFAULT_AUTOPILOT_PARAMS.sideOffsetFactor).toBe(ENCOUNTER_SIDE_OFFSET_FACTOR);
     expect(DEFAULT_AUTOPILOT_PARAMS.profile.despawnDistance).toBe(ENCOUNTER_DESPAWN_DISTANCE);
@@ -723,8 +737,13 @@ describe('createAutopilotState', () => {
       encounter: null,
       remaining: Number.POSITIVE_INFINITY,
       viewMargin: Number.NEGATIVE_INFINITY,
+      outOfViewTime: Number.NEGATIVE_INFINITY,
       entrySpeed: Number.POSITIVE_INFINITY,
       entryDrift: 1,
+      entryQuick: false,
+      entryAt: 0,
+      entryShipSpeed: 0,
+      entryShipAccel: 0,
       fade: 0,
       targetSpeed: DEFAULT_AUTOPILOT_PARAMS.cruiseSpeed,
       driftRate: 1,
@@ -872,7 +891,9 @@ describe('nebula encounters', () => {
             end = {
               time: ship.time,
               outOfView: endedOutOfView(prevAutopilot, autopilot, ship, params),
-              targetStep: Math.abs(autopilot.targetSpeed - prevAutopilot.targetSpeed),
+              // Against the target the encounter would have had now (the entry speed, the profile at
+              // the end), so the profile's own change over the step does not count.
+              targetStep: Math.abs(autopilot.targetSpeed - autopilot.entrySpeed),
               driftStep: Math.abs(autopilot.driftRate - prevAutopilot.driftRate),
               fade: prevAutopilot.fade,
               entrySpeed: autopilot.entrySpeed,
@@ -896,8 +917,8 @@ describe('nebula encounters', () => {
       expect(end!.targetStep).toBeLessThan(0.01);
       expect(end!.driftStep).toBeLessThan(0.01);
       expect(end!.entrySpeed).toBeLessThanOrEqual(encounterSpeed);
-      // Back at the cruise speed (99%) within the warp entry and a few time constants.
-      expect(backAtCruise - end!.time).toBeLessThanOrEqual(warpEntryDuration(params, end!.entrySpeed) + 3 * SHIP_SPEED_TAU_SECONDS);
+      // Back at the cruise speed (99%) within the quick warp entry and a second.
+      expect(backAtCruise - end!.time).toBeLessThanOrEqual(viewEntryDuration(params, end!.entrySpeed) + 1);
       // Heading held, fades gradual, and clear of the core.
       expect(worstHeldAngle).toBeLessThan(HELD_ANGLE_TOLERANCE);
       expect(worstFadeStep).toBeLessThan(0.02);
@@ -965,11 +986,12 @@ describe('autopilot simulation', () => {
     const cruises = transitions.filter((t) => t.to === 'CRUISE');
     expect(approaches).toHaveLength(2);
     // From load, then from the end of the first encounter. Within one frame (plus rounding); the
-    // second cruise is shortened by the lateness carried over from the encounter, also under a frame.
+    // second cruise is shortened by the lateness carried over from the encounter: up to three frames
+    // since the object left the screen (it moves on one state per step from there).
     expect(approaches[0]!.time).toBeGreaterThanOrEqual(interval - 1e-9);
     expect(approaches[0]!.time).toBeLessThanOrEqual(interval + dt + 1e-9);
     const gap = approaches[1]!.time - cruises[0]!.time;
-    expect(gap).toBeGreaterThanOrEqual(interval - dt - 1e-9);
+    expect(gap).toBeGreaterThanOrEqual(interval - 3 * dt - 1e-9);
     expect(gap).toBeLessThanOrEqual(interval + dt + 1e-9);
   });
 
@@ -980,11 +1002,11 @@ describe('autopilot simulation', () => {
     const approaches = transitions.filter((t) => t.to === 'APPROACH');
     const cruiseStarts = [0, ...transitions.filter((t) => t.to === 'CRUISE').map((t) => t.time)];
     for (let i = 0; i < 3; i++) {
-      // Within one frame late, or up to two frames early after an encounter (the carried lateness of
-      // its start and of its end).
+      // Within one frame late, or up to four frames early after an encounter (the carried lateness of
+      // its start, one frame, and of its end, three).
       const gap = approaches[i]!.time - cruiseStarts[i]!;
       const expected = cruiseInterval(params, i);
-      expect(gap, `encounter ${i}`).toBeGreaterThanOrEqual(expected - 2 * dt - 1e-9);
+      expect(gap, `encounter ${i}`).toBeGreaterThanOrEqual(expected - 4 * dt - 1e-9);
       expect(gap, `encounter ${i}`).toBeLessThanOrEqual(expected + dt + 1e-9);
     }
   });
@@ -1164,8 +1186,9 @@ describe('autopilot simulation', () => {
           },
         });
         expect(minClearance).toBeGreaterThanOrEqual(radius * (1 + ENCOUNTER_CLEARANCE_MARGIN));
-        // The closest approach is the planned one: radius × k.
-        expect(minClearance).toBeCloseTo(radius * ENCOUNTER_SIDE_OFFSET_FACTOR, 3);
+        // Never nearer than the planned closest approach, radius × k (the planet may leave the screen,
+        // and the encounter end, before the ship gets there).
+        expect(minClearance).toBeGreaterThanOrEqual(radius * ENCOUNTER_SIDE_OFFSET_FACTOR * (1 - 1e-9));
         expect(worstJump).toBeLessThanOrEqual(1 + 1e-9);
         expect(worstTurnRate).toBeLessThanOrEqual(SHIP_MAX_TURN_RATE_RAD_PER_S);
         expect(worstHeldAngle).toBeLessThan(HELD_ANGLE_TOLERANCE);
@@ -1177,21 +1200,30 @@ describe('autopilot simulation', () => {
   });
 
   it.each([1 / 60, DT_CAP_SECONDS])(
-    'a planet already out of view at its closest approach still spends one step in DEPARTURE, and the next encounter starts on schedule (dt = %f)',
+    'a planet off screen before its closest approach still goes through DEPARTURE, for one step, and the next encounter starts on schedule (dt = %f)',
     (dt) => {
-      // A small planet passed far off: its sphere is out of the view cone at the closest approach.
+      // A small planet passed far off: its sphere leaves the screen well before the closest approach.
       const planet = { radius: 13, passFactor: 6 };
       const params: Partial<AutopilotParams> = { ...onlyKind('planet'), planetFor: () => planet };
       const reference = simulate(1 / 600, { params, until: afterEncounters(2) });
-      const run = simulate(dt, { params, until: afterEncounters(2) });
+      const remainingAtEnd: number[] = [];
+      const run = simulate(dt, {
+        params,
+        until: afterEncounters(2),
+        onFrame: ({ prevAutopilot, autopilot }) => {
+          if (prevAutopilot.state === 'DEPARTURE' && autopilot.state === 'CRUISE') remainingAtEnd.push(prevAutopilot.remaining);
+        },
+      });
       for (const { transitions } of [reference, run]) {
         expect(transitions.slice(0, 8).map((t) => t.to)).toEqual([...CYCLE, ...CYCLE]);
       }
       const at = (r: typeof run, to: TravelState, n: number) => r.transitions.filter((t) => t.to === to)[n]!.time;
-      // Exactly one step in DEPARTURE: the planet was out of view when it began.
+      // Before the closest approach, and exactly one step in DEPARTURE: the planet was off screen
+      // when it began.
+      expect(remainingAtEnd[0]).toBeGreaterThan(0);
       expect(at(run, 'CRUISE', 0) - at(run, 'DEPARTURE', 0)).toBeCloseTo(dt, 9);
-      // The held step is carried with the lateness: the next encounter starts when it would have
-      // without it, within the usual O(dt) per encounter (see `timelineTolerance`).
+      // The held steps are carried with the lateness: the next encounter starts when it would have
+      // without them, within the usual O(dt) per encounter (see `timelineTolerance`).
       expect(Math.abs(at(run, 'APPROACH', 1) - at(reference, 'APPROACH', 1))).toBeLessThan(timelineTolerance(1, dt, 1 / 600));
     },
   );
@@ -1254,7 +1286,8 @@ describe('autopilot simulation', () => {
         if (a.state === 'CRUISE' && prevAutopilot.state === 'DEPARTURE') {
           ends.push({
             outOfView: endedOutOfView(prevAutopilot, a, ship),
-            targetStep: Math.abs(a.targetSpeed - prevAutopilot.targetSpeed),
+            // Against the target the encounter would have had now (see the nebula cycle above).
+            targetStep: Math.abs(a.targetSpeed - a.entrySpeed),
             driftStep: Math.abs(a.driftRate - prevAutopilot.driftRate),
             fade: a.fade,
           });
@@ -1429,6 +1462,7 @@ describe('dropping out of warp', () => {
         let backInWarp = Number.NaN;
         let endedAt = Number.NaN;
         let entrySpeed = Number.NaN;
+        const entrySpeeds: number[] = [];
         const params = atSpeed(cruiseSpeed, onlyKind(kind));
         simulate(dt, {
           params,
@@ -1438,39 +1472,45 @@ describe('dropping out of warp', () => {
             worstTargetRate = Math.max(worstTargetRate, Math.abs(autopilot.targetSpeed - prevAutopilot.targetSpeed) / dt);
             // The speed from the first spawn on: before it the ship also accelerates from rest at load.
             if (autopilot.encounterCount > 0) worstSpeedRate = Math.max(worstSpeedRate, Math.abs(ship.speed - prev.speed) / dt);
-            if (prevAutopilot.state === 'DEPARTURE' && autopilot.state === 'CRUISE' && Number.isNaN(endedAt)) {
-              endedAt = ship.time;
-              entrySpeed = autopilot.entrySpeed;
+            if (prevAutopilot.state === 'DEPARTURE' && autopilot.state === 'CRUISE') {
+              expect(autopilot.entryQuick).toBe(true);
+              entrySpeeds.push(autopilot.entrySpeed);
+              if (Number.isNaN(endedAt)) {
+                endedAt = ship.time;
+                entrySpeed = autopilot.entrySpeed;
+              }
             }
             if (!Number.isNaN(endedAt) && Number.isNaN(backInWarp) && ship.speed >= 0.95 * cruiseSpeed) backInWarp = ship.time;
           },
         });
-        // Bounded rates of change, in units per second per second. The target: the eases are
-        // smoothsteps over seconds, whose slope is at most 1.5 × 90 / 8 ≈ 17 from the top speed, and
-        // the encounter profile is the default level's (about 8). The return to warp from where the
-        // encounter ended out of view (near its minimum speed) is a smoothstep over at least the
-        // entry time, stretched until no steeper than ENCOUNTER_WARP_ENTRY_MAX_RATE: about 10 at the
-        // default level (6 to 60 over 8 s), 17 at the top level. The ship lags its target, so its
-        // speed changes more gently: at most about 14 in the drop from the top speed, and about 15.5
-        // in the return to it from the minimum speed. Before the drop out of warp, the top-speed
-        // encounter slowdown reached about 54 and 32.
-        const minSpeed = encounterProfile(params, kind).minSpeed;
-        const maxTargetRate = Math.max(
-          8,
-          (1.5 * (cruiseSpeed - encounterSpeed)) / Math.min(ENCOUNTER_WARP_ENTRY_SECONDS, ENCOUNTER_WARP_EXIT_SECONDS),
-          (1.5 * (cruiseSpeed - minSpeed)) / warpEntryDuration(params, minSpeed),
-        );
-        expect(maxTargetRate).toBeLessThanOrEqual(ENCOUNTER_WARP_ENTRY_MAX_RATE);
+        // Bounded rates of change, in units per second per second. The target: the drop out of warp is
+        // a smoothstep over seconds, whose slope is at most 1.5 × 90 / 10 = 13.5 from the top speed, and
+        // the encounter profile is the default level's (about 8). Every encounter here ends off screen,
+        // so the return to warp is the quick entry: the ship's speed is a smootherstep over
+        // `viewEntryDuration` (slope at most 1.875 × the rise / the duration: 25 at the default level,
+        // 40 at the top level), and the target leads it by the ship's lag, so it moves faster, at most
+        // rise / duration × (1.875 + tau / duration × 10 / √3). Before the drop out of warp, the
+        // top-speed encounter slowdown reached about 54 and 32.
+        const gentle = Math.max(8, (1.5 * (cruiseSpeed - encounterSpeed)) / Math.min(ENCOUNTER_WARP_ENTRY_SECONDS, ENCOUNTER_WARP_EXIT_SECONDS));
+        expect(gentle).toBeLessThanOrEqual(ENCOUNTER_WARP_ENTRY_MAX_RATE);
+        const quick = (entry: number) => {
+          const rise = cruiseSpeed - entry;
+          const duration = viewEntryDuration(params, entry);
+          return { target: (rise / duration) * (1.875 + (SHIP_SPEED_TAU_SECONDS / duration) * (10 / Math.sqrt(3))), speed: (1.875 * rise) / duration };
+        };
+        expect(entrySpeeds).toHaveLength(2);
+        const maxTargetRate = Math.max(gentle, ...entrySpeeds.map((e) => quick(e).target));
+        const maxSpeedRate = Math.max(16, ...entrySpeeds.map((e) => quick(e).speed));
+        expect(maxSpeedRate).toBeLessThanOrEqual(ENCOUNTER_VIEW_ENTRY_MAX_RATE);
         expect(worstTargetRate).toBeGreaterThan(0);
         expect(worstTargetRate).toBeLessThanOrEqual(maxTargetRate * 1.01);
-        expect(worstSpeedRate).toBeLessThan(16);
-        // Back in warp (95% of the cruise speed) within the entry time plus 1.5 time constants. A
-        // planet encounter ends near the minimum speed; a nebula's ends once the ship is past every
-        // layer, when it is back at the encounter speed. An asteroid's, like a planet's, near its
-        // minimum speed.
+        expect(worstSpeedRate).toBeLessThanOrEqual(maxSpeedRate * 1.01);
+        // Back in warp (95% of the cruise speed) within the quick entry. A planet encounter ends near
+        // the minimum speed; a nebula's once the ship is past every layer, when it is back at the
+        // encounter speed or nearly. An asteroid's, like a planet's, near its minimum speed.
         expect(entrySpeed).toBeLessThanOrEqual(encounterSpeed);
         if (kind !== 'nebula') expect(entrySpeed).toBeLessThan(encounterSpeed / 2);
-        expect(backInWarp - endedAt).toBeLessThanOrEqual(warpEntryDuration(params, entrySpeed) + 1.5 * SHIP_SPEED_TAU_SECONDS);
+        expect(backInWarp - endedAt).toBeLessThanOrEqual(viewEntryDuration(params, entrySpeed));
       },
     );
   });
@@ -1520,7 +1560,7 @@ describe('dropping out of warp', () => {
     expect(approaches[0]!.time).toBeGreaterThanOrEqual(interval - 1e-9);
     expect(approaches[0]!.time).toBeLessThanOrEqual(interval + dt + 1e-9);
     const gap = approaches[1]!.time - cruises[0]!.time;
-    expect(gap).toBeGreaterThanOrEqual(interval - dt - 1e-9);
+    expect(gap).toBeGreaterThanOrEqual(interval - 3 * dt - 1e-9);
     expect(gap).toBeLessThanOrEqual(interval + dt + 1e-9);
   });
 
@@ -1540,33 +1580,61 @@ describe('dropping out of warp', () => {
 });
 
 /*
- * Speed driven by visibility (docs/PLAN.md section 9, Phase 4). "In view" below is the exact view
- * at the widest supported aspect ratio, 21:9: the camera looks along the ship heading with world +Y
- * up (Engine's `camera.lookAt`), with the vertical field of view CAMERA_FOV_DEG. The autopilot's own
- * test is the cone around that view, which is never smaller.
+ * Speed driven by visibility (docs/PLAN.md section 9, Phase 4). "In view" below is the exact live
+ * view, built here independently of encounter.ts: the camera looks along the ship heading with world
+ * +Y up (Engine's `camera.lookAt`), at the screen's aspect ratio and the vertical field of view the
+ * engine sets for it (`cameraFovDeg`). The autopilot tests the same view (`AutopilotParams.view`; a
+ * 16:9 screen by default).
  */
 
-const TAN_HALF_V = Math.tan((CAMERA_FOV_DEG * Math.PI) / 360);
-const TAN_HALF_H = TAN_HALF_V * VIEW_WIDEST_ASPECT;
+/** The screens the tests fly at: the default 16:9, a 4:3 tablet, 21:9, and a 32:9 super-ultrawide. */
+const ASPECTS = [
+  { name: '16:9', aspect: 16 / 9 },
+  { name: '4:3', aspect: 4 / 3 },
+  { name: '21:9', aspect: 21 / 9 },
+  { name: '32:9', aspect: 32 / 9 },
+] as const;
+
+/** The live view on a screen of `aspect`, as the engine sets it on resize. */
+const screenView = (aspect: number): ViewFrustum => cameraFrustum(CAMERA_FOV_DEG, aspect, VIEW_WIDEST_ASPECT);
+
 const unit = (v: Vec3): Vec3 => {
   const l = len(v);
   return { x: v.x / l, y: v.y / l, z: v.z / l };
 };
 const cross = (a: Vec3, b: Vec3): Vec3 => ({ x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x });
-/** Outward unit normals of the 21:9 view's four side planes, in camera coordinates (x right, y up, z forward). */
-const VIEW_PLANES: Vec3[] = [
-  { x: 1, y: 0, z: -TAN_HALF_H },
-  { x: -1, y: 0, z: -TAN_HALF_H },
-  { x: 0, y: 1, z: -TAN_HALF_V },
-  { x: 0, y: -1, z: -TAN_HALF_V },
-].map(unit);
-/** Unit directions of the view's four corner edges, in camera coordinates. */
-const VIEW_EDGES: Vec3[] = [
-  { x: TAN_HALF_H, y: TAN_HALF_V, z: 1 },
-  { x: -TAN_HALF_H, y: TAN_HALF_V, z: 1 },
-  { x: TAN_HALF_H, y: -TAN_HALF_V, z: 1 },
-  { x: -TAN_HALF_H, y: -TAN_HALF_V, z: 1 },
-].map(unit);
+
+interface ViewGeometry {
+  /** Outward unit normals of the view's four side planes, in camera coordinates (x right, y up, z forward). */
+  planes: Vec3[];
+  /** Unit directions of the view's four corner edges, in camera coordinates. */
+  edges: Vec3[];
+}
+
+const viewGeometries = new WeakMap<Readonly<ViewFrustum>, ViewGeometry>();
+function viewGeometry(view: Readonly<ViewFrustum>): ViewGeometry {
+  let g = viewGeometries.get(view);
+  if (g === undefined) {
+    const tanV = Math.tan(view.halfFovY);
+    const tanH = tanV * view.aspect;
+    g = {
+      planes: [
+        { x: 1, y: 0, z: -tanH },
+        { x: -1, y: 0, z: -tanH },
+        { x: 0, y: 1, z: -tanV },
+        { x: 0, y: -1, z: -tanV },
+      ].map(unit),
+      edges: [
+        { x: tanH, y: tanV, z: 1 },
+        { x: -tanH, y: tanV, z: 1 },
+        { x: tanH, y: -tanV, z: 1 },
+        { x: -tanH, y: -tanV, z: 1 },
+      ].map(unit),
+    };
+    viewGeometries.set(view, g);
+  }
+  return g;
+}
 
 /** Writes `p` (relative to the camera, world axes) in camera coordinates for a camera looking along `heading`. */
 function toCamera(p: Vec3, heading: Vec3): Vec3 {
@@ -1576,31 +1644,32 @@ function toCamera(p: Vec3, heading: Vec3): Vec3 {
   return { x: dot(p, r), y: dot(p, u), z: dot(p, f) };
 }
 
-/** Distance from `q` (camera coordinates) to the 21:9 view: the infinite pyramid the side planes bound. */
-function distanceToView(q: Vec3): number {
-  const d = VIEW_PLANES.map((n) => dot(n, q));
+/** Distance from `q` (camera coordinates) to `view`: the infinite pyramid its side planes bound. */
+function distanceToView(q: Vec3, view: Readonly<ViewFrustum>): number {
+  const { planes, edges } = viewGeometry(view);
+  const d = planes.map((n) => dot(n, q));
   if (d.every((v) => v <= 0)) return 0;
   // The nearest point of a convex cone lies inside one of its faces, on an edge, or at the apex.
   let best = len(q);
-  for (const e of VIEW_EDGES) {
+  for (const e of edges) {
     const t = dot(q, e);
     if (t > 0) best = Math.min(best, len(sub(q, { x: e.x * t, y: e.y * t, z: e.z * t })));
   }
-  VIEW_PLANES.forEach((n, i) => {
+  planes.forEach((n, i) => {
     if (d[i]! <= 0) return;
     const onPlane = sub(q, { x: n.x * d[i]!, y: n.y * d[i]!, z: n.z * d[i]! });
-    if (VIEW_PLANES.every((m, j) => j === i || dot(m, onPlane) <= 1e-9)) best = Math.min(best, d[i]!);
+    if (planes.every((m, j) => j === i || dot(m, onPlane) <= 1e-9)) best = Math.min(best, d[i]!);
   });
   return best;
 }
 
-/** Whether a sphere at `centre` (relative to the camera, world axes) shows any part in the 21:9 view. */
-function sphereInView(centre: Vec3, radius: number, heading: Vec3): boolean {
-  return distanceToView(toCamera(centre, heading)) < radius;
+/** Whether a sphere at `centre` (relative to the camera, world axes) shows any part in `view`. */
+function sphereInView(centre: Vec3, radius: number, heading: Vec3, view: Readonly<ViewFrustum>): boolean {
+  return distanceToView(toCamera(centre, heading), view) < radius;
 }
 
-/** Whether a convex polygon (relative to the camera, world axes) shows any part in the 21:9 view, beyond the near plane. */
-function polygonInView(corners: readonly Vec3[], heading: Vec3): boolean {
+/** Whether a convex polygon (relative to the camera, world axes) shows any part in `view`, beyond the near plane. */
+function polygonInView(corners: readonly Vec3[], heading: Vec3, view: Readonly<ViewFrustum>): boolean {
   let poly = corners.map((c) => toCamera(c, heading));
   // Sutherland–Hodgman against each side plane (inside: n·p ≤ 0) and the near plane (z ≥ 0.1).
   const clip = (inside: (p: Vec3) => number) => {
@@ -1618,7 +1687,7 @@ function polygonInView(corners: readonly Vec3[], heading: Vec3): boolean {
     }
     poly = out;
   };
-  for (const n of VIEW_PLANES) clip((p) => dot(n, p));
+  for (const n of viewGeometry(view).planes) clip((p) => dot(n, p));
   clip((p) => 0.1 - p.z);
   return poly.length > 0;
 }
@@ -1716,13 +1785,15 @@ const MEDIAN_PLANET_RADIUS = (() => {
 
 /**
  * Runs `params` from load twice in lockstep at step `dt`, until the first encounter of the second run
- * has ended: as now, and with the out-of-view exit off (`viewHalfAngle` π), which is the departure
- * before Phase 4, flown to the despawn distance. That reference is checked to follow the
- * distance-based target speed throughout its encounter, so it is main's speed profile.
+ * has ended: as now, and with the out-of-view exit off (`view` null), which is the departure before
+ * Phase 4, flown to the despawn distance. That reference is checked to follow the distance-based
+ * target speed throughout its encounter, so it is main's speed profile for as long as the object can
+ * be on any screen (main ended the encounter only after the closest approach, out of a cone that
+ * holds every view).
  *
- * `inView` tells whether the encounter's object shows in the 21:9 view for a ship state. While it
- * does (in the run as now, including after its encounter has ended), the ship must be no faster than
- * the reference at the same step.
+ * `inView` tells whether the encounter's object shows in the live view (`params.view`) for a ship
+ * state. While it does (in the run as now, including after its encounter has ended), the ship must be
+ * no faster than the reference at the same step.
  */
 function againstMain(
   params: Readonly<AutopilotParams>,
@@ -1730,7 +1801,7 @@ function againstMain(
   inView: (encounter: Readonly<ActiveEncounter>, ship: Readonly<ShipState>) => boolean,
 ) {
   const now: Travel = createTravel({ ...params }, DEFAULT_SHIP_PARAMS);
-  const main: Travel = createTravel({ ...params, viewHalfAngle: Math.PI }, DEFAULT_SHIP_PARAMS);
+  const main: Travel = createTravel({ ...params, view: null }, DEFAULT_SHIP_PARAMS);
   let encounter: ActiveEncounter | null = null;
   let endedAt = Number.NaN;
   let closestAt = Number.NaN;
@@ -1780,104 +1851,242 @@ function atLevel(level: number, overrides: Partial<AutopilotParams> = {}): Autop
 }
 
 /**
- * The first encounter of a trip from load at speed level `level` and dt = 1/60, of a median planet
- * (k = 2), the median nebula or the comet `comet`, with the view cone `viewHalfAngle` (π: main's departure). Seconds
- * from the closest approach until the object is out of view (`encounterViewMargin` > 0 with the
- * default cone, measured the same way in both runs), until the encounter ends, and until the next
- * cruise has the ship at 99% of the arrival speed (min(cruise speed, arrival speed)) and at 99% of
- * the cruise speed; and the ship's largest acceleration from the closest approach on (units per
- * second per second).
+ * Off-screen → 50% and 90% of the cruise speed limits, in seconds, per speed level (the issue #63
+ * acceptance): 2.5 and 5 at the slowest and the default level, 4 and 7 at the top level.
  */
-function departureTimes(kind: 'planet' | 'nebula' | 'comet', level: number, viewHalfAngle: number, comet?: Readonly<CometParams>) {
-  const params = atLevel(level, {
-    ...onlyKind(kind),
-    planetFor: () => ({ radius: MEDIAN_PLANET_RADIUS }),
-    ...(comet === undefined ? {} : { cometFor: () => comet }),
-    viewHalfAngle,
-  });
-  const travel = createTravel(params, DEFAULT_SHIP_PARAMS);
+const OFF_TO_CRUISE_LIMITS: readonly { half: number; most: number }[] = [
+  { half: 2.5, most: 5 },
+  { half: 2.5, most: 5 },
+  { half: 4, most: 7 },
+];
+
+/**
+ * Flies the first `count` encounters of the trip `params` describes (planets only, unless `onScreen`
+ * is given) at dt = 1/60 and measures each from the moment its object is wholly off the live view
+ * (`params.view`, tested with this file's own view; for a planet, its view sphere, `radius ×
+ * planetViewRadiusFactor`, and otherwise `onScreen`): seconds from then until the closest approach
+ * (negative: it left after), until the ship is at 50% and at 90% of the cruise speed, and the ship's
+ * speed then. Also the ship's largest acceleration (units per second per second) and jerk (per second
+ * cubed) once the first encounter has started, and the slowest speed it ever had while the object was
+ * on screen in each encounter.
+ */
+function offScreenTimes(
+  params: Readonly<AutopilotParams>,
+  count: number,
+  onScreen?: (encounter: Readonly<ActiveEncounter>, ship: Readonly<ShipState>, view: Readonly<ViewFrustum>) => boolean,
+) {
+  const travel = createTravel({ ...params }, DEFAULT_SHIP_PARAMS);
+  const view = params.view!;
   const dt = 1 / 60;
   const cruise = params.cruiseSpeed;
-  const arrival = encounterCruiseSpeed(params);
+  const rows: { offToClosest: number; offToHalf: number; offToMost: number; speedAtOff: number }[] = [];
   let encounter: ActiveEncounter | null = null;
-  let closestAt = Number.NaN;
-  let outOfView = Number.NaN;
-  let ended = Number.NaN;
-  let atArrival = Number.NaN;
-  let atCruise = Number.NaN;
+  let off = Number.NaN;
+  let closest = Number.NaN;
+  let half = Number.NaN;
+  let speedAtOff = Number.NaN;
   let worstAccel = 0;
-  for (let i = 0; i < 1e6 && Number.isNaN(atCruise); i++) {
-    const speed = travel.ship.speed;
+  let worstJerk = 0;
+  let prevSpeed = travel.ship.speed;
+  let prevAccel = Number.NaN;
+  const rel = { x: 0, y: 0, z: 0 };
+  for (let i = 0; i < 1e7 && rows.length < count; i++) {
     stepTravel(travel, dt);
     const { ship, autopilot } = travel;
-    if (encounter === null) encounter = autopilot.encounter;
-    if (encounter === null) continue;
-    if (Number.isNaN(closestAt)) {
-      const remaining = encounterRemaining(encounter.plan, ship.position);
-      if (remaining <= 0) closestAt = ship.time + remaining / ship.speed;
-      else continue;
+    const accel = (ship.speed - prevSpeed) / dt;
+    prevSpeed = ship.speed;
+    if (autopilot.encounterCount > 0) {
+      worstAccel = Math.max(worstAccel, Math.abs(accel));
+      if (!Number.isNaN(prevAccel)) worstJerk = Math.max(worstJerk, Math.abs(accel - prevAccel) / dt);
+      prevAccel = accel;
     }
-    worstAccel = Math.max(worstAccel, Math.abs(ship.speed - speed) / dt);
-    if (Number.isNaN(outOfView) && encounterViewMargin(encounter, ship, DEFAULT_AUTOPILOT_PARAMS.viewHalfAngle) > 0) outOfView = ship.time;
-    if (Number.isNaN(ended) && autopilot.encounter === null) ended = ship.time;
-    if (Number.isNaN(ended)) continue;
-    if (Number.isNaN(atArrival) && ship.speed >= 0.99 * arrival) atArrival = ship.time;
-    if (ship.speed >= 0.99 * cruise) atCruise = ship.time;
+    if (autopilot.encounter !== null && autopilot.encounter !== encounter) {
+      if (onScreen === undefined && autopilot.encounter.kind !== 'planet') throw new Error(`a ${autopilot.encounter.kind}`);
+      encounter = autopilot.encounter;
+      off = closest = half = speedAtOff = Number.NaN;
+    }
+    if (encounter === null) continue;
+    if (Number.isNaN(closest) && encounterRemaining(encounter.plan, ship.position) <= 0) closest = ship.time;
+    if (Number.isNaN(off)) {
+      if (onScreen !== undefined) {
+        if (onScreen(encounter, ship, view)) continue;
+      } else {
+        const centre = encounterOffset(encounter.plan, ship.position, rel);
+        const radius = encounter.plan.radius * planetViewRadiusFactor((encounter as PlanetEncounter).planet);
+        if (sphereInView(centre, radius, ship.heading, view)) continue;
+      }
+      off = ship.time;
+      speedAtOff = ship.speed;
+    }
+    if (Number.isNaN(half) && ship.speed >= 0.5 * cruise) half = ship.time;
+    if (ship.speed >= 0.9 * cruise) {
+      // The closest approach may come after the ship is back at speed: then it is not needed.
+      rows.push({ offToClosest: closest - off, offToHalf: half - off, offToMost: ship.time - off, speedAtOff });
+      encounter = null;
+    }
   }
-  return {
-    outOfView: outOfView - closestAt,
-    ended: ended - closestAt,
-    atArrival: atArrival - closestAt,
-    atCruise: atCruise - closestAt,
-    worstAccel,
-  };
+  return { rows, worstAccel, worstJerk };
 }
 
-describe('speed driven by visibility', () => {
-  const HALF_ANGLE = DEFAULT_AUTOPILOT_PARAMS.viewHalfAngle;
-
-  it('the view cone holds the whole view at every aspect ratio (wider than 21:9 with the engine field of view), and reaches the 21:9 corners', () => {
-    expect(HALF_ANGLE).toBe(viewConeHalfAngle(CAMERA_FOV_DEG, VIEW_WIDEST_ASPECT));
-    expect((HALF_ANGLE * 180) / Math.PI).toBeCloseTo(55.7, 1);
-    const forward = { x: 0, y: 0, z: 1 };
+describe('speed driven by visibility: the live view', () => {
+  it('the default view is a 16:9 screen; the engine sets the camera view of every aspect, never wider than the 21:9 cone', () => {
+    const view = DEFAULT_AUTOPILOT_PARAMS.view!;
+    expect(view.aspect).toBe(16 / 9);
+    expect(view.halfFovY).toBeCloseTo((CAMERA_FOV_DEG * Math.PI) / 360, 15);
+    const cone = viewConeHalfAngle(CAMERA_FOV_DEG, VIEW_WIDEST_ASPECT);
     for (const aspect of [32 / 9, 3, 2.4, VIEW_WIDEST_ASPECT, 16 / 9, 4 / 3, 1, 9 / 16, 9 / 21]) {
-      const tanHalfV = Math.tan((cameraFovDeg(CAMERA_FOV_DEG, aspect, VIEW_WIDEST_ASPECT) * Math.PI) / 360);
-      for (const [sx, sy] of [[1, 1], [1, -1], [-1, 1], [-1, -1], [1, 0], [0, 1]] as const) {
-        const edge = { x: sx * tanHalfV * aspect, y: sy * tanHalfV, z: 1 };
-        expect(angleBetween(edge, forward)).toBeLessThanOrEqual(HALF_ANGLE + 1e-12);
-      }
+      const v = screenView(aspect);
+      expect(v.aspect).toBe(aspect);
+      expect(v.halfFovY).toBeCloseTo((cameraFovDeg(CAMERA_FOV_DEG, aspect, VIEW_WIDEST_ASPECT) * Math.PI) / 360, 15);
+      // The corner half-angle reaches the view's corners, and no further than the 21:9 one.
+      const corner = viewGeometry(v).edges[0]!;
+      expect(frustumConeHalfAngle(v)).toBeCloseTo(angleBetween(corner, { x: 0, y: 0, z: 1 }), 12);
+      expect(frustumConeHalfAngle(v)).toBeLessThanOrEqual(cone + 1e-12);
     }
-    expect(angleBetween(VIEW_EDGES[0]!, forward)).toBeCloseTo(HALF_ANGLE, 12);
+    expect(frustumConeHalfAngle(screenView(VIEW_WIDEST_ASPECT))).toBeCloseTo(cone, 12);
+    // An invalid aspect gives a square view.
+    expect(cameraFrustum(CAMERA_FOV_DEG, Number.NaN, VIEW_WIDEST_ASPECT).aspect).toBe(1);
   });
 
-  it('sphereViewMargin is positive exactly once the whole sphere is outside the cone', () => {
-    const forward = { x: 0, y: 0, z: -1 };
-    expect(sphereViewMargin({ x: 0, y: 0, z: -100 }, forward, 10, HALF_ANGLE)).toBeLessThan(0);
-    expect(sphereViewMargin({ x: 0, y: 0, z: 100 }, forward, 10, HALF_ANGLE)).toBeGreaterThan(0);
-    expect(sphereViewMargin({ x: 0, y: 0, z: -5 }, forward, 10, HALF_ANGLE)).toBe(-Math.PI);
-    // Its edge on the cone: the centre at the half-angle plus the angular radius from the axis.
-    for (const [d, r] of [[100, 10], [3000, 60], [130, 120]] as const) {
-      for (const offset of [-1e-6, 1e-6]) {
-        const a = HALF_ANGLE + Math.asin(r / d) + offset;
-        const centre = { x: d * Math.sin(a), y: 0, z: -d * Math.cos(a) };
-        expect(Math.sign(sphereViewMargin(centre, forward, r, HALF_ANGLE))).toBe(Math.sign(offset));
-      }
-    }
-  });
-
-  it('a planet out of the cone is out of the 21:9 view, whatever the heading', () => {
+  it('frustumSphereMargin is the exact distance to the view minus the radius, at every aspect and heading', () => {
     const random = mulberry32(0x0f_f5ce);
-    let outside = 0;
-    for (let i = 0; i < 20_000; i++) {
-      const heading = unit({ x: random() * 2 - 1, y: (random() * 2 - 1) * 0.5, z: random() * 2 - 1 });
-      const centre = { x: (random() * 2 - 1) * 400, y: (random() * 2 - 1) * 400, z: (random() * 2 - 1) * 400 };
-      const radius = 5 + random() * 80;
-      if (sphereViewMargin(centre, heading, radius, HALF_ANGLE) > 0) {
-        outside++;
-        expect(sphereInView(centre, radius, heading)).toBe(false);
+    for (const { aspect } of ASPECTS) {
+      const view = screenView(aspect);
+      let outside = 0;
+      let inside = 0;
+      for (let i = 0; i < 20_000; i++) {
+        const heading = unit({ x: random() * 2 - 1, y: (random() * 2 - 1) * 0.5, z: random() * 2 - 1 });
+        const centre = { x: (random() * 2 - 1) * 400, y: (random() * 2 - 1) * 400, z: (random() * 2 - 1) * 400 };
+        const radius = 5 + random() * 80;
+        const margin = frustumSphereMargin(centre, heading, radius, view);
+        const distance = distanceToView(toCamera(centre, heading), view);
+        if (distance > 0) expect(margin + radius).toBeCloseTo(distance, 9);
+        else expect(margin).toBeLessThanOrEqual(-radius);
+        expect(margin > 0).toBe(!sphereInView(centre, radius, heading, view));
+        if (margin > 0) outside++;
+        else inside++;
+      }
+      expect(outside).toBeGreaterThan(5000);
+      expect(inside).toBeGreaterThan(2000);
+    }
+  });
+
+  it('frustumSphereMargin matches a real camera: positive exactly when no point of the sphere projects on screen', () => {
+    // Off screen past a corner too, where the side planes one by one would still call it in view.
+    const random = mulberry32(0xca_3e7a);
+    const toVector = (v: Vec3) => new Vector3(v.x, v.y, v.z);
+    let pastCorner = 0;
+    for (const { aspect } of ASPECTS) {
+      const view = screenView(aspect);
+      const camera = new PerspectiveCamera(cameraFovDeg(CAMERA_FOV_DEG, aspect, VIEW_WIDEST_ASPECT), aspect, 0.1, 1e5);
+      const frustum = new Frustum();
+      for (let i = 0; i < 4000; i++) {
+        const heading = unit({ x: random() * 2 - 1, y: (random() * 2 - 1) * 0.3, z: random() * 2 - 1 });
+        camera.lookAt(toVector(heading));
+        camera.updateMatrixWorld(true);
+        frustum.setFromProjectionMatrix(new Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
+        const centre = { x: (random() * 2 - 1) * 300, y: (random() * 2 - 1) * 300, z: (random() * 2 - 1) * 300 };
+        const radius = 2 + random() * 40;
+        if (len(centre) < radius + 1) continue;
+        const margin = frustumSphereMargin(centre, heading, radius, view);
+        // three.js culls with the side planes one by one, which only errs toward "in view".
+        if (!frustum.intersectsSphere(new Sphere(toVector(centre), radius))) expect(margin).toBeGreaterThan(0);
+        else if (margin > 0) pastCorner++;
+        // Points over the sphere (its surface, densely), projected by the camera.
+        const onScreen = (p: Vector3) => {
+          const ndc = p.clone().project(camera);
+          return ndc.z < 1 && ndc.z > -1 && Math.abs(ndc.x) <= 1 && Math.abs(ndc.y) <= 1;
+        };
+        let seen = false;
+        for (let k = 0; k < 400 && !seen; k++) {
+          const z = 1 - (2 * (k + 0.5)) / 400;
+          const r = Math.sqrt(1 - z * z);
+          const phi = k * 2.399963229728653;
+          seen = onScreen(toVector(centre).add(new Vector3(r * Math.cos(phi), r * Math.sin(phi), z).multiplyScalar(radius)));
+        }
+        if (seen) expect(margin, `aspect ${aspect}, sample ${i}`).toBeLessThanOrEqual(0);
+      }
+      // Spheres just past a corner of the screen: within their radius of both side planes there, so
+      // three.js keeps them, but more than their radius from the corner edge itself. The camera looks
+      // along -Z (camera x, y, forward are world x, y, -z).
+      camera.lookAt(new Vector3(0, 0, -1));
+      camera.updateMatrixWorld(true);
+      frustum.setFromProjectionMatrix(new Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
+      const { planes, edges } = viewGeometry(view);
+      for (const [corner, a, b] of [[0, 0, 2], [1, 1, 2], [2, 0, 3], [3, 1, 3]] as const) {
+        const e = edges[corner]!;
+        const bisector = unit({ x: planes[a]!.x + planes[b]!.x, y: planes[a]!.y + planes[b]!.y, z: planes[a]!.z + planes[b]!.z });
+        // Off the edge along the bisector of its two planes, at 1.1 radii: under a radius from each.
+        const q = { x: e.x * 500 + bisector.x * 22, y: e.y * 500 + bisector.y * 22, z: e.z * 500 + bisector.z * 22 };
+        const centre = { x: q.x, y: q.y, z: -q.z };
+        expect(dot(planes[a]!, q)).toBeLessThan(20);
+        expect(dot(planes[b]!, q)).toBeLessThan(20);
+        expect(frustum.intersectsSphere(new Sphere(toVector(centre), 20))).toBe(true);
+        expect(frustumSphereMargin(centre, { x: 0, y: 0, z: -1 }, 20, view)).toBeCloseTo(2, 6);
+        pastCorner++;
       }
     }
-    expect(outside).toBeGreaterThan(5000);
+    expect(pastCorner).toBeGreaterThanOrEqual(4 * ASPECTS.length);
+  });
+
+  it('frustumSphereMargin only grows as the camera moves forward with the heading held, so an object never comes back into view', () => {
+    const random = mulberry32(0x30_70e);
+    for (const { aspect } of ASPECTS) {
+      const view = screenView(aspect);
+      for (let i = 0; i < 500; i++) {
+        const heading = unit({ x: random() * 2 - 1, y: (random() * 2 - 1) * 0.5, z: random() * 2 - 1 });
+        const start = { x: (random() * 2 - 1) * 1000, y: (random() * 2 - 1) * 1000, z: (random() * 2 - 1) * 1000 };
+        const radius = 5 + random() * 100;
+        let prev = Number.NEGATIVE_INFINITY;
+        for (let s = 0; s <= 3000; s += 13) {
+          const centre = { x: start.x - heading.x * s, y: start.y - heading.y * s, z: start.z - heading.z * s };
+          const margin = frustumSphereMargin(centre, heading, radius, view);
+          expect(margin).toBeGreaterThanOrEqual(prev - 1e-9);
+          prev = margin;
+        }
+      }
+    }
+  });
+
+  it('frustumSphereMargin with a vertical heading (no roll from lookAt) stays on the safe side: the cone around the view', () => {
+    const view = screenView(16 / 9);
+    const cone = frustumConeHalfAngle(view);
+    for (const up of [1, -1]) {
+      const heading = { x: 0, y: up, z: 0 };
+      for (const angle of [cone - 0.1, cone + 0.1, Math.PI / 2 + cone, Math.PI]) {
+        const centre = { x: 200 * Math.sin(angle), y: up * 200 * Math.cos(angle), z: 0 };
+        const margin = frustumSphereMargin(centre, heading, 10, view);
+        expect(margin > 0).toBe(angle - Math.asin(10 / 200) > cone);
+      }
+    }
+  });
+
+  it('encounterViewMargin uses the live view for every kind, and a null view never puts an object out of view', () => {
+    const ship = createShipState({ speed: 6 });
+    const plan = planEncounter(ship.position, ship.heading, 40, 600, 3, 0.4);
+    const planet: ActiveEncounter = { kind: 'planet', index: 0, seed: 1, side: 'right', planet: { radius: 40 }, plan };
+    const ringed: ActiveEncounter = { ...planet, planet: { radius: 40, extent: 2.2 } };
+    const asteroid: ActiveEncounter = { kind: 'asteroid', index: 0, seed: 1, side: 'right', asteroid: { radius: 40 }, plan };
+    const wide = screenView(21 / 9);
+    const narrow = screenView(4 / 3);
+    const at = (s: number): ShipState => ({
+      ...ship,
+      position: { x: ship.position.x + ship.heading.x * s, y: ship.position.y + ship.heading.y * s, z: ship.position.z + ship.heading.z * s },
+    });
+    for (const encounter of [planet, ringed, asteroid]) {
+      const r = encounter.plan.radius * (encounter.kind === 'planet' ? planetViewRadiusFactor(encounter.planet) : 1);
+      // The 4:3 view lies inside the 21:9 one, so the object leaves it first.
+      const s43 = Array.from({ length: 700 }, (_, i) => i).find((s) => encounterViewMargin(encounter, at(s), narrow) > 0)!;
+      expect(s43).toBeGreaterThan(0);
+      expect(encounterViewMargin(encounter, at(s43), wide)).toBeLessThanOrEqual(0);
+      for (const s of [0, s43, 650]) {
+        const offset = encounterOffset(encounter.plan, at(s).position, { x: 0, y: 0, z: 0 });
+        expect(encounterViewMargin(encounter, at(s), narrow)).toBeCloseTo(frustumSphereMargin(offset, ship.heading, r, narrow), 12);
+        expect(encounterViewMargin(encounter, at(s), null)).toBe(Number.NEGATIVE_INFINITY);
+      }
+    }
+    // A ring takes the planet's view sphere out to the ring.
+    expect(encounterViewMargin(ringed, at(300), narrow)).toBeLessThan(encounterViewMargin(planet, at(300), narrow));
   });
 
   it('nebulaViewExtent bounds every layer of 500 seeded nebulae, as the renderer places them', () => {
@@ -1907,8 +2116,10 @@ describe('speed driven by visibility', () => {
     expect(worstLateral).toBeLessThanOrEqual(1);
     expect(worstLateral).toBeGreaterThan(0.7);
   });
+});
 
-  it('cruiseTargetSpeed eases up from the entry speed, no steeper than the max rate, and is still at the arrival speed by the lead', () => {
+describe('speed driven by visibility: the warp entries', () => {
+  it('the gentle entry (not after an object left the screen) eases up from the entry speed, no steeper than the max rate, and is at the arrival speed by the lead', () => {
     const h = 0.01;
     for (let level = 0; level < SHIP_SPEED_LEVELS.length; level++) {
       const params = atLevel(level);
@@ -1922,11 +2133,11 @@ describe('speed driven by visibility', () => {
           const exitStart = interval - ENCOUNTER_WARP_EXIT_LEAD_SECONDS - ENCOUNTER_WARP_EXIT_SECONDS;
           // Every configured cruise has room for the whole return before the drop out of warp.
           expect(duration).toBeLessThan(exitStart);
-          let prev = cruiseTargetSpeed(0, interval, params, true, entry);
+          let prev = cruiseTargetSpeed(0, interval, params, true, entry, false);
           expect(prev).toBe(Math.min(entry, cruise));
           for (let i = 1; i * h <= interval; i++) {
             const t = i * h;
-            const v = cruiseTargetSpeed(t, interval, params, true, entry);
+            const v = cruiseTargetSpeed(t, interval, params, true, entry, false);
             expect(Math.abs(v - prev)).toBeLessThanOrEqual(ENCOUNTER_WARP_ENTRY_MAX_RATE * h + 1e-9);
             if (t <= duration) expect(v).toBeGreaterThanOrEqual(prev);
             else if (t <= exitStart) expect(v).toBe(cruise);
@@ -1940,53 +2151,168 @@ describe('speed driven by visibility', () => {
     // arrival speed by the lead, so the next encounter starts there with no step.
     const top = atLevel(SHIP_SPEED_LEVELS.length - 1);
     for (const short of [5, 12]) {
-      expect(cruiseTargetSpeed(short - ENCOUNTER_WARP_EXIT_LEAD_SECONDS, short, top, true, ENCOUNTER_MIN_SPEED_FLOOR)).toBe(ENCOUNTER_ARRIVAL_SPEED);
-      expect(cruiseTargetSpeed(short, short, top, true, ENCOUNTER_MIN_SPEED_FLOOR)).toBe(ENCOUNTER_ARRIVAL_SPEED);
+      for (const quick of [false, true]) {
+        expect(cruiseTargetSpeed(short - ENCOUNTER_WARP_EXIT_LEAD_SECONDS, short, top, true, ENCOUNTER_MIN_SPEED_FLOOR, quick)).toBeCloseTo(ENCOUNTER_ARRIVAL_SPEED, 12);
+        expect(cruiseTargetSpeed(short, short, top, true, ENCOUNTER_MIN_SPEED_FLOOR, quick)).toBe(ENCOUNTER_ARRIVAL_SPEED);
+      }
     }
   });
 
+  it('the quick entry (after an object left the screen): the ship itself follows a smootherstep to the cruise speed, no steeper than its max rate, with no step and a bounded jerk', () => {
+    const dt = 1 / 240;
+    for (let level = 0; level < SHIP_SPEED_LEVELS.length; level++) {
+      const params = atLevel(level);
+      const cruise = params.cruiseSpeed;
+      const interval = ENCOUNTER_INTERVAL_SECONDS * (1 - ENCOUNTER_INTERVAL_JITTER);
+      for (const entry of [ENCOUNTER_MIN_SPEED_FLOOR, params.profile.minSpeed, params.asteroid.profile.minSpeed, params.nebula.profile.minSpeed, 0.6 * encounterCruiseSpeed(params)]) {
+        const label = `level ${level}, entry ${entry}`;
+        const duration = viewEntryDuration(params, entry);
+        const rise = cruise - entry;
+        expect(duration, label).toBeGreaterThanOrEqual(ENCOUNTER_VIEW_ENTRY_SECONDS);
+        expect((1.875 * rise) / duration, label).toBeLessThanOrEqual(ENCOUNTER_VIEW_ENTRY_MAX_RATE + 1e-9);
+        // Shorter than the gentle entry, and over well before the drop out of warp.
+        expect(duration, label).toBeLessThan(warpEntryDuration(params, entry));
+        expect(duration, label).toBeLessThan(interval - ENCOUNTER_WARP_EXIT_LEAD_SECONDS - ENCOUNTER_WARP_EXIT_SECONDS);
+        // Continuous with the encounter's end and with the cruise.
+        expect(cruiseTargetSpeed(0, interval, params, true, entry, true), label).toBeCloseTo(entry, 12);
+        expect(cruiseTargetSpeed(duration, interval, params, true, entry, true), label).toBe(cruise);
+        // The ship, as stepTravel runs it, from the entry speed at rest in acceleration.
+        const shipParams: ShipParams = { ...DEFAULT_SHIP_PARAMS, driftRate: 0, targetSpeed: entry };
+        let ship = createShipState({ speed: entry }, shipParams);
+        let worstError = 0;
+        let worstAccel = 0;
+        let worstJerk = 0;
+        let worstTargetStep = 0;
+        let prevAccel = 0;
+        let prevTarget = entry;
+        let half = Number.NaN;
+        let most = Number.NaN;
+        for (let t = 0; t < duration + 4; ) {
+          const prevSpeed = ship.speed;
+          ship = updateShip(ship, dt, shipParams);
+          t += dt;
+          shipParams.targetSpeed = cruiseTargetSpeed(t, interval, params, true, entry, true);
+          worstTargetStep = Math.max(worstTargetStep, Math.abs(shipParams.targetSpeed - prevTarget));
+          prevTarget = shipParams.targetSpeed;
+          const u = Math.min(1, t / duration);
+          const expected = entry + rise * u * u * u * (10 + u * (6 * u - 15));
+          worstError = Math.max(worstError, Math.abs(ship.speed - expected));
+          const accel = (ship.speed - prevSpeed) / dt;
+          worstAccel = Math.max(worstAccel, Math.abs(accel));
+          worstJerk = Math.max(worstJerk, Math.abs(accel - prevAccel) / dt);
+          prevAccel = accel;
+          expect(ship.speed, label).toBeLessThanOrEqual(cruise + 0.01 * rise);
+          if (Number.isNaN(half) && ship.speed >= 0.5 * cruise) half = t;
+          if (Number.isNaN(most) && ship.speed >= 0.9 * cruise) most = t;
+        }
+        // The ship's speed is the smootherstep within a frame's worth of lag, and the target moves by
+        // a small fraction of the rise per frame.
+        expect(worstError, label).toBeLessThan(0.01 * rise);
+        expect(worstTargetStep, label).toBeLessThan(0.01 * rise);
+        expect(worstAccel, label).toBeLessThanOrEqual((1.875 * rise) / duration + 0.02 * rise);
+        // A smootherstep's second derivative is at most 10 / √3 × rise / duration².
+        expect(worstJerk, label).toBeLessThanOrEqual(((10 / Math.sqrt(3)) * rise) / duration ** 2 + 0.05 * rise);
+        expect(Math.abs(ship.speed - cruise), label).toBeLessThan(1e-3);
+        // Back at 50% and 90% of the cruise speed well inside the off-screen limits.
+        const limits = OFF_TO_CRUISE_LIMITS[level]!;
+        if (entry < 0.5 * cruise) expect(half, label).toBeLessThan(limits.half - 0.3);
+        expect(most, label).toBeLessThan(limits.most - 0.3);
+      }
+    }
+  });
+});
+
+describe('speed driven by visibility: the slow phase ends once the object is off the screen', () => {
+  // Measured with `offScreenTimes` (dt = 1/60, the default test trip's first 20 planets; seconds
+  // from the moment the planet is wholly off the live view; main at 79f3fd0 → now. On main the slow
+  // phase waited for the closest approach, then the gentle warp entry; "off → closest" is main's, the
+  // same geometry, negative where the planet left the screen after it):
+  //
+  //   aspect  level  off → closest   off → 50%                 off → 90%                 speed at off
+  //   16:9    20     -4.3 to 35.7    6.9 to 40.7 → 0.9 to 1.8  10.9 to 44.6 → 2.8 to 3.0  4.0 to 9.6
+  //   16:9    60     -2.8 to 15.8    0.0 to 16.5 → 0.0 to 1.9  10.4 to 25.0 → 2.8 to 3.0  6.0 to 33.9
+  //   16:9    150    -2.8 to 15.8    9.3 to 23.9 → 2.7 to 3.3  13.9 to 28.5 → 4.4 to 5.1  6.0 to 34.0
+  //   4:3     20     -0.8 to 40.5    0.0 to 32.6 → 0.0 to 1.8  13.2 to 49.4 → 2.6 to 3.0  4.0 to 12.3
+  //   4:3     60     -0.5 to 17.2    0.0 to 18.9 → 0.0 to 1.9  12.0 to 26.4 → 2.6 to 3.0  6.1 to 42.8
+  //   4:3     150    -0.5 to 17.2    10.8 to 25.3 → 2.4 to 3.3  15.5 to 29.9 → 4.0 to 5.1  6.1 to 42.8
+  //   21:9    20     -8.8 to 33.5    5.0 to 38.5 → 1.2 to 1.8  8.9 to 42.4 → 2.8 to 3.0  4.0 to 8.6
+  //   21:9    60     -5.8 to 15.2    0.0 to 13.9 → 0.0 to 1.9  9.2 to 24.4 → 2.8 to 3.0  6.0 to 30.3
+  //   21:9    150    -5.8 to 15.2    8.0 to 23.2 → 2.8 to 3.3  12.7 to 27.9 → 4.5 to 5.1  6.0 to 30.2
+  //   32:9    20     -8.8 to 43.3    0.0 to 20.1 → 0.0 to 1.8  9.3 to 52.2 → 2.5 to 3.0  4.0 to 14.2
+  //   32:9    60     -5.8 to 18.0    0.0 to 14.3 → 0.0 to 1.9  9.4 to 27.2 → 2.5 to 3.0  6.0 to 47.8
+  //   32:9    150    -5.8 to 18.0    8.3 to 26.1 → 2.1 to 3.3  12.9 to 30.7 → 3.8 to 5.1  6.0 to 47.8
+  //
+  // (A planet passed far to the side or above leaves before its closest approach. Wider screens keep
+  // it on screen longer to the side; 32:9 narrows the view vertically.)
+  describe.each(ASPECTS)('at $name', ({ aspect }) => {
+    it.each([0, 1, 2])('level %i: over the default trip’s first 20 planets the ship is at 50% and 90% of the cruise speed within the limits of leaving the screen', (level) => {
+      const params = atLevel(level, { ...onlyKind('planet'), planetFor: planetParams, view: screenView(aspect) });
+      const { rows, worstAccel, worstJerk } = offScreenTimes(params, 20);
+      const limits = OFF_TO_CRUISE_LIMITS[level]!;
+      expect(rows).toHaveLength(20);
+      const label = (row: (typeof rows)[number], i: number) => `planet ${i}: ${JSON.stringify(row)}`;
+      rows.forEach((row, i) => {
+        expect(row.offToHalf, label(row, i)).toBeLessThanOrEqual(limits.half);
+        expect(row.offToMost, label(row, i)).toBeLessThanOrEqual(limits.most);
+      });
+      // Some leave the screen before their closest approach, and the ship speeds up right then.
+      expect(rows.some((row) => row.offToClosest > 0.5)).toBe(true);
+      // A smooth ease: no step in the speed (every frame's change is a bounded acceleration), and a
+      // bounded jerk.
+      expect(worstAccel).toBeLessThanOrEqual(ENCOUNTER_VIEW_ENTRY_MAX_RATE * 1.01);
+      expect(worstJerk).toBeLessThan(40);
+    });
+  });
+
   it.each([0, 1, 2])(
-    'planets at level %i, k from 1.6 to 6 and elevations from -0.6 to 0.6: while in the 21:9 view the ship is never faster than on main, and it is never in view again after the encounter ends',
+    'planets at level %i, k from 1.6 to 6, elevations from -0.6 to 0.6, at every aspect: while on screen the ship is never faster than on main, and it is never on screen again after the encounter ends',
     (level) => {
       const sides = new Set<string>();
       let cases = 0;
-      for (const k of [1.6, 2, 3, 4.5, 6]) {
-        for (const elevation of [-0.6, -0.3, 0, 0.3, 0.6]) {
-          for (const radius of [MEDIAN_PLANET_RADIUS, Math.max(PLANET_ROCKY_RANGES.radius[1], PLANET_GAS_RANGES.radius[1])]) {
-            const label = `level ${level}, k ${k}, elevation ${elevation}, radius ${radius}`;
-            const params = atLevel(level, {
-              nebulaShare: 0,
-              sideOffsetFactor: k,
-              sideElevation: [elevation, elevation],
-              baseSeed: cases,
-              planetFor: () => ({ radius }),
-            });
-            const r = againstMain(params, 1 / 60, (encounter, ship) =>
-              sphereInView(encounterOffset(encounter.plan, ship.position, { x: 0, y: 0, z: 0 }), encounter.plan.radius * PLANET_VIEW_RADIUS_FACTOR, ship.heading),
-            );
-            sides.add(r.encounter.side);
-            // The reference is main's distance-based profile, to the despawn distance.
-            expect(r.worstProfileError, label).toBe(0);
-            expect(r.mainEnd, label).toBeLessThanOrEqual(-ENCOUNTER_DESPAWN_DISTANCE);
-            // In view for a good while, never faster than main then, and never in view again after the end.
-            expect(r.inViewFrames, label).toBeGreaterThan(1000);
-            expect(r.worstExcess, label).toBeLessThanOrEqual(1e-9);
-            expect(r.inViewAfterEnd, label).toBe(0);
-            // It ended after the closest approach (DEPARTURE lasts at least one step), and within a
-            // few seconds of it: up to about 12 s for the largest planet at the slowest level.
-            expect(r.endedAt, label).toBeGreaterThan(r.closestAt);
-            expect(r.endedAt - r.closestAt, label).toBeLessThan(15);
-            cases++;
+      let beforeClosest = 0;
+      for (const { aspect } of ASPECTS) {
+        const view = screenView(aspect);
+        for (const k of [1.6, 2, 3, 4.5, 6]) {
+          for (const elevation of [-0.6, -0.3, 0, 0.3, 0.6]) {
+            for (const radius of [MEDIAN_PLANET_RADIUS, Math.max(PLANET_ROCKY_RANGES.radius[1], PLANET_GAS_RANGES.radius[1])]) {
+              const label = `level ${level}, aspect ${aspect}, k ${k}, elevation ${elevation}, radius ${radius}`;
+              const params = atLevel(level, {
+                nebulaShare: 0,
+                sideOffsetFactor: k,
+                sideElevation: [elevation, elevation],
+                baseSeed: cases,
+                planetFor: () => ({ radius }),
+                view,
+              });
+              const r = againstMain(params, 1 / 60, (encounter, ship) =>
+                sphereInView(encounterOffset(encounter.plan, ship.position, { x: 0, y: 0, z: 0 }), encounter.plan.radius * PLANET_VIEW_RADIUS_FACTOR, ship.heading, view),
+              );
+              sides.add(r.encounter.side);
+              // The reference is main's distance-based profile, to the despawn distance.
+              expect(r.worstProfileError, label).toBe(0);
+              expect(r.mainEnd, label).toBeLessThanOrEqual(-ENCOUNTER_DESPAWN_DISTANCE);
+              // On screen for a good while, never faster than main then, and never on screen again after the end.
+              expect(r.inViewFrames, label).toBeGreaterThan(1000);
+              expect(r.worstExcess, label).toBeLessThanOrEqual(1e-9);
+              expect(r.inViewAfterEnd, `${label} ${JSON.stringify(r.firstBack)}`).toBe(0);
+              // Planets passed far off leave the screen well before their closest approach; the others
+              // within seconds after it: up to about 12 s for the largest planet at the slowest level.
+              if (Number.isNaN(r.closestAt) || r.endedAt < r.closestAt) beforeClosest++;
+              else expect(r.endedAt - r.closestAt, label).toBeLessThan(15);
+              cases++;
+            }
           }
         }
       }
       expect(sides).toEqual(new Set(['left', 'right']));
+      // A good share leave the screen before their closest approach.
+      expect(beforeClosest).toBeGreaterThan(cases / 4);
     },
-    60_000,
+    120_000,
   );
 
   it.each([0, 1, 2])(
-    'ringed planets at level %i, the widest ring, k from its clearance to 6, tilts and elevations from -0.6 to 0.6: while the planet or its ring is in the 21:9 view the ship is never faster than on main, and neither is in view again after the encounter ends',
+    'ringed planets at level %i, the widest ring, k from its clearance to 6, tilts and elevations from -0.6 to 0.6: while the planet or its ring is on screen the ship is never faster than on main, and neither is on screen again after the encounter ends',
     (level) => {
       const largest = Math.max(PLANET_ROCKY_RANGES.radius[1], PLANET_GAS_RANGES.radius[1]);
       const ringedSeed = Array.from({ length: 200 }, (_, i) => hash(0x41a6, i)).find((seed) => planetParams(seed).ring !== null)!;
@@ -1995,43 +2321,45 @@ describe('speed driven by visibility', () => {
       const clearance = outer * (1 + ENCOUNTER_CLEARANCE_MARGIN);
       let cases = 0;
       let latest = 0;
-      for (const k of [clearance, 4.5, PLANET_PASS_FACTOR_RANGE[1]]) {
-        for (const elevation of [-0.6, 0, 0.6]) {
-          for (const [opening, roll] of [
-            [PLANET_RING_RANGES.opening[0], -PLANET_RING_RANGES.roll[1]],
-            [PLANET_RING_RANGES.opening[1], PLANET_RING_RANGES.roll[0]],
-          ] as const) {
-            for (const radius of [MEDIAN_PLANET_RADIUS, largest]) {
-              const label = `level ${level}, k ${k}, elevation ${elevation}, opening ${opening}, roll ${roll}, radius ${radius}`;
-              const planet: PlanetParams = {
-                ...base,
-                radius,
-                passFactor: k,
-                extent: outer,
-                ring: { ...base.ring!, inner: PLANET_RING_RANGES.inner[1], outer, opening, roll },
-              };
-              const params = atLevel(level, { nebulaShare: 0, sideElevation: [elevation, elevation], baseSeed: cases, planetFor: () => planet });
-              let disc: Vec3[] = [];
-              let discFor: ActiveEncounter | null = null;
-              const r = againstMain(params, 1 / 60, (encounter, ship) => {
-                if (discFor !== encounter) {
-                  disc = ringOutline(planet, encounter.plan);
-                  discFor = encounter;
-                }
-                const centre = encounterOffset(encounter.plan, ship.position, { x: 0, y: 0, z: 0 });
-                return (
-                  sphereInView(centre, radius * PLANET_VIEW_RADIUS_FACTOR, ship.heading) ||
-                  polygonInView(disc.map((c) => ({ x: c.x + centre.x, y: c.y + centre.y, z: c.z + centre.z })), ship.heading)
-                );
-              });
-              expect(r.encounter.plan.closestDistance, label).toBeCloseTo(radius * k, 9);
-              expect(r.worstProfileError, label).toBe(0);
-              expect(r.inViewFrames, label).toBeGreaterThan(1000);
-              expect(r.worstExcess, label).toBeLessThanOrEqual(1e-9);
-              expect(r.inViewAfterEnd, label).toBe(0);
-              expect(r.endedAt, label).toBeGreaterThan(r.closestAt);
-              latest = Math.max(latest, r.endedAt - r.closestAt);
-              cases++;
+      for (const { aspect } of [ASPECTS[0], ASPECTS[3]]) {
+        const view = screenView(aspect);
+        for (const k of [clearance, 4.5, PLANET_PASS_FACTOR_RANGE[1]]) {
+          for (const elevation of [-0.6, 0, 0.6]) {
+            for (const [opening, roll] of [
+              [PLANET_RING_RANGES.opening[0], -PLANET_RING_RANGES.roll[1]],
+              [PLANET_RING_RANGES.opening[1], PLANET_RING_RANGES.roll[0]],
+            ] as const) {
+              for (const radius of [MEDIAN_PLANET_RADIUS, largest]) {
+                const label = `level ${level}, aspect ${aspect}, k ${k}, elevation ${elevation}, opening ${opening}, roll ${roll}, radius ${radius}`;
+                const planet: PlanetParams = {
+                  ...base,
+                  radius,
+                  passFactor: k,
+                  extent: outer,
+                  ring: { ...base.ring!, inner: PLANET_RING_RANGES.inner[1], outer, opening, roll },
+                };
+                const params = atLevel(level, { nebulaShare: 0, sideElevation: [elevation, elevation], baseSeed: cases, planetFor: () => planet, view });
+                let disc: Vec3[] = [];
+                let discFor: ActiveEncounter | null = null;
+                const r = againstMain(params, 1 / 60, (encounter, ship) => {
+                  if (discFor !== encounter) {
+                    disc = ringOutline(planet, encounter.plan);
+                    discFor = encounter;
+                  }
+                  const centre = encounterOffset(encounter.plan, ship.position, { x: 0, y: 0, z: 0 });
+                  return (
+                    sphereInView(centre, radius * PLANET_VIEW_RADIUS_FACTOR, ship.heading, view) ||
+                    polygonInView(disc.map((c) => ({ x: c.x + centre.x, y: c.y + centre.y, z: c.z + centre.z })), ship.heading, view)
+                  );
+                });
+                expect(r.encounter.plan.closestDistance, label).toBeCloseTo(radius * k, 9);
+                expect(r.worstProfileError, label).toBe(0);
+                expect(r.inViewFrames, label).toBeGreaterThan(1000);
+                expect(r.worstExcess, label).toBeLessThanOrEqual(1e-9);
+                expect(r.inViewAfterEnd, `${label} ${JSON.stringify(r.firstBack)}`).toBe(0);
+                if (!Number.isNaN(r.closestAt)) latest = Math.max(latest, r.endedAt - r.closestAt);
+                cases++;
+              }
             }
           }
         }
@@ -2043,34 +2371,38 @@ describe('speed driven by visibility', () => {
   );
 
   it.each([0, 1, 2])(
-    'nebulae at level %i, elevations from -0.6 to 0.6: while any layer is in the 21:9 view the ship is never faster than on main, and none is in view again after the encounter ends',
+    'nebulae at level %i, elevations from -0.6 to 0.6: while any layer is on screen the ship is never faster than on main, and none is on screen again after the encounter ends',
     (level) => {
       let cases = 0;
       let smallest = Number.POSITIVE_INFINITY;
       let largest = 0;
-      for (const elevation of [-0.6, -0.3, 0, 0.3, 0.6]) {
-        for (let draw = 0; draw < 3; draw++) {
-          const label = `level ${level}, elevation ${elevation}, draw ${draw}`;
-          let corners: Vec3[][] = [];
-          let cornersFor: ActiveEncounter | null = null;
-          const params = atLevel(level, { nebulaShare: 1, sideElevation: [elevation, elevation], baseSeed: 0x6e0 + 7 * cases, nebulaFor: nebulaParams });
-          const r = againstMain(params, 1 / 60, (encounter, ship) => {
-            if (encounter.kind !== 'nebula') throw new Error(`${label}: a ${encounter.kind}`);
-            if (cornersFor !== encounter) {
-              corners = nebulaLayerCorners(encounter.nebula as NebulaParams, encounter.plan);
-              cornersFor = encounter;
-            }
-            const centre = encounterOffset(encounter.plan, ship.position, { x: 0, y: 0, z: 0 });
-            return corners.some((layer) => polygonInView(layer.map((c) => ({ x: c.x + centre.x, y: c.y + centre.y, z: c.z + centre.z })), ship.heading));
-          });
-          smallest = Math.min(smallest, r.encounter.plan.radius);
-          largest = Math.max(largest, r.encounter.plan.radius);
-          expect(r.worstProfileError, label).toBe(0);
-          expect(r.inViewFrames, label).toBeGreaterThan(1000);
-          expect(r.worstExcess, label).toBeLessThanOrEqual(1e-9);
-          expect(r.inViewAfterEnd, `${label} ${JSON.stringify(r.firstBack)}`).toBe(0);
-          expect(r.endedAt, label).toBeGreaterThan(r.closestAt);
-          cases++;
+      for (const { aspect } of [ASPECTS[0], ASPECTS[2]]) {
+        const view = screenView(aspect);
+        for (const elevation of [-0.6, -0.3, 0, 0.3, 0.6]) {
+          for (let draw = 0; draw < 3; draw++) {
+            const label = `level ${level}, aspect ${aspect}, elevation ${elevation}, draw ${draw}`;
+            let corners: Vec3[][] = [];
+            let cornersFor: ActiveEncounter | null = null;
+            const params = atLevel(level, { nebulaShare: 1, sideElevation: [elevation, elevation], baseSeed: 0x6e0 + 7 * cases, nebulaFor: nebulaParams, view });
+            const r = againstMain(params, 1 / 60, (encounter, ship) => {
+              if (encounter.kind !== 'nebula') throw new Error(`${label}: a ${encounter.kind}`);
+              if (cornersFor !== encounter) {
+                corners = nebulaLayerCorners(encounter.nebula as NebulaParams, encounter.plan);
+                cornersFor = encounter;
+              }
+              const centre = encounterOffset(encounter.plan, ship.position, { x: 0, y: 0, z: 0 });
+              return corners.some((layer) => polygonInView(layer.map((c) => ({ x: c.x + centre.x, y: c.y + centre.y, z: c.z + centre.z })), ship.heading, view));
+            });
+            smallest = Math.min(smallest, r.encounter.plan.radius);
+            largest = Math.max(largest, r.encounter.plan.radius);
+            expect(r.worstProfileError, label).toBe(0);
+            expect(r.inViewFrames, label).toBeGreaterThan(1000);
+            expect(r.worstExcess, label).toBeLessThanOrEqual(1e-9);
+            expect(r.inViewAfterEnd, `${label} ${JSON.stringify(r.firstBack)}`).toBe(0);
+            // A nebula's layers reach across the path: it is on screen until the ship is past them.
+            expect(r.endedAt, label).toBeGreaterThan(r.closestAt);
+            cases++;
+          }
         }
       }
       expect(largest - smallest).toBeGreaterThan(30);
@@ -2079,179 +2411,331 @@ describe('speed driven by visibility', () => {
   );
 
   it.each([0, 1, 2])(
-    'asteroids at level %i, seeded single rocks and fields, elevations from -0.6 to 0.6: while any rock is in the 21:9 view the ship is never faster than on main, and none is in view again after the encounter ends',
+    'asteroids at level %i, seeded single rocks and fields, elevations from -0.6 to 0.6: while any rock is on screen the ship is never faster than on main, and none is on screen again after the encounter ends',
     (level) => {
       let cases = 0;
       let fields = 0;
       let latest = 0;
-      for (const elevation of [-0.6, -0.3, 0, 0.3, 0.6]) {
-        for (let draw = 0; draw < 4; draw++) {
-          const baseSeed = 0xa57 + 11 * cases;
-          const label = `level ${level}, elevation ${elevation}, base seed ${baseSeed}`;
-          let rocks: { centre: Vec3; radius: number }[] = [];
-          let rocksFor: ActiveEncounter | null = null;
-          const params = atLevel(level, { ...onlyKind('asteroid'), sideElevation: [elevation, elevation], baseSeed, asteroidFor: asteroidParams });
-          const r = againstMain(params, 1 / 60, (encounter, ship) => {
-            if (encounter.kind !== 'asteroid') throw new Error(`${label}: a ${encounter.kind}`);
-            if (rocksFor !== encounter) {
-              rocks = rockSpheres(encounter.asteroid as AsteroidParams, encounter.plan);
-              rocksFor = encounter;
-            }
-            const centre = encounterOffset(encounter.plan, ship.position, { x: 0, y: 0, z: 0 });
-            return rocks.some((rock) =>
-              sphereInView({ x: centre.x + rock.centre.x, y: centre.y + rock.centre.y, z: centre.z + rock.centre.z }, rock.radius, ship.heading),
-            );
-          });
-          if (rocks.length > 1) fields++;
-          expect(r.worstProfileError, label).toBe(0);
-          expect(r.inViewFrames, label).toBeGreaterThan(1000);
-          expect(r.worstExcess, label).toBeLessThanOrEqual(1e-9);
-          expect(r.inViewAfterEnd, `${label} ${JSON.stringify(r.firstBack)}`).toBe(0);
-          expect(r.endedAt, label).toBeGreaterThan(r.closestAt);
-          latest = Math.max(latest, r.endedAt - r.closestAt);
-          cases++;
+      for (const { aspect } of [ASPECTS[0], ASPECTS[3]]) {
+        const view = screenView(aspect);
+        for (const elevation of [-0.6, -0.3, 0, 0.3, 0.6]) {
+          for (let draw = 0; draw < 4; draw++) {
+            const baseSeed = 0xa57 + 11 * cases;
+            const label = `level ${level}, aspect ${aspect}, elevation ${elevation}, base seed ${baseSeed}`;
+            let rocks: { centre: Vec3; radius: number }[] = [];
+            let rocksFor: ActiveEncounter | null = null;
+            const params = atLevel(level, { ...onlyKind('asteroid'), sideElevation: [elevation, elevation], baseSeed, asteroidFor: asteroidParams, view });
+            const r = againstMain(params, 1 / 60, (encounter, ship) => {
+              if (encounter.kind !== 'asteroid') throw new Error(`${label}: a ${encounter.kind}`);
+              if (rocksFor !== encounter) {
+                rocks = rockSpheres(encounter.asteroid as AsteroidParams, encounter.plan);
+                rocksFor = encounter;
+              }
+              const centre = encounterOffset(encounter.plan, ship.position, { x: 0, y: 0, z: 0 });
+              return rocks.some((rock) =>
+                sphereInView({ x: centre.x + rock.centre.x, y: centre.y + rock.centre.y, z: centre.z + rock.centre.z }, rock.radius, ship.heading, view),
+              );
+            });
+            if (rocks.length > 1) fields++;
+            expect(r.worstProfileError, label).toBe(0);
+            expect(r.inViewFrames, label).toBeGreaterThan(1000);
+            expect(r.worstExcess, label).toBeLessThanOrEqual(1e-9);
+            expect(r.inViewAfterEnd, `${label} ${JSON.stringify(r.firstBack)}`).toBe(0);
+            if (!Number.isNaN(r.closestAt)) latest = Math.max(latest, r.endedAt - r.closestAt);
+            cases++;
+          }
         }
       }
-      // Fields and single rocks alike, and every one out of view soon after its closest approach.
+      // Fields and single rocks alike, and every one off screen soon after its closest approach.
       expect(fields).toBeGreaterThanOrEqual(4);
       expect(fields).toBeLessThan(cases);
       expect(latest).toBeLessThan(30);
     },
     120_000,
   );
+
+  it.each(ASPECTS)('at $name, with the heading held, an object once off screen would stay off screen for the rest of its pass', ({ aspect }) => {
+    // The encounter ends as soon as the object is off screen; were it kept (the reference run, which
+    // flies the same profile on to the despawn distance), it would not come back while the heading
+    // is held, for every kind of the default mix.
+    const view = screenView(aspect);
+    let checked = 0;
+    const reference = createTravel(
+      { ...DEFAULT_AUTOPILOT_PARAMS, view: null, planetFor: planetParams, nebulaFor: nebulaParams, asteroidFor: asteroidParams, cometFor: cometParams },
+      DEFAULT_SHIP_PARAMS,
+    );
+    let encounter: ActiveEncounter | null = null;
+    let off = false;
+    for (let i = 0; i < 1e7 && checked < 12; i++) {
+      stepTravel(reference, 1 / 60);
+      const a = reference.autopilot;
+      if (a.encounter !== encounter) {
+        if (encounter !== null && off) checked++;
+        encounter = a.encounter;
+        off = false;
+      }
+      if (encounter === null || (a.state !== 'APPROACH' && a.state !== 'FLYBY')) continue;
+      const margin = encounterViewMargin(encounter, reference.ship, view);
+      if (off) expect(margin, `encounter ${encounter.index}`).toBeGreaterThan(0);
+      off ||= margin > 0;
+    }
+    expect(checked).toBeGreaterThan(0);
+  });
 });
 
+/**
+ * The first encounter of a trip from load at speed level `level` and dt = 1/60, of a median planet
+ * (k = 2), the median nebula or the comet `comet`, with the view `view` (null: the departure before
+ * Phase 4, to the despawn distance). Seconds from the moment the object is off the default view (16:9;
+ * `encounterViewMargin` > 0, measured the same way in both runs) until the encounter ends, and until
+ * the next cruise has the ship at 99% of the arrival speed (min(cruise speed, arrival speed)) and at
+ * 99% of the cruise speed; the closest approach in the same terms; and the ship's largest acceleration
+ * from the moment it is off screen on (units per second per second).
+ */
+function departureTimes(kind: 'planet' | 'nebula' | 'comet', level: number, view: Readonly<ViewFrustum> | null, comet?: Readonly<CometParams>) {
+  const params = atLevel(level, {
+    ...onlyKind(kind),
+    planetFor: () => ({ radius: MEDIAN_PLANET_RADIUS }),
+    ...(comet === undefined ? {} : { cometFor: () => comet }),
+    view,
+  });
+  const travel = createTravel(params, DEFAULT_SHIP_PARAMS);
+  const dt = 1 / 60;
+  const cruise = params.cruiseSpeed;
+  const arrival = encounterCruiseSpeed(params);
+  let encounter: ActiveEncounter | null = null;
+  let closestAt = Number.NaN;
+  let outOfView = Number.NaN;
+  let ended = Number.NaN;
+  let atArrival = Number.NaN;
+  let atCruise = Number.NaN;
+  let worstAccel = 0;
+  for (let i = 0; i < 1e6 && (Number.isNaN(atCruise) || Number.isNaN(closestAt)); i++) {
+    const speed = travel.ship.speed;
+    stepTravel(travel, dt);
+    const { ship, autopilot } = travel;
+    if (encounter === null) encounter = autopilot.encounter;
+    if (encounter === null) continue;
+    if (Number.isNaN(closestAt)) {
+      const remaining = encounterRemaining(encounter.plan, ship.position);
+      if (remaining <= 0) closestAt = ship.time + remaining / ship.speed;
+    }
+    if (Number.isNaN(outOfView)) {
+      if (encounterViewMargin(encounter, ship, DEFAULT_AUTOPILOT_PARAMS.view) > 0) outOfView = ship.time;
+      else continue;
+    }
+    worstAccel = Math.max(worstAccel, Math.abs(ship.speed - speed) / dt);
+    if (Number.isNaN(ended) && autopilot.encounter === null) ended = ship.time;
+    if (Number.isNaN(ended)) continue;
+    if (Number.isNaN(atArrival) && ship.speed >= 0.99 * arrival) atArrival = ship.time;
+    if (Number.isNaN(atCruise) && ship.speed >= 0.99 * cruise) atCruise = ship.time;
+  }
+  return {
+    outOfViewAt: outOfView,
+    closest: closestAt - outOfView,
+    ended: ended - outOfView,
+    atArrival: atArrival - outOfView,
+    atCruise: atCruise - outOfView,
+    worstAccel,
+  };
+}
+
+/**
+ * Whether any part of a comet's glow (`cometSpheres`, cached per encounter in `cache`) shows in
+ * `view`, or only its coma with `comaOnly`.
+ */
+function cometOnScreen(
+  cache: { for: Readonly<ActiveEncounter> | null; spheres: { centre: Vec3; radius: number }[] },
+  encounter: Readonly<ActiveEncounter>,
+  ship: Readonly<ShipState>,
+  view: Readonly<ViewFrustum>,
+  comaOnly = false,
+): boolean {
+  if (encounter.kind !== 'comet') throw new Error(`a ${encounter.kind}`);
+  if (cache.for !== encounter) {
+    cache.spheres = cometSpheres(encounter.comet as CometParams, encounter.plan);
+    cache.for = encounter;
+  }
+  const centre = encounterOffset(encounter.plan, ship.position, { x: 0, y: 0, z: 0 });
+  const spheres = comaOnly ? cache.spheres.slice(0, 1) : cache.spheres;
+  return spheres.some((sphere) =>
+    sphereInView({ x: centre.x + sphere.centre.x, y: centre.y + sphere.centre.y, z: centre.z + sphere.centre.z }, sphere.radius, ship.heading, view),
+  );
+}
+
 describe('speed driven by visibility: comets', () => {
-  it("a comet's view margin is the smallest of its bounds' margins (the coma's sphere without them), and its pass factor keeps the path out of the coma", () => {
+  it("a comet's view margin is the smallest frustumSphereMargin of its bounds (the coma's sphere without them) at every aspect, and its pass factor keeps the path out of the coma", () => {
     const comet = cometParams(hash(ENCOUNTER_BASE_SEED, 5));
     const plan = planEncounter({ x: 3, y: -2, z: 7 }, { x: 0.2, y: 0.1, z: -1 }, comet.radius, COMET_ENCOUNTER_DISTANCE, cometPassFactor(comet, 4), 0.4);
     const encounter: CometEncounter = { kind: 'comet', index: 0, seed: comet.seed, side: 'right', comet, plan };
-    const up = { x: plan.side.y * plan.direction.z - plan.side.z * plan.direction.y, y: plan.side.z * plan.direction.x - plan.side.x * plan.direction.z, z: plan.side.x * plan.direction.y - plan.side.y * plan.direction.x };
-    const half = DEFAULT_AUTOPILOT_PARAMS.viewHalfAngle;
-    for (const remaining of [2000, 600, 100, 0, -20, -200]) {
-      const position = { x: 3 + plan.direction.x * (COMET_ENCOUNTER_DISTANCE - remaining), y: -2 + plan.direction.y * (COMET_ENCOUNTER_DISTANCE - remaining), z: 7 + plan.direction.z * (COMET_ENCOUNTER_DISTANCE - remaining) };
-      const ship = { ...createShipState(), position, heading: plan.direction };
-      const nucleus = encounterOffset(plan, position, { x: 0, y: 0, z: 0 });
-      const expected = Math.min(
-        ...comet.bounds.map((b) => {
-          const [a, c, e] = b.offset;
-          const centre = {
-            x: nucleus.x + a * plan.direction.x + c * plan.side.x + e * up.x,
-            y: nucleus.y + a * plan.direction.y + c * plan.side.y + e * up.y,
-            z: nucleus.z + a * plan.direction.z + c * plan.side.z + e * up.z,
-          };
-          return sphereViewMargin(centre, plan.direction, b.radius, half);
-        }),
-      );
-      expect(encounterViewMargin(encounter, ship, half)).toBeCloseTo(expected, 12);
-      // A tail can only keep a comet in view longer than its coma alone would.
-      const bare: CometEncounter = { ...encounter, comet: { radius: comet.radius } };
-      expect(encounterViewMargin(bare, ship, half)).toBeCloseTo(sphereViewMargin(nucleus, plan.direction, comet.radius, half), 12);
-      expect(encounterViewMargin(encounter, ship, half)).toBeLessThanOrEqual(encounterViewMargin(bare, ship, half) + 1e-12);
+    const up = cross(plan.side, plan.direction);
+    for (const { aspect } of ASPECTS) {
+      const view = screenView(aspect);
+      for (const remaining of [2000, 600, 100, 0, -20, -200]) {
+        const position = { x: 3 + plan.direction.x * (COMET_ENCOUNTER_DISTANCE - remaining), y: -2 + plan.direction.y * (COMET_ENCOUNTER_DISTANCE - remaining), z: 7 + plan.direction.z * (COMET_ENCOUNTER_DISTANCE - remaining) };
+        const ship = { ...createShipState(), position, heading: plan.direction };
+        const nucleus = encounterOffset(plan, position, { x: 0, y: 0, z: 0 });
+        const expected = Math.min(
+          ...comet.bounds.map((b) => {
+            const [a, c, e] = b.offset;
+            const centre = {
+              x: nucleus.x + a * plan.direction.x + c * plan.side.x + e * up.x,
+              y: nucleus.y + a * plan.direction.y + c * plan.side.y + e * up.y,
+              z: nucleus.z + a * plan.direction.z + c * plan.side.z + e * up.z,
+            };
+            return frustumSphereMargin(centre, plan.direction, b.radius, view);
+          }),
+        );
+        expect(encounterViewMargin(encounter, ship, view)).toBeCloseTo(expected, 9);
+        // A tail can only keep a comet on screen longer than its coma alone would.
+        const bare: CometEncounter = { ...encounter, comet: { radius: comet.radius } };
+        expect(encounterViewMargin(bare, ship, view)).toBeCloseTo(frustumSphereMargin(nucleus, plan.direction, comet.radius, view), 9);
+        expect(encounterViewMargin(encounter, ship, view)).toBeLessThanOrEqual(encounterViewMargin(bare, ship, view) + 1e-9);
+        expect(encounterViewMargin(encounter, ship, null)).toBe(Number.NEGATIVE_INFINITY);
+      }
     }
     expect(cometPassFactor({ radius: 30 }, 4)).toBe(4);
     expect(cometPassFactor({ radius: 30, passFactor: 1.1 }, 4)).toBe(1 + ENCOUNTER_CLEARANCE_MARGIN);
     expect(cometPassFactor(comet, 99)).toBe(comet.passFactor);
   });
 
+  // Measured with `offScreenTimes` (dt = 1/60, the first 8 comets of a comets-only trip; seconds from
+  // the moment no part of the glow is on the live view):
+  //
+  //   aspect  level  off → 50%     off → 90%     speed at off
+  //   16:9    20     1.72 to 1.77  2.95          4.1 to 4.5
+  //   16:9    60     1.88 to 1.92  3.00          6.3 to 7.9
+  //   16:9    150    3.28 to 3.33  5.03 to 5.08  6.3 to 7.9
+  //   4:3     20     1.68 to 1.75  2.93 to 2.95  4.1 to 5.0
+  //   4:3     60     1.83 to 1.90  2.98 to 3.00  6.6 to 9.8
+  //   4:3     150    3.23 to 3.32  4.98 to 5.08  6.6 to 9.8
+  //   21:9    20     1.75 to 1.77  2.95          4.0 to 4.2
+  //   21:9    60     1.90 to 1.92  3.00          6.2 to 7.0
+  //   21:9    150    3.32 to 3.33  5.07 to 5.08  6.2 to 7.0
+  //   32:9    (as 21:9, whose horizontal view it keeps)
+  //
+  // Every one leaves the screen before its closest approach (at the default and top levels 2.2 to
+  // 3.9 s before it, so the ship is mostly back at speed by then), sideways with its coma.
+  describe.each(ASPECTS)('at $name', ({ aspect }) => {
+    it.each([0, 1, 2])('level %i: over the first 8 comets of a comets-only trip the ship is at 50% and 90% of the cruise speed within the limits of the comet leaving the screen', (level) => {
+      const cache = { for: null as Readonly<ActiveEncounter> | null, spheres: [] as { centre: Vec3; radius: number }[] };
+      const params = atLevel(level, { ...onlyKind('comet'), cometFor: cometParams, view: screenView(aspect) });
+      const { rows, worstAccel, worstJerk } = offScreenTimes(params, 8, (encounter, ship, view) => cometOnScreen(cache, encounter, ship, view));
+      const limits = OFF_TO_CRUISE_LIMITS[level]!;
+      expect(rows).toHaveLength(8);
+      rows.forEach((row, i) => {
+        const label = `comet ${i}: ${JSON.stringify(row)}`;
+        expect(row.offToHalf, label).toBeLessThanOrEqual(limits.half);
+        expect(row.offToMost, label).toBeLessThanOrEqual(limits.most);
+      });
+      expect(worstAccel).toBeLessThanOrEqual(ENCOUNTER_VIEW_ENTRY_MAX_RATE * 1.01);
+      expect(worstJerk).toBeLessThan(40);
+    });
+  });
+
   it.each([0, 1, 2])(
-    'comets at level %i, elevations from -0.6 to 0.6: while the coma or any stretch of a tail is in the 21:9 view the ship is never faster than on main, and none is in view again after the encounter ends',
+    'comets at level %i, elevations from -0.6 to 0.6, at 16:9 and 32:9: while the coma or any stretch of a tail is on screen the ship is never faster than on main, and none is on screen again after the encounter ends',
     (level) => {
       let cases = 0;
-      let latest = 0;
-      for (const elevation of [-0.6, 0, 0.6]) {
-        for (let draw = 0; draw < 3; draw++) {
-          const baseSeed = 0xc0e + 13 * cases;
-          const label = `level ${level}, elevation ${elevation}, base seed ${baseSeed}`;
-          let spheres: { centre: Vec3; radius: number }[] = [];
-          let spheresFor: ActiveEncounter | null = null;
-          const params = atLevel(level, { ...onlyKind('comet'), sideElevation: [elevation, elevation], baseSeed, cometFor: cometParams });
-          const r = againstMain(params, 1 / 60, (encounter, ship) => {
-            if (encounter.kind !== 'comet') throw new Error(`${label}: a ${encounter.kind}`);
-            if (spheresFor !== encounter) {
-              spheres = cometSpheres(encounter.comet as CometParams, encounter.plan);
-              spheresFor = encounter;
-            }
-            const centre = encounterOffset(encounter.plan, ship.position, { x: 0, y: 0, z: 0 });
-            return spheres.some((sphere) =>
-              sphereInView({ x: centre.x + sphere.centre.x, y: centre.y + sphere.centre.y, z: centre.z + sphere.centre.z }, sphere.radius, ship.heading),
-            );
-          });
-          expect(spheres.length, label).toBe(1 + 2 * 40);
-          expect(r.worstProfileError, label).toBe(0);
-          expect(r.inViewFrames, label).toBeGreaterThan(1000);
-          expect(r.worstExcess, label).toBeLessThanOrEqual(1e-9);
-          expect(r.inViewAfterEnd, `${label} ${JSON.stringify(r.firstBack)}`).toBe(0);
-          expect(r.endedAt, label).toBeGreaterThan(r.closestAt);
-          latest = Math.max(latest, r.endedAt - r.closestAt);
-          cases++;
+      let latest = Number.NEGATIVE_INFINITY;
+      let earliest = Number.POSITIVE_INFINITY;
+      // How long the tails keep a comet on screen after its coma has left it.
+      let tailsKeep = 0;
+      for (const { aspect } of [ASPECTS[0], ASPECTS[3]]) {
+        const view = screenView(aspect);
+        for (const elevation of [-0.6, 0, 0.6]) {
+          for (let draw = 0; draw < 3; draw++) {
+            const baseSeed = 0xc0e + 13 * cases;
+            const label = `level ${level}, aspect ${aspect}, elevation ${elevation}, base seed ${baseSeed}`;
+            const cache = { for: null as Readonly<ActiveEncounter> | null, spheres: [] as { centre: Vec3; radius: number }[] };
+            const params = atLevel(level, { ...onlyKind('comet'), sideElevation: [elevation, elevation], baseSeed, cometFor: cometParams, view });
+            let comaOff = Number.NaN;
+            let allOff = Number.NaN;
+            const r = againstMain(params, 1 / 60, (encounter, ship) => {
+              const onScreen = cometOnScreen(cache, encounter, ship, view);
+              if (Number.isNaN(comaOff) && !cometOnScreen(cache, encounter, ship, view, true)) comaOff = ship.time;
+              if (Number.isNaN(allOff) && !onScreen) allOff = ship.time;
+              return onScreen;
+            });
+            expect(cache.spheres.length, label).toBe(1 + 2 * 40);
+            expect(r.worstProfileError, label).toBe(0);
+            expect(r.inViewFrames, label).toBeGreaterThan(1000);
+            expect(r.worstExcess, label).toBeLessThanOrEqual(1e-9);
+            expect(r.inViewAfterEnd, `${label} ${JSON.stringify(r.firstBack)}`).toBe(0);
+            // The closest approach of the reference run, which the run as now never reaches before it ends.
+            const closestAt = Number.isNaN(r.closestAt) ? Number.POSITIVE_INFINITY : r.closestAt;
+            latest = Math.max(latest, r.endedAt - closestAt);
+            earliest = Math.min(earliest, r.endedAt - closestAt);
+            tailsKeep = Math.max(tailsKeep, allOff - comaOff);
+            cases++;
+          }
         }
       }
-      // The tails lie behind the camera after the closest approach, so a comet leaves the view with
-      // its coma: measured within about 0.1 s of the closest approach at every level.
-      expect(latest).toBeLessThan(2);
+      // Measured (seconds from the closest approach to the end; negative: before it): -7.5 to -3.3 at
+      // the slowest level, -3.7 to -2.2 at the default and top levels. The tails point back along the
+      // path and away from it, so from the camera they lie farther out to the comet's side than the
+      // coma, and they leave the screen no later than the coma does (measured: on the same step).
+      expect(latest, `${earliest} to ${latest}`).toBeLessThan(0);
+      expect(tailsKeep).toBeLessThanOrEqual(1 / 60 + 1e-9);
     },
     120_000,
   );
 
-  it.each([0, 1, 2])('at level %i a comet encounter ends within a second of the closest approach, and the ship is back at the arrival speed soon after', (level) => {
+  it.each([0, 1, 2])('at level %i a comet encounter ends as soon as the comet is off screen, and the ship is back at the arrival speed soon after', (level) => {
     const comet = cometParams(hash(ENCOUNTER_BASE_SEED, 5));
-    const before = departureTimes('comet', level, Math.PI, comet);
-    const after = departureTimes('comet', level, DEFAULT_AUTOPILOT_PARAMS.viewHalfAngle, comet);
+    const before = departureTimes('comet', level, null, comet);
+    const after = departureTimes('comet', level, DEFAULT_AUTOPILOT_PARAMS.view, comet);
     const label = `comet at level ${level}: ${JSON.stringify({ before, after })}`;
-    // Measured (seconds after the closest approach; before → after, before being main's departure to
-    // the despawn distance): out of view 0.01–0.02 s after it at every level (the tails are behind the
-    // camera, and the coma is already beside it), so the encounter ends on the step after (DEPARTURE
-    // lasts at least one); back at the arrival speed 115.3 → 13.5 (level 0), 54.7 → 13.8 (level 1) and
-    // 54.7 → 7.0 (level 2).
-    expect(after.outOfView, label).toBe(before.outOfView);
-    expect(after.outOfView, label).toBeLessThan(0.1);
-    expect(after.ended - after.outOfView, label).toBeLessThanOrEqual(2 / 60 + 1e-9);
+    // Measured (seconds after the comet is off a 16:9 screen; before Phase 4's live view, flown to the
+    // despawn distance → now): the encounter ends 128.2 → 0.02 (level 0), 63.2 → 0.02 (levels 1 and
+    // 2); the ship is at the arrival speed 128.2 → 3.6, 63.2 → 3.6 and 63.2 → 2.9, and at the cruise
+    // speed 128.2 → 3.6, 63.2 → 3.6 and 76.1 → 6.0. From the closest approach to the arrival speed:
+    // 115.3 → -0.6 (before the ship even reaches it), 54.7 → 1.0 and 54.7 → 0.2.
+    expect(after.outOfViewAt, label).toBe(before.outOfViewAt);
+    expect(after.ended, label).toBeGreaterThanOrEqual(0);
+    expect(after.ended, label).toBeLessThanOrEqual(3 / 60 + 1e-9);
     expect(after.atArrival, label).toBeLessThan(before.atArrival);
     expect(after.atCruise, label).toBeLessThan(before.atCruise);
-    // As for planets (docs/PLAN.md section 9, Phase 4): at least 50% sooner at the default and top levels.
-    if (level >= SHIP_DEFAULT_SPEED_LEVEL) expect(after.atArrival, label).toBeLessThanOrEqual(0.5 * before.atArrival);
-    expect(after.worstAccel, label).toBeLessThan(16);
+    expect(after.atCruise, label).toBeLessThan(viewEntryDuration(atLevel(level), atLevel(level).comet.profile.minSpeed) + 0.5);
+    expect(after.atCruise, label).toBeLessThanOrEqual(0.2 * before.atCruise);
+    expect(after.worstAccel, label).toBeLessThanOrEqual(ENCOUNTER_VIEW_ENTRY_MAX_RATE * 1.01);
   });
 });
 
 describe('speed driven by visibility: the departure, before and after', () => {
-  // Measured with `departureTimes` (seconds after the closest approach; before → after):
+  // Measured with `departureTimes` (seconds after the object is off a 16:9 screen, for the median
+  // planet, k = 2, and the median nebula; before Phase 4, flown to the despawn distance → now; the
+  // closest approach in the same terms, negative when it came before):
   //
-  //   kind    level  out of view   encounter ends   at arrival speed   at cruise speed
-  //   planet  20     1.5           130.4 → 1.5      130.4 → 15.1       130.4 → 15.1
-  //   planet  60     1.0            59.7 → 1.0       59.7 → 14.8        59.7 → 14.8
-  //   planet  150    1.0            59.7 → 1.0       59.7 → 8.0         72.6 → 18.3
-  //   nebula  20     60.3           90.0 → 60.3      90.0 → 60.3        90.0 → 60.3
-  //   nebula  60     23.9           33.8 → 23.9      33.8 → 26.1        33.8 → 26.1
-  //   nebula  150    23.9           33.8 → 23.9      33.8 → 24.9        46.7 → 36.9
-  it.each([0, 1, 2])('at level %i the ship is back at speed sooner after the closest approach, a median planet at least 50% sooner, with gentle acceleration', (level) => {
+  //   kind    level  closest   encounter ends   at arrival speed   at cruise speed
+  //   planet  20       2.2     132.6 → 0.0      132.6 → 3.6        132.6 → 3.6
+  //   planet  60       1.4     61.1 → 0.0       61.1 → 3.6         61.1 → 3.6
+  //   planet  150      1.4     61.1 → 0.0       61.1 → 2.9         74.0 → 6.1
+  //   nebula  20     -60.3     29.7 → 0.0       29.7 → 0.0         29.7 → 0.0
+  //   nebula  60     -23.9     9.9 → 0.0        9.9 → 1.5          9.9 → 1.5
+  //   nebula  150    -23.9     9.9 → 0.0        9.9 → 0.4          22.8 → 3.8
+  it.each([0, 1, 2])('at level %i the ship is back at speed much sooner once the object is off screen, with a smooth acceleration', (level) => {
     const cruise = SHIP_SPEED_LEVELS[level]!;
     for (const kind of ['planet', 'nebula'] as const) {
-      const before = departureTimes(kind, level, Math.PI);
-      const after = departureTimes(kind, level, DEFAULT_AUTOPILOT_PARAMS.viewHalfAngle);
+      const before = departureTimes(kind, level, null);
+      const after = departureTimes(kind, level, DEFAULT_AUTOPILOT_PARAMS.view);
       const label = `${kind} at level ${level}: ${JSON.stringify({ before, after })}`;
-      // The same until the object is out of view, and the encounter ends right then.
-      expect(after.outOfView, label).toBe(before.outOfView);
-      expect(after.ended, label).toBe(after.outOfView);
+      // The same until the object is off screen, and the encounter ends within three steps of it.
+      expect(after.outOfViewAt, label).toBe(before.outOfViewAt);
+      expect(after.ended, label).toBeGreaterThanOrEqual(0);
+      expect(after.ended, label).toBeLessThanOrEqual(3 / 60 + 1e-9);
       expect(after.ended, label).toBeLessThan(before.ended);
       expect(after.atArrival, label).toBeLessThan(before.atArrival);
       expect(after.atCruise, label).toBeLessThan(before.atCruise);
-      if (kind === 'planet') {
-        // A planet is out of view within a couple of seconds of the closest approach.
-        expect(after.outOfView, label).toBeLessThan(2);
-        // The acceptance bound (docs/PLAN.md section 9, Phase 4) at the default and top levels; in
-        // fact at every level the time to cruise speed is at least 70% shorter.
-        if (level >= SHIP_DEFAULT_SPEED_LEVEL) expect(after.atArrival, label).toBeLessThanOrEqual(0.5 * before.atArrival);
-        expect(after.atCruise, label).toBeLessThanOrEqual(0.3 * before.atCruise);
-      }
-      // Acceleration stays gentle: at the reduced-motion level, no more than the return from the
-      // floored minimum speed (4 to 20 over the entry time: a slope of at most 3); at the top level,
-      // under 16, as for the drop out of warp.
+      // Back at the cruise speed (99%) within the quick entry and a frame or two.
+      expect(after.atCruise, label).toBeLessThan(viewEntryDuration(atLevel(level), atLevel(level).profile.minSpeed) + 0.5);
+      if (kind === 'planet') expect(after.atCruise, label).toBeLessThanOrEqual(0.2 * before.atCruise);
+      // No steeper than the quick entry allows: at the reduced-motion level, the return from the
+      // floored minimum speed over the entry time (16 over 4 s: at most 7.5).
       if (level === REDUCED_MOTION_SPEED_LEVEL) {
-        expect(after.worstAccel, label).toBeLessThanOrEqual((1.5 * (cruise - ENCOUNTER_MIN_SPEED_FLOOR)) / ENCOUNTER_WARP_ENTRY_SECONDS);
+        expect(after.worstAccel, label).toBeLessThanOrEqual((1.875 * (cruise - ENCOUNTER_MIN_SPEED_FLOOR)) / ENCOUNTER_VIEW_ENTRY_SECONDS + 0.1);
       }
-      expect(after.worstAccel, label).toBeLessThan(16);
+      expect(after.worstAccel, label).toBeLessThanOrEqual(ENCOUNTER_VIEW_ENTRY_MAX_RATE * 1.01);
     }
   });
 });
