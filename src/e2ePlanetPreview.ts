@@ -8,12 +8,13 @@
  * - A planet sits at a fixed position relative to the camera, scaled by its radius so every planet
  *   is framed the same. On request the far-star layer (FarStarfield, the engine's own) is drawn
  *   behind it, with the engine's render order, so a test can check that the planet hides the far
- *   stars behind its disc.
+ *   stars behind its disc. Likewise the galaxy layer (Galaxies, the engine's own), with the test
+ *   default trip's first galaxy aimed once straight behind the disc and once beside it.
  * - A nebula is seen as in its encounter, mid-APPROACH: planned along -Z on its seeded side of the
  *   path (`encounterSide`), with the camera NEBULA_PREVIEW_REMAINING short of the closest approach,
  *   fully faded in.
  */
-import { PerspectiveCamera, SRGBColorSpace, Scene, WebGLRenderer } from 'three';
+import { PerspectiveCamera, SRGBColorSpace, Scene, Vector3, WebGLRenderer } from 'three';
 import {
   CAMERA_FAR,
   CAMERA_FOV_DEG,
@@ -27,6 +28,7 @@ import {
 import { encounterSide, type EncounterKind, type EncounterSide } from './engine/Autopilot';
 import { encounterOffset, planEncounter } from './engine/encounter';
 import { FarStarfield } from './engine/FarStarfield';
+import { Galaxies, generateGalaxies, type Galaxy } from './engine/Galaxies';
 import { Nebula, nebulaParams } from './engine/Nebula';
 import { Planet, planetParams, type PlanetType } from './engine/Planet';
 import { computeRenderSize } from './engine/renderSize';
@@ -60,11 +62,20 @@ export interface PlanetPreviewInfo {
    * (their direction within 0.8 × the disc's angular radius of its centre). `null` without them.
    */
   farStarsBehindDisc: number | null;
+  /**
+   * With the galaxies drawn: where the two copies of the galaxy are centred on the canvas, in CSS
+   * pixels from the top-left corner (one behind the disc's centre, one beside the disc), its
+   * angular size in degrees, and the radius of its quad along the major axis in CSS pixels (at the
+   * centre of the view; a little more off-centre). `null` without them.
+   */
+  galaxies: { behind: { x: number; y: number }; beside: { x: number; y: number }; sizeDeg: number; radius: number } | null;
 }
 
 export interface PlanetPreviewOptions {
   /** Draw the far-star layer behind the planet. Default: false. */
   farStars?: boolean;
+  /** Draw a galaxy straight behind the planet's disc and one beside it, on the galaxy layer. Default: false. */
+  galaxies?: boolean;
 }
 
 export interface EncounterPreviewInfo {
@@ -84,6 +95,7 @@ let canvas: HTMLCanvasElement | null = null;
 let renderer: WebGLRenderer | null = null;
 let shown: Planet | Nebula | null = null;
 let farStars: FarStarfield | null = null;
+let galaxies: Galaxies | null = null;
 // Created on first use, so merely importing this module has no side effects.
 let scene: Scene | null = null;
 let camera: PerspectiveCamera | null = null;
@@ -120,6 +132,9 @@ function prepare(): { renderer: WebGLRenderer; scene: Scene; camera: Perspective
   shown?.dispose();
   shown = null;
   if (farStars !== null) scene.remove(farStars.mesh);
+  if (galaxies !== null) scene.remove(galaxies.mesh);
+  galaxies?.dispose();
+  galaxies = null;
   return { renderer, scene, camera };
 }
 
@@ -150,7 +165,7 @@ function farStarsWithin(stars: FarStarfield, centre: { x: number; y: number; z: 
 function drawPlanet(
   seed: number,
   options: Readonly<PlanetPreviewOptions> = {},
-): { planet: Planet; disc: PlanetPreviewInfo['disc']; farStarsBehindDisc: number | null } {
+): Pick<PlanetPreviewInfo, 'disc' | 'farStarsBehindDisc' | 'galaxies'> & { planet: Planet } {
   const { renderer: r, scene: s, camera: c } = prepare();
   const params = planetParams(seed);
   const planet = new Planet(params);
@@ -160,12 +175,42 @@ function drawPlanet(
   planet.update(PREVIEW_TIME);
   s.add(planet.object);
   const stars = options.farStars === true ? addFarStars(s) : null;
-  r.render(s, c);
-
-  // The disc: centre projected, radius from the angular radius (the camera looks down -Z unrotated).
   const p = planet.object.position;
   const distance = p.length();
   const angularRadius = Math.asin(Math.min(1, planet.object.scale.x / distance));
+  const toCss = (d: { x: number; y: number; z: number }) => {
+    const ndc = c.position.clone().add(new Vector3(d.x, d.y, d.z)).project(c);
+    return { x: (ndc.x + 1) * (window.innerWidth / 2), y: (1 - ndc.y) * (window.innerHeight / 2) };
+  };
+  let galaxyInfo: PlanetPreviewInfo['galaxies'] = null;
+  if (options.galaxies === true) {
+    // The test default trip's first galaxy, aimed at the disc's centre, and turned (about +Y) to
+    // 2.1 angular radii left of it, well clear of the disc and its atmosphere glow.
+    const template = generateGalaxies(ENCOUNTER_BASE_SEED)[0]!;
+    const behind = { x: p.x / distance, y: p.y / distance, z: p.z / distance };
+    const turn = 2.1 * angularRadius;
+    const beside = {
+      x: behind.x * Math.cos(turn) + behind.z * Math.sin(turn),
+      y: behind.y,
+      z: -behind.x * Math.sin(turn) + behind.z * Math.cos(turn),
+    };
+    const copies: Galaxy[] = [
+      { ...template, direction: behind },
+      { ...template, direction: beside },
+    ];
+    galaxies = new Galaxies(copies);
+    s.add(galaxies.mesh);
+    const focal = window.innerHeight / 2 / Math.tan(((c.fov / 2) * Math.PI) / 180);
+    galaxyInfo = {
+      behind: toCss(behind),
+      beside: toCss(beside),
+      sizeDeg: (template.size * 180) / Math.PI,
+      radius: Math.tan(template.size / 2) * focal,
+    };
+  }
+  r.render(s, c);
+
+  // The disc: centre projected, radius from the angular radius (the camera looks down -Z unrotated).
   const centre = p.clone().project(c);
   const halfHeight = window.innerHeight / 2;
   const focal = halfHeight / Math.tan(((c.fov / 2) * Math.PI) / 180);
@@ -176,7 +221,7 @@ function drawPlanet(
   };
   const farStarsBehindDisc =
     stars === null ? null : farStarsWithin(stars, { x: p.x / distance, y: p.y / distance, z: p.z / distance }, 0.8 * angularRadius);
-  return { planet, disc, farStarsBehindDisc };
+  return { planet, disc, farStarsBehindDisc, galaxies: galaxyInfo };
 }
 
 /** Draws the nebula for appearance seed `seed` as seen mid-APPROACH, replacing anything shown. */
@@ -209,7 +254,7 @@ function drawNebula(seed: number): Nebula {
  */
 export function showPlanetPreview(type: PlanetType, nth = 0, options: Readonly<PlanetPreviewOptions> = {}): PlanetPreviewInfo {
   const { index, seed } = findSeed(type, Math.max(0, Math.floor(nth)));
-  const { planet, disc, farStarsBehindDisc } = drawPlanet(seed, options);
+  const { planet, disc, farStarsBehindDisc, galaxies: galaxyInfo } = drawPlanet(seed, options);
   const { params } = planet;
   return {
     index,
@@ -220,6 +265,7 @@ export function showPlanetPreview(type: PlanetType, nth = 0, options: Readonly<P
     programs: renderer?.info.programs?.length ?? 0,
     disc,
     farStarsBehindDisc,
+    galaxies: galaxyInfo,
   };
 }
 
@@ -245,6 +291,9 @@ export function hidePlanetPreview(): void {
   if (farStars !== null) scene?.remove(farStars.mesh);
   farStars?.dispose();
   farStars = null;
+  if (galaxies !== null) scene?.remove(galaxies.mesh);
+  galaxies?.dispose();
+  galaxies = null;
   renderer?.dispose();
   renderer = null;
   canvas?.remove();

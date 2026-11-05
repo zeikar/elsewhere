@@ -84,6 +84,8 @@ export interface E2EHookSnapshot {
   dpr: number;
   frames: number;
   cameraAspect: number;
+  /** The camera's vertical field of view, in degrees. */
+  cameraFovDeg: number;
   ship: {
     time: number;
     speed: number;
@@ -223,7 +225,8 @@ export interface E2EHook {
   /**
    * Draws the `nth` (default 0) encounter planet of `type` at a fixed position in front of the camera
    * on an overlay canvas (`#planet-preview`), replacing any planet already shown. With
-   * `{ farStars: true }` the far-star layer is drawn behind it, as in the engine.
+   * `{ farStars: true }` the far-star layer is drawn behind it, as in the engine, and with
+   * `{ galaxies: true }` a galaxy straight behind the disc and one beside it.
    */
   showPlanet(type: PlanetType, nth?: number, options?: PlanetPreviewOptions): PlanetPreviewInfo;
   /**
@@ -366,6 +369,7 @@ export function installE2EHook(engine: Engine): void {
         dpr: engine.getAppliedDpr(),
         frames: engine.getFrameCount(),
         cameraAspect: engine.getCameraAspect(),
+        cameraFovDeg: engine.getCamera().fov,
         ship: {
           time: ship.time,
           speed: ship.speed,
