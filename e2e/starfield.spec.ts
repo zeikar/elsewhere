@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import type { E2EHookSnapshot } from '../src/e2eHook';
-import { FAR_STAR_BASE_SIZE_PX, FAR_STAR_COUNT, STAR_BASE_SIZE_PX } from '../src/config';
+import { FAR_STAR_BASE_SIZE_PX, FAR_STAR_COUNT, SHIP_DEFAULT_SPEED_LEVEL, SHIP_SPEED_LEVELS, STAR_BASE_SIZE_PX } from '../src/config';
 import { SOAK_HEAP_GROWTH_LIMIT_BYTES } from './limits';
 
 const APP_PATH = '/elsewhere/';
@@ -35,9 +35,13 @@ function snapshot(page: Page): Promise<E2EHookSnapshot> {
   return page.evaluate(() => window.__elsewhere!.snapshot());
 }
 
-/** Screenshots the canvas and counts lit pixels, decoding the PNG in the page (no extra deps). */
+/**
+ * Screenshots the canvas and counts lit pixels, decoding the PNG in the page (no extra deps). The
+ * controls are hidden for the shot: they are shown for the first UI_HIDE_DELAY_MS after load and
+ * would otherwise count as lit pixels in a view taken at rest.
+ */
 async function canvasShot(page: Page): Promise<{ png: Buffer; lit: number; total: number }> {
-  const png = await page.locator('canvas').screenshot();
+  const png = await page.locator('canvas').screenshot({ style: CANVAS_ONLY });
   const counts = await page.evaluate(
     async ({ b64, threshold }) => {
       const blob = await (await fetch(`data:image/png;base64,${b64}`)).blob();
@@ -76,15 +80,20 @@ test('draws stars after 1 s, with no console errors', async ({ page }) => {
 });
 
 interface SpeedViews {
+  /** At rest (speed 0). */
   slow: Awaited<ReturnType<typeof canvasShot>>;
+  /** At the default speed level's cruise speed. */
+  cruise: Awaited<ReturnType<typeof canvasShot>>;
+  /** At the top speed level's cruise speed. */
   fast: Awaited<ReturnType<typeof canvasShot>>;
   still: E2EHookSnapshot;
 }
 
 /**
  * Loads `query` with a paused fake clock, so no frame runs until the test steps time and the first
- * view is at speed 0, then steps 8 s of simulation in 0.1 s frames at the top speed level (one frame
- * per jump) and takes a second view.
+ * view is at speed 0. Then steps 8 s of simulation in 0.1 s frames (one frame per jump) at the
+ * default speed level, which travel starts at, and takes a second view, then 8 s more at the top
+ * speed level and takes a third.
  */
 async function speedViews(page: Page, query: string): Promise<SpeedViews> {
   await page.clock.install({ time: 0 });
@@ -96,19 +105,36 @@ async function speedViews(page: Page, query: string): Promise<SpeedViews> {
   expect(still.ship.speed).toBe(0);
   const slow = await canvasShot(page);
 
+  for (let i = 0; i < 80; i++) await page.clock.fastForward(100);
+  const cruising = await snapshot(page);
+  expect(cruising.frames).toBeGreaterThan(still.frames);
+  expect(cruising.speed).toBe(SHIP_DEFAULT_SPEED_LEVEL);
+  expect(cruising.ship.speed).toBeGreaterThan(0.9 * SHIP_SPEED_LEVELS[SHIP_DEFAULT_SPEED_LEVEL]);
+  expect(cruising.ship.speed).toBeLessThan(SHIP_SPEED_LEVELS[SHIP_DEFAULT_SPEED_LEVEL] + 1);
+  const cruise = await canvasShot(page);
+
   // setSpeed clamps, so 99 selects the top level.
   await page.evaluate(() => window.__elsewhere!.setSpeed(99));
   for (let i = 0; i < 80; i++) await page.clock.fastForward(100);
   const moving = await snapshot(page);
-  expect(moving.frames).toBeGreaterThan(still.frames);
-  expect(moving.ship.speed).toBeGreaterThan(100);
+  expect(moving.frames).toBeGreaterThan(cruising.frames);
+  expect(moving.ship.speed).toBeGreaterThan(0.9 * SHIP_SPEED_LEVELS[SHIP_SPEED_LEVELS.length - 1]!);
   expect(moving.autopilot.state).toBe('CRUISE');
   const fast = await canvasShot(page);
   test.info().annotations.push({
-    type: 'lit pixels (slow, fast, ratio)',
-    description: JSON.stringify({ slow: slow.lit, fast: fast.lit, ratio: +(fast.lit / slow.lit).toFixed(3) }),
+    type: 'lit pixels (rest, default level, top level; streak excess over rest; ratios)',
+    description: JSON.stringify({
+      slow: slow.lit,
+      cruise: cruise.lit,
+      fast: fast.lit,
+      cruiseExcess: cruise.lit - slow.lit,
+      fastExcess: fast.lit - slow.lit,
+      fastOverSlow: +(fast.lit / slow.lit).toFixed(3),
+      fastOverCruise: +(fast.lit / cruise.lit).toFixed(3),
+      excessRatio: +((fast.lit - slow.lit) / (cruise.lit - slow.lit)).toFixed(3),
+    }),
   });
-  return { slow, fast, still };
+  return { slow, cruise, fast, still };
 }
 
 test('streak length responds to speed', async ({ page }) => {
