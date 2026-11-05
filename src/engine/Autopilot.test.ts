@@ -32,6 +32,7 @@ import {
   NEBULA_SIDE_OFFSET_FACTOR,
   PLANET_GAS_RANGES,
   PLANET_ROCKY_RANGES,
+  REDUCED_MOTION_SPEED_LEVEL,
   SHIP_DEFAULT_SPEED_LEVEL,
   SHIP_MAX_TURN_RATE_RAD_PER_S,
   SHIP_SPEED_LEVELS,
@@ -1441,13 +1442,68 @@ function againstMain(
   return { encounter: encounter!, closestAt, endedAt, worstExcess, inViewFrames, inViewAfterEnd, worstProfileError, mainEnd, firstBack };
 }
 
+/** The default params at speed level `level` (through `setCruiseSpeed`, as the engine sets it), with `overrides`. */
+function atLevel(level: number, overrides: Partial<AutopilotParams> = {}): AutopilotParams {
+  const params: AutopilotParams = { ...DEFAULT_AUTOPILOT_PARAMS, ...overrides };
+  setCruiseSpeed(params, SHIP_SPEED_LEVELS[level]!);
+  return params;
+}
+
+/**
+ * The first encounter of a trip from load at speed level `level` and dt = 1/60, of a median planet
+ * (k = 2) or the median nebula, with the view cone `viewHalfAngle` (π: main's departure). Seconds
+ * from the closest approach until the object is out of view (`encounterViewMargin` > 0 with the
+ * default cone, measured the same way in both runs), until the encounter ends, and until the next
+ * cruise has the ship at 99% of the arrival speed (min(cruise speed, arrival speed)) and at 99% of
+ * the cruise speed; and the ship's largest acceleration from the closest approach on (units per
+ * second per second).
+ */
+function departureTimes(kind: 'planet' | 'nebula', level: number, viewHalfAngle: number) {
+  const params = atLevel(level, {
+    nebulaShare: kind === 'nebula' ? 1 : 0,
+    planetFor: () => ({ radius: MEDIAN_PLANET_RADIUS }),
+    viewHalfAngle,
+  });
+  const travel = createTravel(params, DEFAULT_SHIP_PARAMS);
+  const dt = 1 / 60;
+  const cruise = params.cruiseSpeed;
+  const arrival = encounterCruiseSpeed(params);
+  let encounter: ActiveEncounter | null = null;
+  let closestAt = Number.NaN;
+  let outOfView = Number.NaN;
+  let ended = Number.NaN;
+  let atArrival = Number.NaN;
+  let atCruise = Number.NaN;
+  let worstAccel = 0;
+  for (let i = 0; i < 1e6 && Number.isNaN(atCruise); i++) {
+    const speed = travel.ship.speed;
+    stepTravel(travel, dt);
+    const { ship, autopilot } = travel;
+    if (encounter === null) encounter = autopilot.encounter;
+    if (encounter === null) continue;
+    if (Number.isNaN(closestAt)) {
+      const remaining = encounterRemaining(encounter.plan, ship.position);
+      if (remaining <= 0) closestAt = ship.time + remaining / ship.speed;
+      else continue;
+    }
+    worstAccel = Math.max(worstAccel, Math.abs(ship.speed - speed) / dt);
+    if (Number.isNaN(outOfView) && encounterViewMargin(encounter, ship, DEFAULT_AUTOPILOT_PARAMS.viewHalfAngle) > 0) outOfView = ship.time;
+    if (Number.isNaN(ended) && autopilot.encounter === null) ended = ship.time;
+    if (Number.isNaN(ended)) continue;
+    if (Number.isNaN(atArrival) && ship.speed >= 0.99 * arrival) atArrival = ship.time;
+    if (ship.speed >= 0.99 * cruise) atCruise = ship.time;
+  }
+  return {
+    outOfView: outOfView - closestAt,
+    ended: ended - closestAt,
+    atArrival: atArrival - closestAt,
+    atCruise: atCruise - closestAt,
+    worstAccel,
+  };
+}
+
 describe('speed driven by visibility', () => {
   const HALF_ANGLE = DEFAULT_AUTOPILOT_PARAMS.viewHalfAngle;
-  const atLevel = (level: number, overrides: Partial<AutopilotParams> = {}): AutopilotParams => {
-    const params: AutopilotParams = { ...DEFAULT_AUTOPILOT_PARAMS, ...overrides };
-    setCruiseSpeed(params, SHIP_SPEED_LEVELS[level]!);
-    return params;
-  };
 
   it('the view cone holds the whole view at 21:9 and at every narrower aspect ratio, and reaches the 21:9 corners', () => {
     expect(HALF_ANGLE).toBe(viewConeHalfAngle(CAMERA_FOV_DEG, VIEW_WIDEST_ASPECT));
@@ -1631,4 +1687,45 @@ describe('speed driven by visibility', () => {
     },
     60_000,
   );
+});
+
+describe('speed driven by visibility: the departure, before and after', () => {
+  // Measured with `departureTimes` (seconds after the closest approach; before → after):
+  //
+  //   kind    level  out of view   encounter ends   at arrival speed   at cruise speed
+  //   planet  20     1.5           130.4 → 1.5      130.4 → 15.1       130.4 → 15.1
+  //   planet  60     1.0            59.7 → 1.0       59.7 → 14.8        59.7 → 14.8
+  //   planet  150    1.0            59.7 → 1.0       59.7 → 8.0         72.6 → 18.3
+  //   nebula  20     60.3           90.0 → 60.3      90.0 → 60.3        90.0 → 60.3
+  //   nebula  60     23.9           33.8 → 23.9      33.8 → 26.1        33.8 → 26.1
+  //   nebula  150    23.9           33.8 → 23.9      33.8 → 24.9        46.7 → 36.9
+  it.each([0, 1, 2])('at level %i the ship is back at speed sooner after the closest approach, a median planet at least 50% sooner, with gentle acceleration', (level) => {
+    const cruise = SHIP_SPEED_LEVELS[level]!;
+    for (const kind of ['planet', 'nebula'] as const) {
+      const before = departureTimes(kind, level, Math.PI);
+      const after = departureTimes(kind, level, DEFAULT_AUTOPILOT_PARAMS.viewHalfAngle);
+      const label = `${kind} at level ${level}: ${JSON.stringify({ before, after })}`;
+      // The same until the object is out of view, and the encounter ends right then.
+      expect(after.outOfView, label).toBe(before.outOfView);
+      expect(after.ended, label).toBe(after.outOfView);
+      expect(after.ended, label).toBeLessThan(before.ended);
+      expect(after.atArrival, label).toBeLessThan(before.atArrival);
+      expect(after.atCruise, label).toBeLessThan(before.atCruise);
+      if (kind === 'planet') {
+        // A planet is out of view within a couple of seconds of the closest approach.
+        expect(after.outOfView, label).toBeLessThan(2);
+        // The acceptance bound (docs/PLAN.md section 9, Phase 4) at the default and top levels; in
+        // fact at every level the time to cruise speed is at least 70% shorter.
+        if (level >= SHIP_DEFAULT_SPEED_LEVEL) expect(after.atArrival, label).toBeLessThanOrEqual(0.5 * before.atArrival);
+        expect(after.atCruise, label).toBeLessThanOrEqual(0.3 * before.atCruise);
+      }
+      // Acceleration stays gentle: at the reduced-motion level, no more than the return from the
+      // floored minimum speed (4 to 20 over the entry time: a slope of at most 3); at the top level,
+      // under 16, as for the drop out of warp.
+      if (level === REDUCED_MOTION_SPEED_LEVEL) {
+        expect(after.worstAccel, label).toBeLessThanOrEqual((1.5 * (cruise - ENCOUNTER_MIN_SPEED_FLOOR)) / ENCOUNTER_WARP_ENTRY_SECONDS);
+      }
+      expect(after.worstAccel, label).toBeLessThan(16);
+    }
+  });
 });
