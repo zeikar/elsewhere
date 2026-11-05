@@ -68,11 +68,16 @@ Travel states: `CRUISE → APPROACH → FLYBY → DEPARTURE → CRUISE`
 - [x] Respect `prefers-reduced-motion`
 - [x] Stable rendering across tab switches and long runs
 
-### Optional (after the MVP)
+### Phase 4 (after the MVP)
+
+Built in section 9 Phase 4, together with the rest of its list.
 
 - [ ] More planet variety: ringed, icy, and so on
-- [ ] Quality presets and adaptive resolution
 - [x] Shareable seed in the URL
+
+### Optional (after the MVP)
+
+- [ ] Quality presets and adaptive resolution
 - [ ] Soundscape (muted by default)
 
 ### Out of scope for this version
@@ -81,7 +86,7 @@ Travel states: `CRUISE → APPROACH → FLYBY → DEPARTURE → CRUISE`
 - Accounts, login, player IDs
 - First-discovery records and a database
 - Manual flight, landing, collision physics
-- Black holes, detailed galaxies, real astronomical data
+- Black holes, detailed (explorable) galaxies, real astronomical data
 - Chat, missions, score, economy
 
 Future ideas go in `IDEAS.md` and are not added to the current scope.
@@ -128,6 +133,12 @@ Travelling forward forever makes positions grow until float32 precision on the G
 
 - Build depth with layered planes or a cheap shader.
 - Expensive volumetric raymarching is out of the MVP.
+
+### Variety (Phase 4)
+
+- **Trip seed:** Each load picks a random base seed unless the URL already carries one, and writes the seed in use to the URL, so a trip can be shared and replayed. Encounter seeds stay `hash(base seed, encounter index)`.
+- **New encounters:** Ringed planets, icy dwarfs, asteroids and comets follow the planet rule: the path is planned first and the object is placed beside it, so the closest approach is fixed and the camera never passes through a solid part (planet, ring, asteroid or comet nucleus). A comet's tail may reach the camera, but it must never cover the view so that the scene is hidden; check its screen coverage at the closest approach.
+- **Distant galaxies:** Part of the far layer, not encounters. They are fixed, seeded directions turned by the camera's rotation only, drawn with the far stars and never writing depth, so they never move with travel and never hide anything.
 
 ### Performance
 
@@ -209,6 +220,27 @@ Create only the files the implementation needs and avoid needless abstraction. T
 - Performance measurement and optimisation
 
 **Done when:** The stars → approach → flyby → re-acceleration loop repeats smoothly, and long runs stay stable.
+
+### Phase 4: Variety & visibility
+
+**Goal:** Every trip is different, and the sky reads clearly.
+
+- A random trip seed on every load, shareable in the URL
+- Speed driven by visibility: after the closest approach, the ship returns to warp as soon as the object leaves the view
+- Sky legibility: near dust dimmer than the far stars
+- Planet variety: rings, icy dwarfs, wider size and pass-distance ranges
+- Asteroids
+- Comets
+- Distant galaxies in the far sky
+
+**Done when:**
+
+- Two loads without a seed in the URL give different trips, and opening a shared URL replays the same sequence of encounters.
+- After the closest approach, once the object is out of view at the widest supported aspect ratio, the ship eases back into warp. The time from the closest approach to cruise speed is at least 50% shorter than in Phase 3, and while the object is in view the ship is never faster than in Phase 3.
+- The near dust is drawn at a lower brightness than the far stars, so the fixed far stars read as the sky during cruise, and the far stars show visible colour variance.
+- With the documented default test seed, the first 50 encounters include at least one ringed planet, icy dwarf, asteroid and comet. Over many seeds, a planet's angular diameter at the closest approach varies by at least 3× between the 10th and 90th percentiles.
+- With the default test seed, at least one distant galaxy is generated, and galaxies, like the far stars, never move with travel.
+- The camera never passes through a planet, ring, asteroid or comet nucleus, and after 30 minutes JS heap and FPS are not far from their values just after start.
 
 ## 10. Verification checklist
 
