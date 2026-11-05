@@ -205,6 +205,45 @@ export const ENCOUNTER_WARP_EXIT_SECONDS = 10;
 export const ENCOUNTER_WARP_EXIT_LEAD_SECONDS = 3;
 export const ENCOUNTER_WARP_ENTRY_SECONDS = 8;
 
+/**
+ * Speed driven by visibility (docs/PLAN.md section 9, Phase 4): after the closest approach, an
+ * encounter ends as soon as its object is out of view, and the ship eases straight back into warp,
+ * instead of crawling on to the despawn distance with the object already behind the camera.
+ *
+ * "Out of view" is a pure function of the simulation state (the ship's position and heading and the
+ * encounter plan) and the fixed vertical field of view (CAMERA_FOV_DEG), never of the browser's
+ * viewport. The vertical field of view is fixed, so a wider screen only shows more at the sides, and
+ * VIEW_WIDEST_ASPECT (width / height) is the widest supported: 21:9. The autopilot tests against the
+ * cone around the camera's forward axis that contains the whole view at that aspect (its half-angle
+ * reaches the view's corners, about 55.7°; `viewConeHalfAngle`), so an object outside it is
+ * off-screen on every supported screen, whatever the camera's roll. The criterion for each kind:
+ *
+ * - A planet is out of view once the sphere of radius `radius × (1 + ENCOUNTER_CLEARANCE_MARGIN)`,
+ *   which holds everything drawn for it (the atmosphere shell included, see Planets below), lies
+ *   wholly outside the cone. With `k` from 1.6 to 6 that is from a few units after the closest
+ *   approach to well before it, so a planet encounter ends at or just after the closest approach.
+ * - A nebula is large and soft, and its layers reach across the path, so it is out of view only once
+ *   every layer lies behind the camera: the ship is past the farthest any layer reaches along the path
+ *   (`nebulaViewExtent`, a bound drawn from NEBULA_RANGES in core radii), and the heading has not
+ *   turned so far back that the cone could reach behind (checked from the heading, so it holds while
+ *   the drift resumes).
+ *
+ * Until then the target speed is exactly the distance-based profile it always was, so while the object
+ * is in view the ship is never faster than before. The encounter interval still counts the cruise
+ * from the end of each encounter, which now comes sooner: the schedule (each encounter's kind, side
+ * and cruise length) is unchanged, only the wall time between encounters is shorter.
+ *
+ * The next cruise eases the target up from the speed the encounter ended at (near the minimum speed)
+ * with the warp entry ease above, over ENCOUNTER_WARP_ENTRY_SECONDS, stretched where needed so its
+ * slope never exceeds ENCOUNTER_WARP_ENTRY_MAX_RATE (units per second per second): about the slope of
+ * the return from the arrival speed to the top level (1.5 × 90 / 8 ≈ 16.9), so returning from the
+ * minimum speed is never steeper than the return to warp was. At the slowest level (the reduced-motion
+ * start) the return is from 4 to 20 units per second, a slope of at most 3. The heading drift resumes
+ * from where the encounter left it over ENCOUNTER_DRIFT_SETTLE_SECONDS.
+ */
+export const VIEW_WIDEST_ASPECT = 21 / 9;
+export const ENCOUNTER_WARP_ENTRY_MAX_RATE = 17;
+
 /** Remaining distance to the closest approach at which APPROACH becomes FLYBY. */
 export const ENCOUNTER_FLYBY_DISTANCE = 300;
 
