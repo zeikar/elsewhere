@@ -21,6 +21,7 @@
  * holds the heading at -Z (so the ship only translates), and `?arrivalSpeed=<u/s>` sets the arrival
  * speed (a value at or above the top speed flies encounters from the top speed, without dropping
  * out of warp, so tests that only need encounter cycles pass them about 2.5–3× sooner).
+ * `?seed=` is not one of these: it is read in every build (src/tripSeed.ts).
  */
 import { Vector3 } from 'three';
 import type { Engine, EngineOptions } from './engine/Engine';
@@ -73,6 +74,8 @@ export interface E2EProbe {
 }
 
 export interface E2EHookSnapshot {
+  /** Trip seed in use (a uint32; the URL shows it as `?seed=` in 8 hex digits). */
+  tripSeed: number;
   /** Speed level (index into SHIP_SPEED_LEVELS). */
   speed: number;
   paused: boolean;
@@ -326,6 +329,7 @@ export function installE2EHook(engine: Engine): void {
         };
       }
       return {
+        tripSeed: engine.getTripSeed(),
         speed: engine.getSpeed(),
         paused: engine.isPaused(),
         dpr: engine.getAppliedDpr(),

@@ -2,8 +2,7 @@ import { expect, test, type Page } from '@playwright/test';
 import type { E2EHookSnapshot } from '../src/e2eHook';
 import { FAR_STAR_BASE_SIZE_PX, FAR_STAR_COUNT, STAR_BASE_SIZE_PX } from '../src/config';
 import { SOAK_HEAP_GROWTH_LIMIT_BYTES } from './limits';
-
-const APP_PATH = '/elsewhere/';
+import { appUrl } from './app';
 
 /** A pixel counts as lit when its brightest channel is above this (0–255). */
 const LIT_THRESHOLD = 16;
@@ -27,7 +26,7 @@ function collectErrors(page: Page): string[] {
 }
 
 async function openApp(page: Page): Promise<void> {
-  await page.goto(APP_PATH);
+  await page.goto(appUrl());
   await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 0);
 }
 
@@ -89,7 +88,7 @@ interface SpeedViews {
 async function speedViews(page: Page, query: string): Promise<SpeedViews> {
   await page.clock.install({ time: 0 });
   await page.clock.pauseAt(1000);
-  await page.goto(`${APP_PATH}${query}`);
+  await page.goto(appUrl(query));
   await page.waitForFunction(() => window.__elsewhere !== undefined);
 
   const still = await snapshot(page);
@@ -198,7 +197,7 @@ interface TranslationViews {
 async function translationViews(page: Page, layer: 'far' | 'near'): Promise<TranslationViews> {
   await page.clock.install({ time: 0 });
   await page.clock.pauseAt(1000);
-  await page.goto(`${APP_PATH}?encounterInterval=1e9&headingDrift=0&starLayers=${layer}`);
+  await page.goto(appUrl(`encounterInterval=1e9&headingDrift=0&starLayers=${layer}`));
   await page.waitForFunction(() => window.__elsewhere !== undefined);
   for (let i = 0; i < 2; i++) await page.clock.fastForward(100);
   const shot = () => page.locator('#scene').screenshot({ style: CANVAS_ONLY });
@@ -263,7 +262,7 @@ test('soak: GPU resources stay constant and the JS heap does not grow', async ({
   // Starfield only: the e2e-only override pushes the first encounter far past the end of the run
   // (encounter.spec.ts checks the GPU resources planets use and free, and the JS heap across
   // encounters).
-  await page.goto(`${APP_PATH}?encounterInterval=1e9`);
+  await page.goto(appUrl(`encounterInterval=1e9`));
   await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 0);
   expect((await snapshot(page)).autopilot.interval).toBe(1e9);
   // Top speed (setSpeed clamps), so stars wrap around the cube many times during the run.

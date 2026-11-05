@@ -14,8 +14,8 @@ import {
   ENCOUNTER_WARP_EXIT_SECONDS,
   SHIP_SPEED_LEVELS,
 } from '../src/config';
+import { appUrl } from './app';
 
-const APP_PATH = '/elsewhere/';
 const TOP_SPEED = SHIP_SPEED_LEVELS[SHIP_SPEED_LEVELS.length - 1]!;
 /**
  * Mean cruise length. It must leave room for the return to warp, the drop out of it and its lead
@@ -68,7 +68,7 @@ test('at the top speed the ship drops out of warp before a planet encounter and 
   await page.setViewportSize({ width: 96, height: 54 });
   await page.clock.install({ time: 0 });
   await page.clock.pauseAt(1000);
-  await page.goto(`${APP_PATH}?encounterInterval=${INTERVAL_SECONDS}&encounterKind=planet`);
+  await page.goto(appUrl(`encounterInterval=${INTERVAL_SECONDS}&encounterKind=planet`));
   await page.waitForFunction(() => window.__elsewhere !== undefined);
   await page.evaluate(() => window.__elsewhere!.setSpeed(99));
   const start = await page.evaluate(() => window.__elsewhere!.snapshot());

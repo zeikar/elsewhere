@@ -6,8 +6,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import { SHIP_SPEED_LEVELS } from '../src/config';
 import { FAST_ENCOUNTERS_ARRIVAL_SPEED } from './limits';
-
-const APP_PATH = '/elsewhere/';
+import { appUrl } from './app';
 
 // Thousands of clock steps would make a trace of thousands of actions, which takes minutes to write
 // when the test ends (even when it passes, with 'retain-on-failure'), so this file records none.
@@ -58,7 +57,7 @@ test('ten encounters, accelerated with a fake clock, leave the GPU resources at 
   await page.setViewportSize({ width: 96, height: 54 });
   await page.clock.install({ time: 0 });
   await page.clock.pauseAt(1000);
-  await page.goto(`${APP_PATH}?encounterInterval=1&arrivalSpeed=${FAST_ENCOUNTERS_ARRIVAL_SPEED}`);
+  await page.goto(appUrl(`encounterInterval=1&arrivalSpeed=${FAST_ENCOUNTERS_ARRIVAL_SPEED}`));
   await page.waitForFunction(() => window.__elsewhere !== undefined);
   await page.evaluate(() => window.__elsewhere!.setSpeed(99));
   expect((await page.evaluate(() => window.__elsewhere!.snapshot())).autopilot.arrivalSpeed).toBe(FAST_ENCOUNTERS_ARRIVAL_SPEED);
@@ -111,7 +110,7 @@ test('ten encounters, accelerated with a fake clock, leave the GPU resources at 
     description: JSON.stringify({ wallSeconds: (Date.now() - startedAt) / 1000, kinds: log.kinds, baseline: log.baseline }),
   });
 
-  // Both kinds, the default seeded mix.
+  // Both kinds, the default seeded mix (with the test default trip seed that appUrl pins).
   expect(new Set(log.kinds)).toEqual(new Set(['planet', 'nebula']));
   // After every encounter the geometries, textures and programs are back at the pre-encounter
   // baseline, with no encounter object left in the scene.
