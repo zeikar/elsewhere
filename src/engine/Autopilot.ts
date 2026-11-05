@@ -113,12 +113,24 @@ export type EncounterKind = 'planet' | 'nebula';
 export type EncounterSide = 'left' | 'right';
 
 /**
- * The planet met in an encounter. Only the radius for now; seeded planet parameters (type,
- * palette, …) extend this and replace `defaultPlanet` through `AutopilotParams.planetFor`.
+ * The planet met in an encounter: what the plan needs of it. Seeded planet parameters (type,
+ * palette, …, `planetParams` in Planet.ts) extend this and replace `defaultPlanet` through
+ * `AutopilotParams.planetFor`.
  */
 export interface PlanetSpec {
   /** Planet radius in world units. */
   radius: number;
+  /**
+   * `k` for this planet: the closest approach to its centre is `radius × k`. Without it the planet
+   * passes at `AutopilotParams.sideOffsetFactor`. Raised where needed to clear the extent
+   * (`planetPassFactor`).
+   */
+  passFactor?: number;
+  /**
+   * Everything drawn for the planet beyond its atmosphere, a ring, lies within `radius × extent` of
+   * its centre. Without it (or below PLANET_VIEW_RADIUS_FACTOR) the atmosphere bounds the planet.
+   */
+  extent?: number;
 }
 
 /** Placeholder planet choice until planets are seeded: every planet has the default radius. */
@@ -232,7 +244,10 @@ export interface AutopilotParams {
   flybyDistance: number;
   /** `D` for planets: how far ahead the planet is placed, which is also the spawn distance. */
   encounterDistance: number;
-  /** `k` for planets: the closest approach to the planet centre is `radius × k`. */
+  /**
+   * `k` for planets with no pass factor of their own (`PlanetSpec.passFactor`): the closest approach
+   * to the planet centre is `radius × k`.
+   */
   sideOffsetFactor: number;
   /** Planet speed and fade profile; its despawn distance also ends DEPARTURE. */
   profile: Readonly<EncounterProfile>;
@@ -564,8 +579,31 @@ export function cruiseTargetSpeed(
   return target;
 }
 
-/** Everything drawn for a planet lies within this many radii of its centre (config.ts, Planets). */
+/**
+ * Everything drawn for a planet with no extent of its own (no ring) lies within this many radii of its
+ * centre (config.ts, Planets).
+ */
 export const PLANET_VIEW_RADIUS_FACTOR = 1 + ENCOUNTER_CLEARANCE_MARGIN;
+
+/**
+ * Everything drawn for `planet` lies within this many radii of its centre: its extent (a ring's outer
+ * radius) or PLANET_VIEW_RADIUS_FACTOR (the atmosphere), whichever is larger. The out-of-view test
+ * uses this sphere, so a ring leaves the view with its planet.
+ */
+export function planetViewRadiusFactor(planet: Readonly<PlanetSpec>): number {
+  return Math.max(PLANET_VIEW_RADIUS_FACTOR, planet.extent ?? 0);
+}
+
+/**
+ * The `k` an encounter with `planet` is planned with: the planet's own pass factor, or
+ * `sideOffsetFactor` without one, raised to at least `extent × (1 + ENCOUNTER_CLEARANCE_MARGIN)`. The
+ * path then never comes within `radius × extent × (1 + margin)` of the centre, so it never meets a
+ * ring, whatever the ring's tilt (docs/PLAN.md section 6, Variety: the camera never passes through a
+ * ring).
+ */
+export function planetPassFactor(planet: Readonly<PlanetSpec>, sideOffsetFactor: number): number {
+  return Math.max(planet.passFactor ?? sideOffsetFactor, (planet.extent ?? 0) * (1 + ENCOUNTER_CLEARANCE_MARGIN));
+}
 
 /**
  * Bounds on where a nebula's layers reach, in world units, for a nebula of core radius `radius`
@@ -595,7 +633,8 @@ const viewScratch: Vec3 = { x: 0, y: 0, z: 0 };
  * half-angle `halfAngle`: positive once it is out of view, zero or negative while it may be in view.
  * `remaining` is the ship's remaining distance (`encounterRemaining`). Pure and allocation-free.
  *
- * - Planet: `sphereViewMargin` of the sphere of `radius × PLANET_VIEW_RADIUS_FACTOR`, in radians.
+ * - Planet: `sphereViewMargin` of the sphere of `radius × planetViewRadiusFactor(planet)` (the
+ *   atmosphere, or the ring), in radians.
  * - Nebula: in world units, how far the ship is past every layer (`-(remaining + depth)`, from
  *   `nebulaViewExtent`), and only once the heading has not turned so far from the planned direction
  *   that the cone could reach a layer: every point of a layer is then at least
@@ -611,7 +650,7 @@ export function encounterViewMargin(
   const { plan } = encounter;
   if (encounter.kind === 'planet') {
     const offset = encounterOffset(plan, ship.position, viewScratch);
-    return sphereViewMargin(offset, ship.heading, plan.radius * PLANET_VIEW_RADIUS_FACTOR, halfAngle);
+    return sphereViewMargin(offset, ship.heading, plan.radius * planetViewRadiusFactor(encounter.planet), halfAngle);
   }
   const { depth, lateral } = nebulaViewExtent(plan.radius, plan.closestDistance);
   const past = -(remaining + depth);
@@ -656,11 +695,13 @@ export function createAutopilotState(params: Readonly<AutopilotParams> = DEFAULT
  * - APPROACH becomes FLYBY once the remaining distance is at most `flybyDistance`, FLYBY becomes
  *   DEPARTURE once the closest approach is passed (remaining ≤ 0), and DEPARTURE returns to CRUISE
  *   as soon as the object is out of view (`encounterViewMargin` > 0), or once the ship is the
- *   profile's despawn distance past it, where the fade has reached 0, whichever comes first. An
- *   object out of view is removed whatever its fade, which no one sees.
+ *   profile's despawn distance past it, where the fade has reached 0, whichever comes first, but
+ *   never on the step that reached DEPARTURE: every encounter spends at least one step in it (a
+ *   planet passed far off can be out of view at its closest approach already). An object out of view
+ *   is removed whatever its fade, which no one sees.
  * - The lateness carried from the end of DEPARTURE is the time since the first of those held: since
  *   the despawn distance was passed, or since both the closest approach was passed and the view
- *   margin turned positive (interpolated between the last two steps).
+ *   margin turned positive (interpolated between the last two steps), up to two steps.
  * - The target speed follows the encounter speed profile from `encounterCruiseSpeed`, and is
  *   `cruiseTargetSpeed` in CRUISE: after an encounter, the return to warp from the target speed the
  *   encounter ended at, and the drop out of warp at the end of the cruise when the cruise speed is
@@ -702,8 +743,8 @@ export function updateAutopilot(
         encounter = { kind: 'nebula', index, seed, side, nebula, plan };
       } else {
         const planet = params.planetFor(seed);
-        const { encounterDistance, sideOffsetFactor } = params;
-        const plan = planEncounter(ship.position, ship.heading, planet.radius, encounterDistance, sideOffsetFactor, sideAngle);
+        const k = planetPassFactor(planet, params.sideOffsetFactor);
+        const plan = planEncounter(ship.position, ship.heading, planet.radius, params.encounterDistance, k, sideAngle);
         encounter = { kind: 'planet', index, seed, side, planet, plan };
       }
       encounterCount = index + 1;
@@ -726,19 +767,25 @@ export function updateAutopilot(
     // Only the step that started the encounter has no margin of its own from the step before.
     const prevMargin = state.encounter === encounter ? state.viewMargin : Number.NEGATIVE_INFINITY;
     viewMargin = encounterViewMargin(encounter, ship, params.viewHalfAngle, remaining);
-    if (travel === 'DEPARTURE') {
-      // How long ago DEPARTURE could have ended, by each rule; -Infinity where it cannot yet.
+    // DEPARTURE lasts at least one step: a planet passed far off (a large k) can already be out of
+    // view at its closest approach, and the step that reaches DEPARTURE keeps it, so every encounter
+    // shows the whole cycle. That step's time is carried with the rest of the lateness below.
+    if (travel === 'DEPARTURE' && state.state === 'DEPARTURE' && state.encounter === encounter) {
+      // How long ago DEPARTURE could have ended, by each rule; -Infinity where it cannot yet. At most
+      // two steps: the one before may have been the one held.
+      const cap = 2 * dt;
       let late = Number.NEGATIVE_INFINITY;
       if (remaining <= -profile.despawnDistance) {
         // Time since the ship passed the despawn distance.
         const past = ship.speed > 0 ? (-profile.despawnDistance - remaining) / ship.speed : 0;
-        late = Math.min(past, dt);
+        late = Math.min(past, cap);
       }
       if (viewMargin > 0) {
-        // Out of view after the closest approach: since the later of passing it and leaving the view.
+        // Out of view after the closest approach: since the later of passing it and leaving the view
+        // (before the step before this one when it was already out of view then: the step held).
         const sincePass = ship.speed > 0 ? -remaining / ship.speed : 0;
-        const sinceView = prevMargin > 0 ? dt : (dt * viewMargin) / (viewMargin - prevMargin);
-        late = Math.max(late, Math.min(sincePass, sinceView, dt));
+        const sinceView = prevMargin > 0 ? cap : (dt * viewMargin) / (viewMargin - prevMargin);
+        late = Math.max(late, Math.min(sincePass, sinceView, cap));
       }
       if (late > Number.NEGATIVE_INFINITY) {
         // Carried with the encounter's late start. The next cruise eases up from where this ends.

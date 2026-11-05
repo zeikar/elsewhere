@@ -2,7 +2,7 @@ import { PerspectiveCamera, Scene, type BufferGeometry, type Material, type Obje
 import { afterEach, describe, expect, it } from 'vitest';
 import { ENCOUNTER_BASE_SEED } from '../config';
 import { Nebula, disposeNebulaGeometry, nebulaGeometry, nebulaParams, nebulaProgramMaterials } from './Nebula';
-import { Planet, disposePlanetGeometry, planetGeometry, planetParams, planetProgramMaterials } from './Planet';
+import { Planet, disposePlanetGeometry, planetGeometry, planetParams, planetProgramMaterials, ringGeometry } from './Planet';
 import { ProgramWarmup, holderGeometry, type ProgramCompiler } from './ProgramWarmup';
 import { hash } from './seed';
 
@@ -57,15 +57,20 @@ function materialsOf(root: Object3D): Material[] {
   return out;
 }
 
-/** The first planet seeds of each type, with an atmosphere. */
-function planetSeeds(): { rocky: number; gas: number } {
-  const found: { rocky?: number; gas?: number } = {};
-  for (let i = 0; found.rocky === undefined || found.gas === undefined; i++) {
+/**
+ * The first planet seeds of each type with an atmosphere, of a ringed gas giant and a ringed rocky
+ * planet, and of an icy dwarf.
+ */
+function planetSeeds(): { rocky: number; gas: number; ringedGas: number; ringedRocky: number; icy: number } {
+  const found: { rocky?: number; gas?: number; ringedGas?: number; ringedRocky?: number; icy?: number } = {};
+  for (let i = 0; Object.keys(found).length < 5; i++) {
     const seed = hash(ENCOUNTER_BASE_SEED, i);
     const params = planetParams(seed);
-    if (params.atmosphereIntensity > 0) found[params.type] ??= seed;
+    if (params.atmosphereIntensity > 0 && params.ring === null) found[params.type] ??= seed;
+    if (params.ring !== null) found[params.type === 'gas' ? 'ringedGas' : 'ringedRocky'] ??= seed;
+    if (params.family === 'icy') found.icy ??= seed;
   }
-  return { rocky: found.rocky, gas: found.gas };
+  return found as { rocky: number; gas: number; ringedGas: number; ringedRocky: number; icy: number };
 }
 
 describe('encounter program holders', () => {
@@ -75,11 +80,16 @@ describe('encounter program holders', () => {
 
     const seeds = planetSeeds();
     const used = new Set<string>();
-    for (const seed of [seeds.rocky, seeds.gas]) {
+    let rings = 0;
+    for (const seed of [seeds.rocky, seeds.gas, seeds.ringedGas, seeds.ringedRocky, seeds.icy]) {
       const planet = new Planet(planetParams(seed));
+      if (planet.ring !== null) rings++;
       for (const m of materialsOf(planet.object)) used.add(programSignature(m));
       planet.dispose();
     }
+    // Rings and icy dwarfs need no program of their own (docs/PLAN.md section 9, Phase 4): a ring
+    // draws with the atmosphere's halo program, an icy dwarf with the rocky surface.
+    expect(rings).toBe(2);
     for (let i = 0; i < 20; i++) {
       const nebula = new Nebula(nebulaParams(hash(ENCOUNTER_BASE_SEED, 1000 + i)));
       for (const m of materialsOf(nebula.object)) used.add(programSignature(m));
@@ -89,9 +99,12 @@ describe('encounter program holders', () => {
     expect(used).toEqual(holders);
   });
 
-  it('use a geometry with the attributes of the planet sphere and the nebula plane, but no data', () => {
+  it('use a geometry with the attributes of the planet sphere, the ring and the nebula plane, but no data', () => {
     const holder = holderGeometry();
     expect(attributeLayout(holder)).toBe(attributeLayout(planetGeometry()));
+    const ring = ringGeometry(1.4, 2.4);
+    expect(attributeLayout(holder)).toBe(attributeLayout(ring));
+    ring.dispose();
     expect(attributeLayout(holder)).toBe(attributeLayout(nebulaGeometry()));
     for (const attribute of Object.values(holder.attributes)) expect(attribute.count).toBe(0);
     holder.dispose();

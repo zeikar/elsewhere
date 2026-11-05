@@ -32,8 +32,11 @@
  *    paint over the far stars behind them; and nebula layers (NEBULA_RENDER_ORDER), which blend over
  *    the far stars without writing depth. One encounter is in the scene at a time, so the two never
  *    meet.
- * 3. STARFIELD_RENDER_ORDER (0): this near layer, additive, depth-tested against the planet surface,
- *    so near stars behind a planet are hidden and those in front of it still show.
+ * 2b. STARFIELD_RENDER_ORDER - 0.5: planet rings (RING_RENDER_ORDER), depth-tested against the
+ *    surface and writing depth, so the disc hides the ring's far side and the near side blends over
+ *    the disc and the far stars.
+ * 3. STARFIELD_RENDER_ORDER (0): this near layer, additive, depth-tested against the planet surface
+ *    and ring, so near stars behind a planet or its ring are hidden and those in front still show.
  * 4. STARFIELD_RENDER_ORDER + 1 (+1): planet atmospheres (ATMOSPHERE_RENDER_ORDER), additive.
  *
  * The CPU-side maths is exported as pure functions (with TS mirrors of the shader's wrap and fade)
