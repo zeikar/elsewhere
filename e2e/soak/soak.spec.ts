@@ -229,7 +229,9 @@ test(`soak: ${SOAK_MINUTES} min, heap, frame time and GPU resources stay stable`
   // The seeded default mix of planets and nebulae, at a short interval.
   await page.goto(`${APP_PATH}?encounterInterval=${SOAK_ENCOUNTER_INTERVAL_SECONDS}`);
   await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 0);
-  // Top speed (setSpeed clamps), so the encounters pass as quickly as the profile allows.
+  // Top speed (setSpeed clamps). Encounters are flown from the arrival speed at every level from
+  // the default up, so this no longer shortens them; at this short interval every cruise also stays
+  // near the arrival speed (too short to return to warp), so every CRUISE still draws the same scene.
   await page.evaluate(() => window.__elsewhere!.setSpeed(99));
   await installFrameSampler(page);
 

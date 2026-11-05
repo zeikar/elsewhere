@@ -12,7 +12,13 @@ import {
   SHIP_DEFAULT_SPEED_LEVEL,
   SHIP_SPEED_LEVELS,
 } from '../src/config';
-import { DEFAULT_AUTOPILOT_PARAMS, setCruiseSpeed, type AutopilotParams, type EncounterKind } from '../src/engine/Autopilot';
+import {
+  DEFAULT_AUTOPILOT_PARAMS,
+  encounterCruiseSpeed,
+  setCruiseSpeed,
+  type AutopilotParams,
+  type EncounterKind,
+} from '../src/engine/Autopilot';
 import { encounterTargetSpeed } from '../src/engine/encounter';
 import { SOAK_HEAP_GROWTH_LIMIT_BYTES } from './limits';
 
@@ -263,7 +269,8 @@ test('three encounters run CRUISE → APPROACH → FLYBY → DEPARTURE → CRUIS
   // at low frame rates), so a small viewport makes the three encounters pass much sooner.
   await page.setViewportSize({ width: 480, height: 270 });
   await openApp(page, 1);
-  // Top speed (setSpeed clamps), so the encounters pass as quickly as the profile allows.
+  // Top speed (setSpeed clamps). Encounters are flown from the arrival speed at every level from
+  // the default up, so this no longer shortens them; it runs the faster level's path through them.
   await page.evaluate(() => window.__elsewhere!.setSpeed(99));
   await watchTravel(page);
 
@@ -381,11 +388,12 @@ test('mid-APPROACH the planet is lit on the engine canvas, and pause → resume 
   const faster = await snapshot(page);
   expect(faster.autopilot.encounterIndex).toBe(paused.autopilot.encounterIndex);
   expect(['APPROACH', 'FLYBY', 'DEPARTURE']).toContain(faster.autopilot.state);
-  // The new level scales the speed profile; it does not replace the encounter's slowdown.
+  // The new level does not replace the encounter's slowdown: the encounter is flown from the
+  // arrival speed (the default level's), so it keeps the same speed profile.
   const params: AutopilotParams = { ...DEFAULT_AUTOPILOT_PARAMS };
   setCruiseSpeed(params, SHIP_SPEED_LEVELS[SHIP_DEFAULT_SPEED_LEVEL + 1]!);
   expect(faster.autopilot.targetSpeed).toBeCloseTo(
-    encounterTargetSpeed(faster.autopilot.remaining!, params.cruiseSpeed, params.profile),
+    encounterTargetSpeed(faster.autopilot.remaining!, encounterCruiseSpeed(params), params.profile),
     6,
   );
 

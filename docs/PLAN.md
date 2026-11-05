@@ -10,6 +10,11 @@
 
 An immersive web experience inspired by the Windows Starfield screensaver. You drift on autopilot through deep space while stars stream past, and now and then you meet a procedurally generated planet or nebula.
 
+**Identity:** an ambient space voyage, a screensaver by format and exploration by content. The format stays passive and leave-on: autopilot, hidden UI, the screen kept awake. The content is the encounters, and they need a physically believable space. The two visual languages are split by time:
+
+- **Cruise is the screensaver.** White stars rush past: the warp.
+- **An encounter is the exploration.** The ship drops out of warp before the object appears, the streaks shrink to dots as it slows, and the planet or nebula appears against the fixed far-star layer. Afterwards the ship eases back into warp.
+
 ## 2. Principles
 
 - **Autopilot:** The journey continues without any steering.

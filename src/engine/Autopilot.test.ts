@@ -1016,6 +1016,32 @@ describe('dropping out of warp', () => {
     );
   });
 
+  it.each(SHIP_SPEED_LEVELS.filter((speed) => speed <= ENCOUNTER_ARRIVAL_SPEED))(
+    'at cruise speed %i (at most the arrival speed) the travel is exactly what it was without an arrival speed',
+    (cruiseSpeed) => {
+      // An infinite arrival speed flies every encounter from the cruise speed, with no warp entry
+      // or exit: the behaviour before the drop out of warp. Planets and nebulae, the default mix.
+      const run = (arrivalSpeed: number) => {
+        const frames: Array<{ time: number; speed: number; targetSpeed: number; fade: number; state: TravelState }> = [];
+        const result = simulate(1 / 60, {
+          params: atSpeed(cruiseSpeed, { arrivalSpeed }),
+          until: afterEncounters(3),
+          maxSeconds: 4000,
+          onFrame: ({ ship, autopilot }) => {
+            frames.push({ time: ship.time, speed: ship.speed, targetSpeed: autopilot.targetSpeed, fade: autopilot.fade, state: autopilot.state });
+          },
+        });
+        return { transitions: result.transitions, ship: result.ship, frames };
+      };
+      const now = run(ENCOUNTER_ARRIVAL_SPEED);
+      const before = run(Number.POSITIVE_INFINITY);
+      expect(new Set(now.transitions.map((t) => t.to))).toEqual(new Set(CYCLE));
+      expect(now.transitions).toEqual(before.transitions);
+      expect(now.frames).toEqual(before.frames);
+      expect(now.ship).toEqual(before.ship);
+    },
+  );
+
   it('at the top speed level the warp entry and exit count toward the interval: APPROACH begins after the configured interval, every cycle', () => {
     const dt = 1 / 60;
     const interval = ENCOUNTER_INTERVAL_SECONDS;

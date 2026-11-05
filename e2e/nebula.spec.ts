@@ -8,8 +8,9 @@ const APP_PATH = '/elsewhere/';
 /** A pixel counts as lit when its brightest channel is above this (0–255). */
 const LIT_THRESHOLD = 24;
 
-// A forced nebula encounter at the top speed is about 45 s of simulated travel; SwiftShader renders
-// slowly, and below 10 fps the dt cap slows simulated time further.
+// A forced nebula encounter is about 90 s of simulated travel (at the top speed too: the ship drops
+// out of warp to the arrival speed first); SwiftShader renders slowly, and below 10 fps the dt cap
+// slows simulated time further.
 test.describe.configure({ timeout: 420_000 });
 
 function collectErrors(page: Page): string[] {
