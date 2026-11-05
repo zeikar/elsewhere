@@ -39,13 +39,16 @@
  * restarts the clock gradually in DEPARTURE. The heading continues from where it stopped, so it
  * never jumps, and the ship flies the planned straight line past the planet.
  *
- * Kinds (docs/PLAN.md section 6, Nebulae): each encounter is a planet or a nebula, chosen from its
- * appearance seed `hash(baseSeed, index)` (`encounterKindAt`), except that the first encounter of
- * every trip is a planet (docs/PLAN.md section 9, Phase 2: within about 30–60 s a planet appears),
- * whatever the base seed (the trip seed, random on each load in production). Both are planned with
- * `planEncounter` and held the same way; a nebula uses its own `D`, side offset and speed and fade
- * profile (`AutopilotParams.nebula`), and its encounter radius is its core radius (see config.ts,
- * Nebulae).
+ * Kinds (docs/PLAN.md section 6, Nebulae and Variety): each encounter is a planet, a nebula or an
+ * asteroid, chosen from its appearance seed `hash(baseSeed, index)` (`encounterKindAt`), except that
+ * the first encounter of every trip is a planet (docs/PLAN.md section 9, Phase 2: within about
+ * 30–60 s a planet appears), whatever the base seed (the trip seed, random on each load in
+ * production). The planet-or-nebula draw comes first; a second draw, from a stream of its own, then
+ * makes some of the planets asteroids (`bodyKind`), so the nebulae are where they were before
+ * asteroids. All are planned with `planEncounter` and held the same way; a nebula uses its own `D`,
+ * side offset and speed and fade profile (`AutopilotParams.nebula`), and its encounter radius is its
+ * core radius (see config.ts, Nebulae); an asteroid likewise (`AutopilotParams.asteroid`), with the
+ * bounding radius of its field (config.ts, Asteroids).
  *
  * Variety (docs/PLAN.md section 9, Phase 3), all drawn from the appearance seed by pure functions:
  * the cruise before each encounter is the interval with a seeded jitter (`cruiseInterval`, whose
@@ -59,8 +62,19 @@
  * (`planetViewRadiusFactor`), so a ring is never crossed and leaves the view with its planet.
  */
 import {
+  ASTEROID_DESPAWN_DISTANCE,
+  ASTEROID_ENCOUNTER_DISTANCE,
+  ASTEROID_FADE_IN_DISTANCE,
+  ASTEROID_FADE_OUT_DISTANCE,
+  ASTEROID_MIN_SPEED,
+  ASTEROID_MIN_SPEED_DISTANCE,
+  ASTEROID_MIN_SPEED_FLOOR,
+  ASTEROID_SIDE_OFFSET_FACTOR,
+  ASTEROID_SLOWDOWN_DISTANCE,
+  ASTEROID_SPEEDUP_DISTANCE,
   CAMERA_FOV_DEG,
   ENCOUNTER_ARRIVAL_SPEED,
+  ENCOUNTER_ASTEROID_SHARE,
   ENCOUNTER_BASE_SEED,
   ENCOUNTER_CLEARANCE_MARGIN,
   ENCOUNTER_DISTANCE,
@@ -112,7 +126,7 @@ import { clampDt, createShipState, updateShip, type ShipParams, type ShipState, 
 export type TravelState = 'CRUISE' | 'APPROACH' | 'FLYBY' | 'DEPARTURE';
 
 /** What an encounter meets. */
-export type EncounterKind = 'planet' | 'nebula';
+export type EncounterKind = 'planet' | 'nebula' | 'asteroid';
 
 /** Which side of the planned path the encounter object sits on, seen along the path. */
 export type EncounterSide = 'left' | 'right';
@@ -157,6 +171,27 @@ export function defaultNebula(_seed: number): NebulaSpec {
   return { radius: (NEBULA_RANGES.radius[0] + NEBULA_RANGES.radius[1]) / 2 };
 }
 
+/**
+ * The asteroid met in an encounter: one rock or a small field of them (docs/PLAN.md section 9,
+ * Phase 4). `asteroidParams` in Asteroid.ts extends it and plugs in through
+ * `AutopilotParams.asteroidFor`.
+ */
+export interface AsteroidSpec {
+  /** Bounding radius of the whole field, about its centre, in world units: every rock lies within it. */
+  radius: number;
+  /**
+   * `k` for this asteroid: the closest approach to the field centre is `radius × k`. Without it the
+   * asteroid passes at `AutopilotParams.asteroid.sideOffsetFactor`. Raised where needed to keep the
+   * path out of the field's sphere (`asteroidPassFactor`).
+   */
+  passFactor?: number;
+}
+
+/** Placeholder asteroid choice: one rock of radius 10, passed at the default `k`. */
+export function defaultAsteroid(_seed: number): AsteroidSpec {
+  return { radius: 10 };
+}
+
 interface ActiveEncounterBase {
   /** Encounter index, counted from 0 since load. */
   index: number;
@@ -180,7 +215,13 @@ export interface NebulaEncounter extends ActiveEncounterBase {
   nebula: NebulaSpec;
 }
 
-export type ActiveEncounter = PlanetEncounter | NebulaEncounter;
+export interface AsteroidEncounter extends ActiveEncounterBase {
+  kind: 'asteroid';
+  /** The asteroid (one rock or a field) chosen for this seed. */
+  asteroid: AsteroidSpec;
+}
+
+export type ActiveEncounter = PlanetEncounter | NebulaEncounter | AsteroidEncounter;
 
 /** How a kind of encounter is planned and flown. */
 export interface EncounterKindParams {
@@ -203,6 +244,19 @@ export const NEBULA_ENCOUNTER_PROFILE: Readonly<EncounterProfile> = {
   spawnScale: 1,
   fadeOutDistance: NEBULA_FADE_OUT_DISTANCE,
   despawnDistance: NEBULA_DESPAWN_DISTANCE,
+};
+
+/** The asteroid speed and fade profile, tuned for the default cruise speed. */
+export const ASTEROID_ENCOUNTER_PROFILE: Readonly<EncounterProfile> = {
+  minSpeed: ASTEROID_MIN_SPEED,
+  minSpeedFloor: ASTEROID_MIN_SPEED_FLOOR,
+  slowdownDistance: ASTEROID_SLOWDOWN_DISTANCE,
+  minSpeedDistance: ASTEROID_MIN_SPEED_DISTANCE,
+  speedupDistance: ASTEROID_SPEEDUP_DISTANCE,
+  fadeInDistance: ASTEROID_FADE_IN_DISTANCE,
+  spawnScale: 1,
+  fadeOutDistance: ASTEROID_FADE_OUT_DISTANCE,
+  despawnDistance: ASTEROID_DESPAWN_DISTANCE,
 };
 
 export interface AutopilotParams {
@@ -263,9 +317,18 @@ export interface AutopilotParams {
   baseSeed: number;
   /** Chooses the planet for an encounter seed. Called once when each planet encounter starts. */
   planetFor: (seed: number) => PlanetSpec;
-  /** Share of encounters that are nebulae, in [0, 1] (0: planets only, 1: nebulae only). */
+  /** Share of encounters that are nebulae, in [0, 1] (0: planets and asteroids only, 1: nebulae only). */
   nebulaShare: number;
-  /** Most encounters of one kind in a row (an integer ≥ 1; `Infinity` for no limit). */
+  /**
+   * Share of all encounters that are asteroids, in [0, 1]: drawn among the encounters that are not
+   * nebulae, which become asteroids with probability `asteroidShare / (1 - nebulaShare)` (capped at 1;
+   * `asteroidFraction`). 0 gives no asteroids; with `nebulaShare` 0, 1 gives asteroids only.
+   */
+  asteroidShare: number;
+  /**
+   * Most encounters of one kind in a row (an integer ≥ 1; `Infinity` for no limit). Planets and
+   * asteroids, the solid bodies, count as one run (`runClass`).
+   */
   maxSameKindRun: number;
   /** Range of the object's elevation above or below the path, in radians (see `encounterSide`). */
   sideElevation: readonly [number, number];
@@ -273,6 +336,10 @@ export interface AutopilotParams {
   nebula: Readonly<EncounterKindParams>;
   /** Chooses the nebula for an encounter seed. Called once when each nebula encounter starts. */
   nebulaFor: (seed: number) => NebulaSpec;
+  /** How asteroid encounters are planned and flown (`sideOffsetFactor` for asteroids with no pass factor). */
+  asteroid: Readonly<EncounterKindParams>;
+  /** Chooses the asteroid for an encounter seed. Called once when each asteroid encounter starts. */
+  asteroidFor: (seed: number) => AsteroidSpec;
 }
 
 export const DEFAULT_AUTOPILOT_PARAMS: Readonly<AutopilotParams> = {
@@ -293,6 +360,7 @@ export const DEFAULT_AUTOPILOT_PARAMS: Readonly<AutopilotParams> = {
   baseSeed: ENCOUNTER_BASE_SEED,
   planetFor: defaultPlanet,
   nebulaShare: ENCOUNTER_NEBULA_SHARE,
+  asteroidShare: ENCOUNTER_ASTEROID_SHARE,
   maxSameKindRun: ENCOUNTER_MAX_SAME_KIND_RUN,
   sideElevation: ENCOUNTER_SIDE_ELEVATION_RANGE,
   nebula: {
@@ -301,6 +369,12 @@ export const DEFAULT_AUTOPILOT_PARAMS: Readonly<AutopilotParams> = {
     profile: NEBULA_ENCOUNTER_PROFILE,
   },
   nebulaFor: defaultNebula,
+  asteroid: {
+    encounterDistance: ASTEROID_ENCOUNTER_DISTANCE,
+    sideOffsetFactor: ASTEROID_SIDE_OFFSET_FACTOR,
+    profile: ASTEROID_ENCOUNTER_PROFILE,
+  },
+  asteroidFor: defaultAsteroid,
 };
 
 export interface AutopilotState {
@@ -314,7 +388,10 @@ export interface AutopilotState {
   encounterCount: number;
   /** Kind of the latest encounter started, or `null` before the first. */
   lastKind: EncounterKind | null;
-  /** How many encounters of `lastKind` in a row ended with the latest one (0 before the first). */
+  /**
+   * How many encounters of `lastKind`'s run class (`runClass`: planets and asteroids are one) in a
+   * row ended with the latest one (0 before the first).
+   */
   kindRun: number;
   /** The encounter in progress, or `null` in CRUISE. */
   encounter: ActiveEncounter | null;
@@ -345,14 +422,52 @@ const ELEVATION_SALT = 0x51de;
 const KIND_SALT = 0x6b1d;
 const SIDE_SALT = 0x5e1d;
 const INTERVAL_SALT = 0x1e7a;
+/**
+ * Salt of the asteroid draw (`bodyKind`), a stream of its own, so the planet-or-nebula draw is
+ * exactly what it was before asteroids. Among the salts tried it is one that leaves the test default
+ * trip's opening as it was (config.ts, ENCOUNTER_BASE_SEED) and still meets an asteroid early on.
+ */
+const ASTEROID_KIND_SALT = 0xa577;
+
+/** Kinds as the run cap counts them: a solid body (`'planet'`, planets and asteroids) or a nebula. */
+export type RunClass = 'planet' | 'nebula';
 
 /**
- * The seeded kind draw for appearance seed `seed` (`hash(baseSeed, index)`): a nebula with
- * probability `nebulaShare`, otherwise a planet. Pure and deterministic. The autopilot draws with
- * the share `kindDrawShare` gives and caps same-kind runs (`nextEncounterKind`).
+ * The run class of `kind` (`'planet'` for planets and asteroids alike), or `null` for `null`. The
+ * same-kind cap (`AutopilotParams.maxSameKindRun`) counts runs of these.
  */
-export function encounterKind(seed: number, nebulaShare: number): EncounterKind {
+export function runClass(kind: EncounterKind | null): RunClass | null {
+  return kind === null ? null : kind === 'nebula' ? 'nebula' : 'planet';
+}
+
+/**
+ * The seeded first-stage draw for appearance seed `seed` (`hash(baseSeed, index)`): a nebula with
+ * probability `nebulaShare`, otherwise a solid body (`'planet'`, which the asteroid draw,
+ * `bodyKind`, may turn into an asteroid). Pure and deterministic. The autopilot draws with the share
+ * `kindDrawShare` gives and caps same-class runs (`nextEncounterKind`).
+ */
+export function encounterKind(seed: number, nebulaShare: number): RunClass {
   return hashUnit(seed, KIND_SALT) < nebulaShare ? 'nebula' : 'planet';
+}
+
+/**
+ * Probability that an encounter which is not a nebula is an asteroid: `asteroidShare / (1 -
+ * nebulaShare)`, in [0, 1], so `asteroidShare` of all encounters are asteroids (0 when every
+ * encounter is a nebula or the share is 0 or missing, as it may be in `Pick`s of the params).
+ */
+export function asteroidFraction(params: Readonly<Pick<AutopilotParams, 'nebulaShare'> & Partial<Pick<AutopilotParams, 'asteroidShare'>>>): number {
+  const share = params.asteroidShare ?? 0;
+  if (!(share > 0) || !(params.nebulaShare < 1)) return 0;
+  return Math.min(1, share / (1 - Math.max(0, params.nebulaShare)));
+}
+
+/**
+ * The second-stage draw for a solid body with appearance seed `seed`: an asteroid with probability
+ * `fraction` (`asteroidFraction`), otherwise a planet. From its own salted stream, so it never
+ * changes which encounters are nebulae.
+ */
+export function bodyKind(seed: number, fraction: number): 'planet' | 'asteroid' {
+  return hashUnit(seed, ASTEROID_KIND_SALT) < fraction ? 'asteroid' : 'planet';
 }
 
 /** Whether `maxRun` caps runs at all (a finite count of at least 1). */
@@ -395,41 +510,36 @@ export function kindDrawShare(nebulaShare: number, maxRun: number): number {
   return (low + high) / 2;
 }
 
+/** What the kind draw needs of the params; a missing `asteroidShare` means no asteroids. */
+export type KindParams = Pick<AutopilotParams, 'nebulaShare' | 'maxSameKindRun'> & Partial<Pick<AutopilotParams, 'asteroidShare'>>;
+
 /**
  * The kind of the encounter with appearance seed `seed`, given the kind of the latest encounter and
- * how many of that kind came in a row (`run`). The seeded draw (`encounterKind` with
- * `kindDrawShare`), except that it is the other kind when the draw would make the run longer than
- * `params.maxSameKindRun`. A share of 0 or 1 forces one kind and ignores the cap.
+ * how many of its run class came in a row (`run`; `runClass`). First the planet-or-nebula draw
+ * (`encounterKind` with `kindDrawShare`), except that it is the other class when the draw would make
+ * the run longer than `params.maxSameKindRun`; a nebula share of 0 or 1 forces one class and ignores
+ * the cap. Then a solid body is an asteroid by the second draw (`bodyKind` with `asteroidFraction`),
+ * a planet otherwise. Planets and asteroids share one run, so no kind ever runs longer than the cap.
  */
-export function nextEncounterKind(
-  seed: number,
-  params: Pick<AutopilotParams, 'nebulaShare' | 'maxSameKindRun'>,
-  lastKind: EncounterKind | null,
-  run: number,
-): EncounterKind {
+export function nextEncounterKind(seed: number, params: KindParams, lastKind: EncounterKind | null, run: number): EncounterKind {
   const { nebulaShare, maxSameKindRun } = params;
-  if (!(nebulaShare > 0)) return 'planet';
-  if (!(nebulaShare < 1)) return 'nebula';
-  const kind = encounterKind(seed, kindDrawShare(nebulaShare, maxSameKindRun));
-  if (kind === lastKind && capsRuns(maxSameKindRun) && run >= Math.floor(maxSameKindRun)) {
-    return kind === 'nebula' ? 'planet' : 'nebula';
+  if (nebulaShare > 0) {
+    if (!(nebulaShare < 1)) return 'nebula';
+    const drawn = encounterKind(seed, kindDrawShare(nebulaShare, maxSameKindRun));
+    const capped = drawn === runClass(lastKind) && capsRuns(maxSameKindRun) && run >= Math.floor(maxSameKindRun);
+    if ((drawn === 'nebula') !== capped) return 'nebula';
   }
-  return kind;
+  return bodyKind(seed, asteroidFraction(params));
 }
 
 /**
  * The kind of encounter `index` (appearance seed `seed`): a planet for the first encounter of the
  * trip (index 0), so a planet comes first for every base seed, and `nextEncounterKind` after that.
- * Only a nebula share of 1 (every encounter a nebula) overrides the planet first.
+ * Only a forced kind (a nebula share of 1, or an asteroid fraction of 1: every encounter a nebula, or
+ * an asteroid) overrides the planet first.
  */
-export function encounterKindAt(
-  index: number,
-  seed: number,
-  params: Pick<AutopilotParams, 'nebulaShare' | 'maxSameKindRun'>,
-  lastKind: EncounterKind | null,
-  run: number,
-): EncounterKind {
-  if (index === 0 && params.nebulaShare < 1) return 'planet';
+export function encounterKindAt(index: number, seed: number, params: KindParams, lastKind: EncounterKind | null, run: number): EncounterKind {
+  if (index === 0 && params.nebulaShare < 1 && asteroidFraction(params) < 1) return 'planet';
   return nextEncounterKind(seed, params, lastKind, run);
 }
 
@@ -488,7 +598,7 @@ export function encounterSchedule(params: Readonly<AutopilotParams>, count: numb
   for (let index = 0; index < count; index++) {
     const seed = hash(params.baseSeed, index);
     const kind = encounterKindAt(index, seed, params, lastKind, run);
-    run = kind === lastKind ? run + 1 : 1;
+    run = runClass(kind) === runClass(lastKind) ? run + 1 : 1;
     lastKind = kind;
     out.push({ index, seed, kind, side: encounterSide(seed, params.sideElevation).side, interval: cruiseInterval(params, index) });
   }
@@ -497,7 +607,7 @@ export function encounterSchedule(params: Readonly<AutopilotParams>, count: numb
 
 /** The speed and fade profile in use for an encounter of `kind`. */
 export function encounterProfile(params: Readonly<AutopilotParams>, kind: EncounterKind): Readonly<EncounterProfile> {
-  return kind === 'nebula' ? params.nebula.profile : params.profile;
+  return kind === 'nebula' ? params.nebula.profile : kind === 'asteroid' ? params.asteroid.profile : params.profile;
 }
 
 /**
@@ -611,6 +721,16 @@ export function planetPassFactor(planet: Readonly<PlanetSpec>, sideOffsetFactor:
 }
 
 /**
+ * The `k` an encounter with `asteroid` is planned with: the asteroid's own pass factor, or
+ * `sideOffsetFactor` without one, raised to at least `1 + ENCOUNTER_CLEARANCE_MARGIN`, so the path
+ * never comes within `radius × (1 + margin)` of the field centre and never enters the sphere that
+ * holds every rock (docs/PLAN.md section 6, Variety: the camera never passes through an asteroid).
+ */
+export function asteroidPassFactor(asteroid: Readonly<AsteroidSpec>, sideOffsetFactor: number): number {
+  return Math.max(asteroid.passFactor ?? sideOffsetFactor, 1 + ENCOUNTER_CLEARANCE_MARGIN);
+}
+
+/**
  * Bounds on where a nebula's layers reach, in world units, for a nebula of core radius `radius`
  * planned `closestDistance` from the path (`radius × k`), from NEBULA_RANGES (so they hold for every
  * seed): `depth`, how far past the nebula centre along the path any point of any layer lies (the
@@ -640,6 +760,8 @@ const viewScratch: Vec3 = { x: 0, y: 0, z: 0 };
  *
  * - Planet: `sphereViewMargin` of the sphere of `radius × planetViewRadiusFactor(planet)` (the
  *   atmosphere, or the ring), in radians.
+ * - Asteroid: `sphereViewMargin` of the field's bounding sphere (`radius`, which holds every rock
+ *   whatever its tumble), in radians.
  * - Nebula: in world units, how far the ship is past every layer (`-(remaining + depth)`, from
  *   `nebulaViewExtent`), and only once the heading has not turned so far from the planned direction
  *   that the cone could reach a layer: every point of a layer is then at least
@@ -656,6 +778,9 @@ export function encounterViewMargin(
   if (encounter.kind === 'planet') {
     const offset = encounterOffset(plan, ship.position, viewScratch);
     return sphereViewMargin(offset, ship.heading, plan.radius * planetViewRadiusFactor(encounter.planet), halfAngle);
+  }
+  if (encounter.kind === 'asteroid') {
+    return sphereViewMargin(encounterOffset(plan, ship.position, viewScratch), ship.heading, plan.radius, halfAngle);
   }
   const { depth, lateral } = nebulaViewExtent(plan.radius, plan.closestDistance);
   const past = -(remaining + depth);
@@ -746,6 +871,11 @@ export function updateAutopilot(
         const { encounterDistance, sideOffsetFactor } = params.nebula;
         const plan = planEncounter(ship.position, ship.heading, nebula.radius, encounterDistance, sideOffsetFactor, sideAngle);
         encounter = { kind: 'nebula', index, seed, side, nebula, plan };
+      } else if (kind === 'asteroid') {
+        const asteroid = params.asteroidFor(seed);
+        const k = asteroidPassFactor(asteroid, params.asteroid.sideOffsetFactor);
+        const plan = planEncounter(ship.position, ship.heading, asteroid.radius, params.asteroid.encounterDistance, k, sideAngle);
+        encounter = { kind: 'asteroid', index, seed, side, asteroid, plan };
       } else {
         const planet = params.planetFor(seed);
         const k = planetPassFactor(planet, params.sideOffsetFactor);
@@ -753,7 +883,7 @@ export function updateAutopilot(
         encounter = { kind: 'planet', index, seed, side, planet, plan };
       }
       encounterCount = index + 1;
-      kindRun = kind === lastKind ? kindRun + 1 : 1;
+      kindRun = runClass(kind) === runClass(lastKind) ? kindRun + 1 : 1;
       lastKind = kind;
       // How late this encounter starts. The plan stays at the ship's actual position; the next CRUISE
       // is shortened by this instead.
@@ -841,10 +971,10 @@ export function updateAutopilot(
  * change in the middle of an encounter never makes it skip a state. Allocates the new profile.
  *
  * The scaled minimum speed is floored at the profile's `minSpeedFloor` (ENCOUNTER_MIN_SPEED_FLOOR
- * for planets, NEBULA_MIN_SPEED_FLOOR for nebulae), so the slowest levels (the reduced-motion start)
- * slow down proportionally less instead of crawling through the flyby; it is also capped at the
- * encounter speed, so an encounter never speeds the ship up. Planet and nebula profiles are both
- * scaled this way.
+ * for planets, NEBULA_MIN_SPEED_FLOOR for nebulae, ASTEROID_MIN_SPEED_FLOOR for asteroids), so the
+ * slowest levels (the reduced-motion start) slow down proportionally less instead of crawling
+ * through the flyby; it is also capped at the encounter speed, so an encounter never speeds the ship
+ * up. Planet, nebula and asteroid profiles are all scaled this way.
  */
 export function setCruiseSpeed(
   params: AutopilotParams,
@@ -860,6 +990,7 @@ export function setCruiseSpeed(
   params.cruiseSpeed = cruiseSpeed;
   params.profile = scaled(base.profile);
   params.nebula = { ...params.nebula, profile: scaled(base.nebula.profile) };
+  params.asteroid = { ...params.asteroid, profile: scaled(base.asteroid.profile) };
 }
 
 /** Everything the simulation step advances: the ship, the autopilot and the params they feed each other. */

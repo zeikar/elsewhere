@@ -92,7 +92,7 @@ function runEncounters(travel: Travel, count: number, dt: (frame: number) => num
   const view = new EncounterView(scene);
   const ledger = new ResourceLedger();
   const result: LongRunResult = {
-    kinds: { planet: 0, nebula: 0 },
+    kinds: { planet: 0, nebula: 0, asteroid: 0 },
     ringed: 0,
     leaks: [],
     worstJump: Number.NEGATIVE_INFINITY,

@@ -222,9 +222,11 @@ export const ENCOUNTER_INTERVAL_SECONDS = 40;
 export const ENCOUNTER_INTERVAL_JITTER = 0.2;
 
 /**
- * Most encounters of one kind (planet or nebula) in a row. When the seeded draw would make one more,
- * the encounter is the other kind instead; the draw is biased to compensate, so the long-run share
- * of nebulae is still ENCOUNTER_NEBULA_SHARE. Ignored when every encounter is forced to one kind.
+ * Most encounters of one kind in a row. Planets and asteroids are both solid bodies and count as one
+ * run here, so this caps runs of nebulae and runs of solid bodies, and with them runs of every kind
+ * (planet, nebula or asteroid). When the seeded draw would make one more, the encounter is the other
+ * class instead; the draw is biased to compensate, so the long-run share of nebulae is still
+ * ENCOUNTER_NEBULA_SHARE. Ignored when every encounter is forced to one kind.
  */
 export const ENCOUNTER_MAX_SAME_KIND_RUN = 3;
 
@@ -321,7 +323,9 @@ export const ENCOUNTER_PLANET_RADIUS = 48;
  * In production the trip seed is random on each load, or taken from `?seed=` (src/tripSeed.ts).
  * This value is the default of `DEFAULT_AUTOPILOT_PARAMS.baseSeed` and of `EngineOptions.tripSeed`,
  * and the e2e suite passes it as `?seed=91b3a5ba`, so tests stay deterministic. It is chosen for its
- * opening: an oceanic planet first, then a nebula, then another planet and another nebula. Every
+ * opening: an oceanic planet first, then a nebula, then another planet and another nebula (and an
+ * asteroid fifth, at index 4: the asteroid draw, ENCOUNTER_ASTEROID_SHARE, leaves the first four as
+ * they were). Every
  * trip seed starts with a planet (`encounterKindAt`) within the 30–60 s of docs/PLAN.md section 9,
  * Phase 2 (see ENCOUNTER_INTERVAL_JITTER).
  */
@@ -592,7 +596,7 @@ export const PLANET_RING_SEGMENTS = 160;
 
 /*
  * Nebulae (docs/PLAN.md section 6, Nebulae (Phase 3)): layered, soft-blended planes shaded with a
- * cheap fBm fragment shader. An encounter is a planet or a nebula, chosen from the encounter's
+ * cheap fBm fragment shader. An encounter is a planet, a nebula or an asteroid (see Asteroids below), chosen from the encounter's
  * appearance seed `hash(tripSeed, index)` (see ENCOUNTER_BASE_SEED). Nebula encounters use the same planned-path
  * maths as planets (`planEncounter`), with their own distance, side offset, speed and fade curves.
  *
@@ -710,6 +714,134 @@ export const NEBULA_RANGES = {
 
 /** Range for each component of a layer's noise-domain offset. */
 export const NEBULA_NOISE_OFFSET_RANGE = [-100, 100] as const;
+
+/*
+ * Asteroids (docs/PLAN.md section 6, Variety, and section 9, Phase 4): a close pass by something
+ * small and irregular. `asteroidParams(seed)` in engine/Asteroid.ts draws every value below from an
+ * encounter's appearance seed. An asteroid encounter is one rock, or a small field of
+ * ASTEROID_RANGES.fieldCount rocks of different sizes around a main rock. Each rock is a seeded,
+ * noise-displaced low-poly sphere (`irregularBodyGeometry`: lumps, an elongated potato shape and a
+ * few craters) that tumbles slowly about a seeded axis, and is shaded with the rocky planet surface
+ * program, so asteroids add no shader program.
+ *
+ * Schedule: the planet-or-nebula draw (ENCOUNTER_NEBULA_SHARE, ENCOUNTER_MAX_SAME_KIND_RUN) is
+ * unchanged, and a second seeded draw, from a stream of its own, turns some of the planets into
+ * asteroids, so ENCOUNTER_ASTEROID_SHARE of all encounters are asteroids in the long run: the nebula
+ * share stays 0.35, and the planet share goes from 0.65 to 0.5 (planets to nebulae from 65:35 to
+ * 50:35). Every nebula stays where it was in every trip, and every planet that stays a planet keeps
+ * its look. The first encounter of every trip is still a planet.
+ *
+ * Plan: the encounter radius is the field's bounding radius (a sphere about the field centre holding
+ * every rock, `AsteroidParams.radius`), and the path passes at least `radius × (1 +
+ * ENCOUNTER_CLEARANCE_MARGIN)` from that centre, so it never enters the field's sphere, and every
+ * rock's centre at least ASTEROID_MIN_PASS_DISTANCE from the path (the rocks are laid out in the
+ * encounter's own frame, so their distances from the path are known when it is planned). The
+ * out-of-view test uses the same sphere.
+ */
+
+/** Share of all encounters that are asteroids, in the long run (see the section comment). */
+export const ENCOUNTER_ASTEROID_SHARE = 0.15;
+
+/** Bounds the asteroid share over any 1,000 consecutive encounter indices must stay within. */
+export const ENCOUNTER_ASTEROID_SHARE_BOUNDS = [0.1, 0.2] as const;
+
+/**
+ * `D` for asteroids: the field centre is placed this far ahead, which is also the spawn distance.
+ * Closer than for planets: a rock is small (the largest main rock, 24 across, is under 0.9° across
+ * from here, about 16 px at 1080p), so it still starts as a dot.
+ */
+export const ASTEROID_ENCOUNTER_DISTANCE = 1600;
+
+/**
+ * `k` for an asteroid that brings no pass factor of its own (`AsteroidSpec.passFactor`); every
+ * seeded asteroid does.
+ */
+export const ASTEROID_SIDE_OFFSET_FACTOR = 3;
+
+/**
+ * Smallest distance between the path and any rock's centre, in world units: closer than any planet
+ * (PLANET_MIN_PASS_DISTANCE), which bounds the bearing rate at the asteroid minimum speed (see below).
+ */
+export const ASTEROID_MIN_PASS_DISTANCE = 30;
+
+/**
+ * The closest approach to the field centre is the lowest one that keeps the path clear (see the
+ * section comment) times `1 + ASTEROID_PASS_EXTRA × u²` for a uniform roll `u`, so most pass close.
+ */
+export const ASTEROID_PASS_EXTRA = 0.6;
+
+/**
+ * Asteroid speed profile (see the planet one, ENCOUNTER_MIN_SPEED). The rocks pass much closer than
+ * planets, so the ship slows further: a rock's bearing rate peaks at the ship's speed over its
+ * distance from the path, and at ASTEROID_MIN_PASS_DISTANCE the minimum speed sweeps it past at about
+ * 4.6°/s, under the 5.1°/s guard (checked in Asteroid.test.ts for every rock of 2,000 seeded fields).
+ * The minimum speed is held within ASTEROID_MIN_SPEED_DISTANCE of the closest approach, wider than
+ * a field reaches along the path (ASTEROID_RANGES), so every rock of a field passes at it. Like the
+ * other kinds, an asteroid encounter is flown from the arrival speed at the faster levels.
+ */
+export const ASTEROID_MIN_SPEED = 2.4;
+/** Lowest asteroid minimum speed at any speed level (see ENCOUNTER_MIN_SPEED_FLOOR). */
+export const ASTEROID_MIN_SPEED_FLOOR = 2;
+export const ASTEROID_SLOWDOWN_DISTANCE = 560;
+export const ASTEROID_MIN_SPEED_DISTANCE = 40;
+export const ASTEROID_SPEEDUP_DISTANCE = 800;
+
+/**
+ * Asteroid fade (see the planet one). An asteroid encounter ends once the field is out of view, a
+ * little after the closest approach, so the fade-out is not seen.
+ */
+export const ASTEROID_FADE_IN_DISTANCE = 1200;
+export const ASTEROID_FADE_OUT_DISTANCE = 1000;
+export const ASTEROID_DESPAWN_DISTANCE = 1200;
+
+/** Share of asteroid encounters that are a field of several rocks; the rest are one rock. */
+export const ASTEROID_FIELD_SHARE = 0.5;
+
+/**
+ * Parameter ranges for `asteroidParams(seed)` in engine/Asteroid.ts (inclusive `[min, max]` pairs).
+ * A rock's radius is its bounding radius: every vertex of its geometry lies within it.
+ */
+export const ASTEROID_RANGES = {
+  /** Main rock radius, in world units. */
+  radius: [4, 12],
+  /** Rocks in a field, the main rock included (an integer). */
+  fieldCount: [3, 7],
+  /** A field's other rocks' radii, in main-rock radii. */
+  satelliteRadius: [0.2, 0.5],
+  /**
+   * How far a field's other rocks' centres lie from the main rock's, along the path, in main-rock
+   * radii (at most this; their offsets toward the side and up are at most 0.75 and 0.6 of it).
+   */
+  spread: [2.2, 3.3],
+  /** A rock's shorter axes, as fractions of its longest (an elongated, potato-like shape). */
+  axisB: [0.55, 0.85],
+  axisC: [0.4, 0.7],
+  /** Amplitude of the low-frequency lumps on a rock, as a fraction of its radius. */
+  lumpiness: [0.26, 0.4],
+  /** Craters in a rock's shape (an integer), and their angular radius on it, in radians. */
+  craterCount: [3, 6],
+  craterSize: [0.3, 0.75],
+  /** Tumble speed about the rock's seeded axis, in radians per second. */
+  tumbleSpeed: [0.05, 0.2],
+  /** Surface shading (the rocky planet shader's terrain, see PLANET_ROCKY_RANGES). */
+  noiseScale: [1.6, 2.8],
+  octaves: [5, 6],
+  warp: [0.2, 0.6],
+  relief: [0.8, 1.4],
+  craters: [0.35, 0.75],
+} as const;
+
+/**
+ * Icosphere detail (`IcosahedronGeometry`'s) of the main rock and of a field's other rocks: 812 and
+ * 162 vertices, 1,620 and 320 triangles. Low-poly on purpose: the silhouette shows facets, and the
+ * surface shader adds the fine detail.
+ *
+ * Encounter-time resources: one geometry, one material and one draw call per rock (at most 7 each
+ * for a field; a single rock 1), all freed with the encounter, and no program of its own (the rocks
+ * draw with the rocky planet surface program, kept compiled by ProgramWarmup), so the counts at
+ * cruise are unchanged (longRun.test.ts, e2e/asteroid.spec.ts).
+ */
+export const ASTEROID_DETAIL = { main: 8, satellite: 3 } as const;
 
 /*
  * Reduced motion (docs/PLAN.md section 7): under `prefers-reduced-motion: reduce`, travel starts at a

@@ -5,7 +5,7 @@
  *
  * The hook is read-only toward the engine: getters expose engine state, and the only engine
  * methods are its own public API, which the UI will call anyway. `showPlanet` / `showEncounter` /
- * `hidePlanet` draw a planet or a nebula on a separate e2e-only canvas (src/e2ePlanetPreview.ts) and
+ * `hidePlanet` draw a planet, a nebula or an asteroid on a separate e2e-only canvas (src/e2ePlanetPreview.ts) and
  * never touch the engine.
  *
  * Performance instrumentation: `snapshot().perf` reports the engine's rolling frame-time statistics
@@ -16,7 +16,7 @@
  *
  * `e2eEngineOptions` reads e2e-only engine overrides from the page URL (also absent from the
  * production build): `?encounterInterval=<seconds>` shortens (or, with a huge value, effectively
- * disables) the encounter interval so tests run quickly, `?encounterKind=planet|nebula` makes
+ * disables) the encounter interval so tests run quickly, `?encounterKind=planet|nebula|asteroid` makes
  * every encounter that kind, `?starLayers=far|near` draws only that star layer, `?headingDrift=0`
  * holds the heading at -Z (so the ship only translates), and `?arrivalSpeed=<u/s>` sets the arrival
  * speed (a value at or above the top speed flies encounters from the top speed, without dropping
@@ -63,7 +63,7 @@ export interface E2EProbe {
   state: TravelState;
   /** Index of the encounter in progress, or -1 in CRUISE. */
   encounterIndex: number;
-  /** Whether the encounter object (planet or nebula) is drawn this frame. */
+  /** Whether the encounter object (planet, nebula or asteroid) is drawn this frame. */
   visible: boolean;
   /** Interval from the previous frame to the latest one, in ms (NaN when it had none, e.g. after a resume). */
   frameMs: number;
@@ -172,7 +172,7 @@ export interface E2EHookSnapshot {
     /** Side of the path the encounter object sits on, or `null` in CRUISE. */
     side: EncounterSide | null;
   };
-  /** Objects in the scene besides the two star layers and the galaxies (the encounter planet or nebula). */
+  /** Objects in the scene besides the two star layers and the galaxies (the encounter planet, nebula or asteroid). */
   planets: number;
   /** The encounter planet as last placed for rendering, or `null`. */
   planet: {
@@ -216,6 +216,28 @@ export interface E2EHookSnapshot {
     /** Per layer: distance from the camera to its plane, its near-camera fade, and whether it is drawn. */
     layers: { planeDistance: number; fade: number; visible: boolean }[];
   } | null;
+  /** The encounter asteroid as last placed for rendering, or `null`. */
+  asteroid: {
+    index: number;
+    seed: number;
+    family: string;
+    /** Bounding radius of the field (every rock lies within it), in world units. */
+    radius: number;
+    /** Encounter opacity uniform. */
+    opacity: number;
+    visible: boolean;
+    /** Render position: field centre relative to the ship (camera at the origin). */
+    position: { x: number; y: number; z: number };
+    /** Distance from the camera to the field centre. */
+    distance: number;
+    /** Field centre in normalised device coordinates. */
+    ndc: { x: number; y: number; z: number };
+    /**
+     * Per rock: its bounding radius, its centre relative to the camera, and its centre in normalised
+     * device coordinates.
+     */
+    rocks: { radius: number; position: { x: number; y: number; z: number }; ndc: { x: number; y: number; z: number } }[];
+  } | null;
 }
 
 export interface E2EHook {
@@ -236,8 +258,9 @@ export interface E2EHook {
    */
   showPlanet(type: PlanetType, nth?: number, options?: PlanetPreviewOptions): PlanetPreviewInfo;
   /**
-   * Draws the planet or nebula for appearance seed `seed` on the same overlay canvas, replacing
-   * anything shown: a planet framed as `showPlanet` frames it, a nebula as seen mid-APPROACH.
+   * Draws the planet, nebula or asteroid for appearance seed `seed` on the same overlay canvas,
+   * replacing anything shown: a planet framed as `showPlanet` frames it, a nebula as seen
+   * mid-APPROACH, an asteroid framed by its bounding radius.
    */
   showEncounter(kind: EncounterKind, seed: number): EncounterPreviewInfo;
   /**
@@ -271,7 +294,7 @@ export function e2eEngineOptions(
   const arrival = rawArrival === null ? Number.NaN : Number(rawArrival);
   return {
     ...(interval >= 0 ? { encounterInterval: interval } : {}),
-    ...(kind === 'planet' || kind === 'nebula' ? { encounterKind: kind } : {}),
+    ...(kind === 'planet' || kind === 'nebula' || kind === 'asteroid' ? { encounterKind: kind } : {}),
     ...(layers === 'far' || layers === 'near' || layers === 'both' ? { starLayers: layers } : {}),
     ...(drift === '0' ? { headingDrift: false } : {}),
     ...(arrival > 0 ? { arrivalSpeed: arrival } : {}),
@@ -279,6 +302,7 @@ export function e2eEngineOptions(
 }
 
 const ndc = new Vector3();
+const rockCentre = new Vector3();
 
 function frameTimes(stats: Readonly<FrameStats>): E2EFrameTimes {
   const orNull = (x: number) => (Number.isFinite(x) ? x : null);
@@ -362,6 +386,33 @@ export function installE2EHook(engine: Engine): void {
           })),
         };
       }
+      const asteroid = engine.getAsteroid();
+      let asteroidView: E2EHookSnapshot['asteroid'] = null;
+      if (asteroid !== null && autopilot.encounter !== null) {
+        const p = asteroid.object.position;
+        ndc.copy(p).project(engine.getCamera());
+        asteroidView = {
+          index: autopilot.encounter.index,
+          seed: asteroid.params.seed,
+          family: asteroid.params.family,
+          radius: asteroid.params.radius,
+          opacity: asteroid.uniforms.uOpacity.value,
+          visible: asteroid.object.visible,
+          position: { x: p.x, y: p.y, z: p.z },
+          distance: p.length(),
+          ndc: { x: ndc.x, y: ndc.y, z: ndc.z },
+          rocks: asteroid.rocks.map((rock, i) => {
+            rockCentre.copy(rock.position).multiplyScalar(asteroid.object.scale.x).add(p);
+            const centre = { x: rockCentre.x, y: rockCentre.y, z: rockCentre.z };
+            rockCentre.project(engine.getCamera());
+            return {
+              radius: asteroid.params.rocks[i]!.radius,
+              position: centre,
+              ndc: { x: rockCentre.x, y: rockCentre.y, z: rockCentre.z },
+            };
+          }),
+        };
+      }
       const galaxyInfo = engine.getGalaxyInfo();
       const galaxies: E2EHookSnapshot['galaxies'] = {
         visible: galaxyInfo.visible,
@@ -425,6 +476,7 @@ export function installE2EHook(engine: Engine): void {
         planets: engine.getPlanetCount(),
         planet: planetView,
         nebula: nebulaView,
+        asteroid: asteroidView,
       };
     },
     probe(out = newProbe()) {

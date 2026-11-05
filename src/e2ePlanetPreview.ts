@@ -1,7 +1,7 @@
 /**
  * E2E-only encounter preview, used through the test hook (src/e2eHook.ts) and absent from the
  * production build. The engine draws encounter objects wherever the encounter puts them; this
- * instead draws one chosen planet or nebula, framed the same every time, on its own full-viewport
+ * instead draws one chosen planet, nebula or asteroid, framed the same every time, on its own full-viewport
  * canvas (`#planet-preview`) laid over the scene, with its own renderer and a camera at the origin
  * looking down -Z, like the engine's. It is drawn once at a fixed time so screenshots are repeatable.
  *
@@ -18,6 +18,8 @@
  * - A nebula is seen as in its encounter, mid-APPROACH: planned along -Z on its seeded side of the
  *   path (`encounterSide`), with the camera NEBULA_PREVIEW_REMAINING short of the closest approach,
  *   fully faded in.
+ * - An asteroid (one rock or a field) is framed like a planet, by its bounding radius, with its rocks
+ *   laid out as for an encounter planned along -Z with the field to the right (DEFAULT_PLANET_FRAME).
  */
 import { PerspectiveCamera, SRGBColorSpace, Scene, Vector3, WebGLRenderer } from 'three';
 import {
@@ -31,6 +33,7 @@ import {
   NEBULA_SIDE_OFFSET_FACTOR,
 } from './config';
 import { encounterSide, type EncounterKind, type EncounterSide } from './engine/Autopilot';
+import { Asteroid, asteroidParams } from './engine/Asteroid';
 import { encounterOffset, planEncounter } from './engine/encounter';
 import { FarStarfield } from './engine/FarStarfield';
 import { Galaxies, generateGalaxies, type Galaxy } from './engine/Galaxies';
@@ -91,9 +94,12 @@ export interface EncounterPreviewInfo {
   kind: EncounterKind;
   seed: number;
   family: string;
-  /** Planet type, or `null` for a nebula. */
+  /** Planet type, or `null` for a nebula or an asteroid. */
   type: PlanetType | null;
+  /** Radius: a planet's, a nebula's core radius, or an asteroid field's bounding radius. */
   radius: number;
+  /** Rocks of an asteroid (1 for a single rock), or `null` for a planet or a nebula. */
+  rocks: number | null;
   /** Side of the path the object sits on in its encounter. */
   side: EncounterSide;
   /** Compiled shader programs in the preview renderer. */
@@ -102,7 +108,7 @@ export interface EncounterPreviewInfo {
 
 let canvas: HTMLCanvasElement | null = null;
 let renderer: WebGLRenderer | null = null;
-let shown: Planet | Nebula | null = null;
+let shown: Planet | Nebula | Asteroid | null = null;
 let farStars: FarStarfield | null = null;
 let galaxies: Galaxies | null = null;
 // Created on first use, so merely importing this module has no side effects.
@@ -258,6 +264,20 @@ function drawNebula(seed: number): Nebula {
   return nebula;
 }
 
+/** Draws the asteroid for appearance seed `seed`, framed by its bounding radius, replacing anything shown. */
+function drawAsteroid(seed: number): Asteroid {
+  const { renderer: r, scene: s, camera: c } = prepare();
+  const params = asteroidParams(seed);
+  const asteroid = new Asteroid(params);
+  shown = asteroid;
+  const radius = params.radius;
+  asteroid.object.position.set(PREVIEW_OFFSET_RADII.x * radius, PREVIEW_OFFSET_RADII.y * radius, PREVIEW_OFFSET_RADII.z * radius);
+  asteroid.update(PREVIEW_TIME);
+  s.add(asteroid.object);
+  r.render(s, c);
+  return asteroid;
+}
+
 /**
  * Shows the `nth` (default: the first) encounter planet of `type`, replacing anything shown, and
  * draws it once, with the far stars behind it when `options.farStars` is set.
@@ -280,18 +300,23 @@ export function showPlanetPreview(type: PlanetType, nth = 0, options: Readonly<P
 }
 
 /**
- * Shows the planet or nebula for appearance seed `seed` (a uint32), whatever kind the schedule would
- * give it, replacing anything shown, and draws it once.
+ * Shows the planet, nebula or asteroid for appearance seed `seed` (a uint32), whatever kind the
+ * schedule would give it, replacing anything shown, and draws it once.
  */
 export function showEncounterPreview(kind: EncounterKind, seed: number): EncounterPreviewInfo {
   const s = seed >>> 0;
   const side = encounterSide(s).side;
+  const programs = () => renderer?.info.programs?.length ?? 0;
   if (kind === 'nebula') {
     const { params } = drawNebula(s);
-    return { kind, seed: s, family: params.family, type: null, radius: params.radius, side, programs: renderer?.info.programs?.length ?? 0 };
+    return { kind, seed: s, family: params.family, type: null, radius: params.radius, rocks: null, side, programs: programs() };
+  }
+  if (kind === 'asteroid') {
+    const { params } = drawAsteroid(s);
+    return { kind, seed: s, family: params.family, type: null, radius: params.radius, rocks: params.rocks.length, side, programs: programs() };
   }
   const { params } = drawPlanet(s).planet;
-  return { kind, seed: s, family: params.family, type: params.type, radius: params.radius, side, programs: renderer?.info.programs?.length ?? 0 };
+  return { kind, seed: s, family: params.family, type: params.type, radius: params.radius, rocks: null, side, programs: programs() };
 }
 
 /** Per-class pixel differences between a ringed planet drawn with and without its ring (0–255 per channel). */
