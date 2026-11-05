@@ -24,7 +24,9 @@ import {
   asteroidMinClosestDistance,
   asteroidParams,
   asteroidRockPassDistances,
+  MIN_RELATIVE_RADIUS,
   irregularBodyGeometry,
+  irregularBodyRadii,
   rockPosition,
   type AsteroidParams,
   type IrregularBodyShape,
@@ -160,6 +162,39 @@ describe('irregularBodyGeometry', () => {
     expect(moved / r.lumpy.length).toBeGreaterThan(0.5);
     for (const g of [plain, lumpy, sphere]) g.dispose();
   });
+
+  it('never folds through its centre: every seeded rock keeps each vertex at least the floor over the farthest radius', () => {
+    for (const [i, params] of SEEDED.entries()) {
+      for (const [j, rock] of params.rocks.entries()) {
+        const label = `seed ${i}, rock ${j}`;
+        const { shape } = rock;
+        const [a, b, c] = shape.axes;
+        const before = irregularBodyRadii(shape);
+        const farthest = Math.max(...before);
+        const geometry = irregularBodyGeometry(shape);
+        const position = geometry.getAttribute('position');
+        const normal = geometry.getAttribute('normal');
+        expect(position.count, label).toBe(before.length);
+        let worst = Infinity;
+        let mismatch = 0;
+        let inward = 0;
+        for (let v = 0; v < position.count; v++) {
+          const p = { x: position.getX(v), y: position.getY(v), z: position.getZ(v) };
+          const r = len(p);
+          // The ellipsoid's radius along this vertex's own direction (the longest axis is 1).
+          const ellipsoid = 1 / Math.hypot(p.x / r / a, p.y / r / b, p.z / r / c);
+          mismatch = Math.max(mismatch, Math.abs(r - before[v]! / farthest));
+          worst = Math.min(worst, r / ((ellipsoid * MIN_RELATIVE_RADIUS) / farthest));
+          if (dot({ x: normal.getX(v), y: normal.getY(v), z: normal.getZ(v) }, p) <= 0) inward++;
+        }
+        expect(mismatch, label).toBeLessThan(1e-6);
+        expect(worst, label).toBeGreaterThanOrEqual(1 - 1e-6);
+        // No folded triangles: every vertex normal still faces outward.
+        expect(inward, label).toBe(0);
+        geometry.dispose();
+      }
+    }
+  }, 30_000);
 });
 
 describe('asteroidParams', () => {

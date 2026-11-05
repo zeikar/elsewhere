@@ -12,7 +12,8 @@
  *   and every rock's centre at least ASTEROID_MIN_PASS_DISTANCE from it (`asteroidRockPassDistances`).
  * - `irregularBodyGeometry(shape)` builds one rock: an icosphere with its duplicate vertices merged,
  *   stretched into a seeded ellipsoid, then displaced along each direction by low-frequency seeded
- *   lumps and a few bowl-shaped craters with raised rims, and scaled so its farthest vertex is at
+ *   lumps and a few bowl-shaped craters with raised rims (their factor softly floored at
+ *   MIN_RELATIVE_RADIUS, so no pit reaches the centre), and scaled so its farthest vertex is at
  *   exactly 1. It is pure and deterministic, so the same shape always gives the same geometry, and is
  *   meant to be reused for any irregular body (a comet's nucleus, for one).
  * - `Asteroid` builds the meshes: one per rock, each with its own geometry and material, all freed in
@@ -73,6 +74,14 @@ const CRATER_DEPTH = 0.45;
 /** Height of a crater's raised rim, relative to its depth, and how sharply it falls off around the edge. */
 const CRATER_RIM = 0.3;
 const CRATER_RIM_SHARPNESS = 12;
+/**
+ * Floor of the lumps-and-craters factor (`1 + h`, see `bodyRadius`), whatever the shape: overlapping
+ * crater bowls on a deep lump could otherwise take a direction's radius to the centre or through it
+ * (a folded, self-intersecting pit). Below SOFT_FLOOR_KNEE the factor eases smoothly (with a
+ * continuous slope) toward the floor, so the floor leaves no crease, and nothing above the knee changes.
+ */
+export const MIN_RELATIVE_RADIUS = 0.35;
+const SOFT_FLOOR_KNEE = 0.6;
 /** Salt of the lump and crater stream, independent of the other draws from the shape's seed. */
 const SHAPE_SALT = 0x5ba9e;
 
@@ -128,9 +137,16 @@ function shapeFeatures(shape: Readonly<IrregularBodyShape>): { waves: Wave[]; cr
   return { waves, craters };
 }
 
+/** `f` unchanged from SOFT_FLOOR_KNEE up, easing exponentially toward MIN_RELATIVE_RADIUS below it (always above it). */
+function softFloor(f: number): number {
+  if (f >= SOFT_FLOOR_KNEE) return f;
+  const width = SOFT_FLOOR_KNEE - MIN_RELATIVE_RADIUS;
+  return MIN_RELATIVE_RADIUS + width * Math.exp((f - SOFT_FLOOR_KNEE) / width);
+}
+
 /**
  * The body's radius along the unit direction `(x, y, z)`, before the final scaling: the ellipsoid's
- * radius there times (1 + the lumps + the craters).
+ * radius there times (1 + the lumps + the craters), that factor softly floored at MIN_RELATIVE_RADIUS.
  */
 function bodyRadius(x: number, y: number, z: number, shape: Readonly<IrregularBodyShape>, waves: readonly Wave[], craters: readonly Crater[]): number {
   const [a, b, c] = shape.axes;
@@ -144,7 +160,7 @@ function bodyRadius(x: number, y: number, z: number, shape: Readonly<IrregularBo
     const rim = CRATER_RIM * Math.exp(-CRATER_RIM_SHARPNESS * (t - 1) * (t - 1));
     h += CRATER_DEPTH * k.size * (bowl + rim);
   }
-  return ellipsoid * (1 + h);
+  return ellipsoid * softFloor(1 + h);
 }
 
 /** An icosphere's merged unit vertex directions and triangle indices (CPU-side data only). */
@@ -193,6 +209,20 @@ function unitIcosphere(rawDetail: number): UnitIcosphere {
 
 
 /**
+ * The body's radius along each of its geometry's vertex directions (in vertex order), before the
+ * final scaling: at least MIN_RELATIVE_RADIUS times the ellipsoid's radius there. Pure.
+ */
+export function irregularBodyRadii(shape: Readonly<IrregularBodyShape>): Float64Array {
+  const { directions } = unitIcosphere(shape.detail);
+  const { waves, craters } = shapeFeatures(shape);
+  const radii = new Float64Array(directions.length / 3);
+  for (let i = 0; i < radii.length; i++) {
+    radii[i] = bodyRadius(directions[3 * i]!, directions[3 * i + 1]!, directions[3 * i + 2]!, shape, waves, craters);
+  }
+  return radii;
+}
+
+/**
  * A seeded, noise-displaced low-poly sphere (an irregular rocky body): see the module comment. The
  * geometry is indexed, with `position`, smooth vertex `normal`s and `uv` (all zero; the attributes
  * of the planet sphere, so it draws with the planet programs), and its farthest vertex is exactly at
@@ -202,16 +232,11 @@ function unitIcosphere(rawDetail: number): UnitIcosphere {
  */
 export function irregularBodyGeometry(shape: Readonly<IrregularBodyShape>): BufferGeometry {
   const { directions, index } = unitIcosphere(shape.detail);
-  const { waves, craters } = shapeFeatures(shape);
-  const count = directions.length / 3;
+  const radii = irregularBodyRadii(shape);
+  const count = radii.length;
   const positions = new Float32Array(count * 3);
-  const radii = new Float64Array(count);
   let farthest = 0;
-  for (let i = 0; i < count; i++) {
-    const r = bodyRadius(directions[3 * i]!, directions[3 * i + 1]!, directions[3 * i + 2]!, shape, waves, craters);
-    radii[i] = r;
-    farthest = Math.max(farthest, r);
-  }
+  for (let i = 0; i < count; i++) farthest = Math.max(farthest, radii[i]!);
   for (let i = 0; i < count; i++) {
     const r = radii[i]! / farthest;
     positions[3 * i] = directions[3 * i]! * r;
