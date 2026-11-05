@@ -26,8 +26,8 @@
  * Render order, for everything in the scene (all of it is in Three.js' transparent list, which draws
  * in ascending renderOrder):
  *
- * 1. FAR_STARFIELD_RENDER_ORDER (-2): the far stars, additive, just inside the far plane, no depth
- *    writes. Drawn first, so they never hide anything, and everything below draws over them.
+ * 1. FAR_STARFIELD_RENDER_ORDER (-2): the far stars and the distant galaxies (Galaxies.ts), both
+ *    additive, just inside the far plane, no depth writes. Drawn first, so they never hide anything, and everything below draws over them.
  * 2. STARFIELD_RENDER_ORDER - 1 (-1): planet surfaces (SURFACE_RENDER_ORDER), which write depth and
  *    paint over the far stars behind them; and nebula layers (NEBULA_RENDER_ORDER), which blend over
  *    the far stars without writing depth. One encounter is in the scene at a time, so the two never

@@ -7,6 +7,9 @@ import { expect, test, type Page } from '@playwright/test';
 import type { E2EHookSnapshot } from '../src/e2eHook';
 import { installFrameSampler, takeFrameWindow } from './frameSampler';
 import { appUrl } from './app';
+import { ENCOUNTER_BASE_SEED } from '../src/config';
+import { generateGalaxies } from '../src/engine/Galaxies';
+import { formatTripSeed } from '../src/tripSeed';
 
 // SwiftShader renders at only a few fps; each test sets its own, longer timeout where it needs one.
 test.describe.configure({ timeout: 300_000 });
@@ -88,6 +91,41 @@ test('the hook reports frame-time statistics, the heap and renderer.info, and a 
   const after = await snapshot(page);
   expect(after.perf.frameMs.total - paused.perf.frameMs.total).toBe(after.frames - paused.frames - 1);
   expect(after.perf.frameMs.last).toBeLessThan(3_000);
+  expect(errors).toEqual([]);
+});
+
+/**
+ * The GPU resource budget at cruise (no encounter object): what the sky costs.
+ *
+ * - The far stars, the near dust and, in a trip with any distant galaxy, the galaxy layer: one
+ *   geometry and one draw call each.
+ * - Programs: one per sky layer drawn, plus the four encounter programs ProgramWarmup keeps from
+ *   start-up (the rocky and gas planet surfaces, the atmosphere and the nebula layers).
+ *
+ * So the galaxies add at most one geometry, one program and one draw call: 3, 7 and 3 in a trip
+ * with galaxies (the test default trip has two), and 2, 6 and 2 in a trip without, where the
+ * galaxy layer is hidden and never compiled.
+ */
+test('the resource budget at cruise: the distant galaxies add one geometry, one program and one draw call', async ({ page }) => {
+  const errors = collectErrors(page);
+  const budget = async (seed: number, programs: number) => {
+    await page.goto(appUrl(`encounterInterval=1e9&seed=${formatTripSeed(seed)}`));
+    await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) >= 5);
+    // The encounter programs are compiled asynchronously at start-up: wait until they all are.
+    await expect.poll(async () => (await snapshot(page)).renderer.programs, { timeout: 60_000 }).toBe(programs);
+    const s = await snapshot(page);
+    expect(s.autopilot.state).toBe('CRUISE');
+    expect(s.planets).toBe(0);
+    return { galaxies: s.galaxies.items.length, visible: s.galaxies.visible, ...s.renderer };
+  };
+  const withGalaxies = await budget(ENCOUNTER_BASE_SEED, 7);
+  // A trip without galaxies (0–3 per trip, from the trip seed).
+  let emptySeed = 1;
+  while (generateGalaxies(emptySeed).length > 0) emptySeed++;
+  const without = await budget(emptySeed, 6);
+  test.info().annotations.push({ type: 'cruise budget', description: JSON.stringify({ withGalaxies, without, emptySeed }) });
+  expect(withGalaxies).toMatchObject({ galaxies: 2, visible: true, geometries: 3, programs: 7, calls: 3, textures: 0 });
+  expect(without).toMatchObject({ galaxies: 0, visible: false, geometries: 2, programs: 6, calls: 2, textures: 0 });
   expect(errors).toEqual([]);
 });
 
