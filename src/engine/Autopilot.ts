@@ -32,7 +32,9 @@
  * never jumps, and the ship flies the planned straight line past the planet.
  *
  * Kinds (docs/PLAN.md section 6, Nebulae): each encounter is a planet or a nebula, chosen from its
- * appearance seed `hash(baseSeed, index)` (`nextEncounterKind`). Both are planned with
+ * appearance seed `hash(baseSeed, index)` (`encounterKindAt`), except that the first encounter of
+ * every trip is a planet (docs/PLAN.md section 9, Phase 2: within about 30–60 s a planet appears),
+ * whatever the base seed (the trip seed, random on each load in production). Both are planned with
  * `planEncounter` and held the same way; a nebula uses its own `D`, side offset and speed and fade
  * profile (`AutopilotParams.nebula`), and its encounter radius is its core radius (see config.ts,
  * Nebulae).
@@ -202,7 +204,10 @@ export interface AutopilotParams {
   sideOffsetFactor: number;
   /** Planet speed and fade profile; its despawn distance also ends DEPARTURE. */
   profile: Readonly<EncounterProfile>;
-  /** Base seed for encounter appearance seeds. */
+  /**
+   * Base seed for encounter appearance seeds: the trip seed. The engine draws it at random on each
+   * load (or takes it from `?seed=`); the default, ENCOUNTER_BASE_SEED, is the test default.
+   */
   baseSeed: number;
   /** Chooses the planet for an encounter seed. Called once when each planet encounter starts. */
   planetFor: (seed: number) => PlanetSpec;
@@ -347,6 +352,22 @@ export function nextEncounterKind(
 }
 
 /**
+ * The kind of encounter `index` (appearance seed `seed`): a planet for the first encounter of the
+ * trip (index 0), so a planet comes first for every base seed, and `nextEncounterKind` after that.
+ * Only a nebula share of 1 (every encounter a nebula) overrides the planet first.
+ */
+export function encounterKindAt(
+  index: number,
+  seed: number,
+  params: Pick<AutopilotParams, 'nebulaShare' | 'maxSameKindRun'>,
+  lastKind: EncounterKind | null,
+  run: number,
+): EncounterKind {
+  if (index === 0 && params.nebulaShare < 1) return 'planet';
+  return nextEncounterKind(seed, params, lastKind, run);
+}
+
+/**
  * Seconds of cruise before the encounter with appearance seed `seed`: `interval × (1 + jitter × u)`,
  * with `u` uniform in [-1, 1) from the seed, so the mean is `interval`. The jitter is clamped to
  * [0, 1], so the result is never negative.
@@ -400,7 +421,7 @@ export function encounterSchedule(params: Readonly<AutopilotParams>, count: numb
   let run = 0;
   for (let index = 0; index < count; index++) {
     const seed = hash(params.baseSeed, index);
-    const kind = nextEncounterKind(seed, params, lastKind, run);
+    const kind = encounterKindAt(index, seed, params, lastKind, run);
     run = kind === lastKind ? run + 1 : 1;
     lastKind = kind;
     out.push({ index, seed, kind, side: encounterSide(seed, params.sideElevation).side, interval: cruiseInterval(params, index) });
@@ -490,7 +511,7 @@ export function createAutopilotState(params: Readonly<AutopilotParams> = DEFAULT
  *
  * - CRUISE counts cruise time. Once it reaches the cruise's interval (`cruiseInterval` for the next
  *   index), it plans an encounter along the ship's current heading with the next index and seed, of
- *   the kind `nextEncounterKind` picks and on the side `encounterSide` picks, and moves to APPROACH.
+ *   the kind `encounterKindAt` picks and on the side `encounterSide` picks, and moves to APPROACH.
  * - A transition fires on the first step past its threshold, up to one step late. That overshoot is
  *   carried into the next CRUISE (the time past the interval, plus the time since passing the despawn
  *   distance), so transition lateness does not add up over encounters. A small O(dt) difference per
@@ -526,7 +547,7 @@ export function updateAutopilot(
     if (cruiseTime >= interval) {
       const index = encounterCount;
       const seed = hash(params.baseSeed, index);
-      const kind = nextEncounterKind(seed, params, lastKind, kindRun);
+      const kind = encounterKindAt(index, seed, params, lastKind, kindRun);
       const { side, sideAngle } = encounterSide(seed, params.sideElevation);
       if (kind === 'nebula') {
         const nebula = params.nebulaFor(seed);
