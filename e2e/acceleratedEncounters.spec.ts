@@ -4,6 +4,8 @@
  * frames, must leave the GPU resources at their baseline after every encounter.
  */
 import { expect, test, type Page } from '@playwright/test';
+import { SHIP_SPEED_LEVELS } from '../src/config';
+import { FAST_ENCOUNTERS_ARRIVAL_SPEED } from './limits';
 
 const APP_PATH = '/elsewhere/';
 
@@ -50,13 +52,16 @@ test('ten encounters, accelerated with a fake clock, leave the GPU resources at 
   const errors = collectErrors(page);
   // A fake clock, stepped by hand: each 100 ms step runs exactly one engine frame of the capped
   // dt, however long SwiftShader takes to draw it, so simulated time runs as fast as the frames
-  // can be drawn. A tiny viewport keeps those frames cheap; no pixels are checked.
+  // can be drawn. A tiny viewport keeps those frames cheap; no pixels are checked. The encounters
+  // are flown from the top speed (see FAST_ENCOUNTERS_ARRIVAL_SPEED): only their resources count.
+  expect(FAST_ENCOUNTERS_ARRIVAL_SPEED).toBeGreaterThanOrEqual(SHIP_SPEED_LEVELS[SHIP_SPEED_LEVELS.length - 1]!);
   await page.setViewportSize({ width: 96, height: 54 });
   await page.clock.install({ time: 0 });
   await page.clock.pauseAt(1000);
-  await page.goto(`${APP_PATH}?encounterInterval=1`);
+  await page.goto(`${APP_PATH}?encounterInterval=1&arrivalSpeed=${FAST_ENCOUNTERS_ARRIVAL_SPEED}`);
   await page.waitForFunction(() => window.__elsewhere !== undefined);
   await page.evaluate(() => window.__elsewhere!.setSpeed(99));
+  expect((await page.evaluate(() => window.__elsewhere!.snapshot())).autopilot.arrivalSpeed).toBe(FAST_ENCOUNTERS_ARRIVAL_SPEED);
   // A few frames, so the starfield (and the warmed-up encounter programs) are in place.
   for (let i = 0; i < 5; i++) await page.clock.fastForward(100);
 

@@ -61,6 +61,12 @@ export interface EngineOptions {
   encounterInterval?: number;
   /** Makes every encounter this kind (the seeded mix of planets and nebulae otherwise). */
   encounterKind?: EncounterKind;
+  /**
+   * Arrival speed, in units per second: encounters are flown from min(cruise speed, this). Default:
+   * ENCOUNTER_ARRIVAL_SPEED. A higher value (up to `Infinity`) flies them from a faster cruise speed
+   * instead of dropping out of warp, so tests that only need encounter cycles pass them sooner.
+   */
+  arrivalSpeed?: number;
   /** Which star layers are drawn. Default: 'both'. For tests that look at one layer alone. */
   starLayers?: StarLayers;
   /** Whether the heading drifts (the slow yaw and pitch). Default: true. Off, the heading stays at -Z. */
@@ -126,6 +132,8 @@ export class Engine {
     const autopilotParams: AutopilotParams = {
       ...DEFAULT_AUTOPILOT_PARAMS,
       interval: interval !== undefined && interval >= 0 ? interval : DEFAULT_AUTOPILOT_PARAMS.interval,
+      arrivalSpeed:
+        options.arrivalSpeed !== undefined && options.arrivalSpeed > 0 ? options.arrivalSpeed : DEFAULT_AUTOPILOT_PARAMS.arrivalSpeed,
       planetFor: planetParams,
       nebulaFor: nebulaParams,
       nebulaShare: kind === undefined ? DEFAULT_AUTOPILOT_PARAMS.nebulaShare : kind === 'nebula' ? 1 : 0,
@@ -213,7 +221,8 @@ export class Engine {
   /**
    * Sets the speed level, an index into SHIP_SPEED_LEVELS (clamped). It sets the autopilot's cruise
    * speed and scales its encounter speed profile with it (`setCruiseSpeed`) rather than overriding
-   * it; the ship eases toward the new target from the next step.
+   * it; above the arrival speed the ship drops out of warp before each encounter, so encounters keep
+   * the arrival speed's profile. The ship eases toward the new target from the next step.
    */
   setSpeed(level: number): void {
     const clamped = clampSpeedLevel(level, this.speedLevel);
@@ -284,6 +293,11 @@ export class Engine {
   /** Encounter interval in use, in seconds. */
   getEncounterInterval(): number {
     return this.travel.autopilotParams.interval;
+  }
+
+  /** Arrival speed in use, in units per second (see EngineOptions.arrivalSpeed). */
+  getArrivalSpeed(): number {
+    return this.travel.autopilotParams.arrivalSpeed;
   }
 
   /** The current encounter's planet, or `null` outside planet encounters (read-only view; do not modify). */

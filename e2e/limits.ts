@@ -20,3 +20,15 @@ export const SOAK_FRAME_TIME_SLACK_MS = 2;
  * while a shader compile or link waited on in them took 160–670 ms (see src/engine/ProgramWarmup.ts).
  */
 export const SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS = 100;
+
+/**
+ * `?arrivalSpeed=` value (an e2e-only override, see src/e2eHook.ts) for specs that only need many
+ * encounter cycles, such as the GPU-resource checks: at the top speed level it flies encounters from
+ * the top speed instead of dropping out of warp to the default level's speed first, so they pass
+ * about 2.5–3× sooner in simulated time. Measured under SwiftShader: the accelerated ten-encounter
+ * spec takes 8.4 min without it (40 s before the drop out of warp), the three-encounter spec runs out
+ * of its 9-min budget (3.9 min before), and the forced nebula spec takes 4.4 min (1.8 min). The drop
+ * out of warp itself is checked in src/engine/Autopilot.test.ts and EncounterView.test.ts, and the
+ * mid-encounter ArrowUp spec in e2e/encounter.spec.ts runs without this override.
+ */
+export const FAST_ENCOUNTERS_ARRIVAL_SPEED = 150;
