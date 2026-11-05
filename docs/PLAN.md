@@ -72,7 +72,7 @@ Travel states: `CRUISE → APPROACH → FLYBY → DEPARTURE → CRUISE`
 
 - [ ] More planet variety: ringed, icy, and so on
 - [ ] Quality presets and adaptive resolution
-- [ ] Shareable seed in the URL
+- [x] Shareable seed in the URL
 - [ ] Soundscape (muted by default)
 
 ### Out of scope for this version
@@ -122,7 +122,7 @@ Travelling forward forever makes positions grow until float32 precision on the G
 - **Plan the path first, then place the planet beside it.** When an encounter starts, put the planet at distance `D` ahead along the current heading, offset sideways by `radius × k`. The closest approach is fixed from the start, so the camera can't pass through it and no collision-avoidance logic is needed.
 - Deceleration depends on the remaining distance to the planet; the ship speeds up again after passing.
 - A planet starts as a dot far away and grows gradually, and fades out gradually as it recedes.
-- Its appearance seed is `hash(base seed, encounter index)`.
+- Its appearance seed is `hash(base seed, encounter index)`. The base seed is the trip seed: random on each load, or replayed from `?seed=<8 hex digits>`, and shown in the URL after load. The first encounter of every trip is a planet.
 
 ### Nebulae (Phase 3)
 

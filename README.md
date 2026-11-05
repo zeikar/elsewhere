@@ -17,6 +17,7 @@ Inspired by the Windows Starfield screensaver. Built with Vite, TypeScript and T
 - **Autopilot from the first frame.** Travel starts as soon as the page opens, with no interaction. The heading drifts slowly, and the ship eases between speeds.
 - **A starfield with depth.** The sky has two layers, each star an instanced quad. 4,000 far stars sit at effectively infinite distance: they turn only with the camera, never move with travel, and stay round dots, a fixed backdrop for the planets and nebulae. In front of them, 8,000 near stars and dust stream past as streaks whose length follows the speed. They wrap around the camera and fade near the edges, so none ever pops in or out. Star sizes scale with the device pixel ratio (capped at 2), so stars stay crisp on Retina screens.
 - **Planet and nebula encounters.** About every 40 s (each cruise is seeded-jittered around that), something appears in the distance as a faint dot. Before it appears, a ship faster than the default speed drops out of warp to the default speed, so every flyby looks the same from the default speed up. The ship slows as it approaches, passes alongside, and speeds back up into warp. The first planet appears within 30 to 60 s of load.
+- **A new trip on every load, and a link to share it.** Each load draws a random trip seed, which fixes every encounter's kind, look and placement. After load the URL shows it as `?seed=` followed by 8 hex digits (for example `?seed=91b3a5ba`), so copying the URL replays the same trip. A missing or malformed seed starts a new random trip. Every trip starts with a planet.
   - Seeded rocky and gas planets, drawn from palette families such as terran, desert, volcanic, jovian and neptunian, with procedural surfaces, lighting and atmospheric glow.
   - Seeded nebulae made of layered, soft-blended planes, in palette families such as emission, reflection, oxygen and planetary.
   - About a third of encounters are nebulae, and never more than three of the same kind come in a row. The path is planned beside each object, so it never passes through a planet or a nebula's bright core. The ship may drift through a nebula's faint outer wisps, and each layer fades out as the camera nears it.
@@ -59,7 +60,7 @@ npm run test:e2e    # end-to-end tests (Playwright, Chromium)
 npm run typecheck   # type check the app and the e2e suite
 ```
 
-Before the first e2e run, install the browser with `npx playwright install chromium`. The e2e suite builds the site in e2e mode into `dist-e2e/` and runs against `vite preview`. In that build only, `?encounterInterval=<seconds>` overrides the mean encounter interval (each cruise is still seeded-jittered around it) so encounters come quickly, and `?encounterKind=planet` or `?encounterKind=nebula` makes every encounter that kind.
+Before the first e2e run, install the browser with `npx playwright install chromium`. The e2e suite builds the site in e2e mode into `dist-e2e/` and runs against `vite preview`. In that build only, `?encounterInterval=<seconds>` overrides the mean encounter interval (each cruise is still seeded-jittered around it) so encounters come quickly, and `?encounterKind=planet` or `?encounterKind=nebula` makes every encounter that kind. The specs load the app through `appUrl` (e2e/app.ts), which pins the test default trip seed `?seed=91b3a5ba` (`ENCOUNTER_BASE_SEED`), so the suite stays deterministic. The unit tests default to the same seed.
 
 A long-run soak travels through many planet and nebula encounters at a short interval and fails if the JS heap (after a forced GC) grows, if the frame time late in the run is worse than early on, or if the renderer's resource counts drift:
 
@@ -86,7 +87,7 @@ npm run check:hook   # the e2e test hook is not in the production build
 - **Nebulae are the main GPU cost:** During a nebula encounter, large soft-blended layers cover much of the screen, so a weak GPU may drop frames there. Quality presets and adaptive resolution are an Optional item in PLAN.md section 5, and are not built.
 - **Screen Wake Lock:** Where the browser doesn't support it, the screen follows the device's own sleep settings. A failed request is logged to the console.
 - **Soak length:** CI runs the soak for 3 minutes, under SwiftShader (software rendering), so its frame times say nothing absolute about real hardware. The 30-minute run is started by hand from the Soak workflow ([.github/workflows/soak.yml](.github/workflows/soak.yml)).
-- **Not built yet:** Everything listed as Optional in PLAN.md section 5: ringed and icy planets, quality presets, a shareable seed in the URL, and sound. Ideas that came up while building it are in [IDEAS.md](IDEAS.md).
+- **Not built yet:** The rest of the Optional list in PLAN.md section 5: ringed and icy planets, quality presets, and sound. Ideas that came up while building it are in [IDEAS.md](IDEAS.md).
 
 ## Deployment
 
