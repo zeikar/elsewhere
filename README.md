@@ -13,7 +13,7 @@ Inspired by the Windows Starfield screensaver. Built with Vite, TypeScript and T
 ## Features
 
 - **Autopilot from the first frame.** Travel starts as soon as the page opens, with no interaction. The heading drifts slowly, and the ship eases between speeds.
-- **A starfield with depth.** 12,000 stars, each an instanced quad, stream past as streaks whose length follows the speed. Star sizes scale with the device pixel ratio (capped at 2), so stars stay crisp on Retina screens. They wrap around the camera and fade near the edges, so none ever pops in or out.
+- **A starfield with depth.** The sky has two layers, each star an instanced quad. 6,000 far stars sit at effectively infinite distance: they turn only with the camera, never move with travel, and stay round dots, a fixed backdrop for the planets and nebulae. In front of them, 6,000 fainter near stars and dust stream past as streaks whose length follows the speed. They wrap around the camera and fade near the edges, so none ever pops in or out. Star sizes scale with the device pixel ratio (capped at 2), so stars stay crisp on Retina screens.
 - **Planet and nebula encounters.** About every 40 s (each cruise is seeded-jittered around that), something appears in the distance as a faint dot. The ship slows as it approaches, passes alongside, and speeds back up into deep space. The first planet appears within 30 to 60 s of load.
   - Seeded rocky and gas planets, drawn from palette families such as terran, desert, volcanic, jovian and neptunian, with procedural surfaces, lighting and atmospheric glow.
   - Seeded nebulae made of layered, soft-blended planes, in palette families such as emission, reflection, oxygen and planetary.

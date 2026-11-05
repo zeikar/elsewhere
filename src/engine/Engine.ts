@@ -10,7 +10,9 @@
  * object, a planet or a nebula (compiling its shaders with `renderer.compileAsync` before it is first
  * drawn), and the render places it relative to the ship. The encounter shader programs themselves
  * are compiled once at construction and kept for the whole run (`ProgramWarmup`), so encounters
- * reuse them instead of compiling their own. The starfield keeps running underneath.
+ * reuse them instead of compiling their own. The two star layers keep running underneath: the far
+ * stars (FarStarfield), which turn with the camera only, and the near starfield (Starfield), which
+ * streams past with the ship's travel.
  * Pausing stops the simulation, so the encounter freezes with it.
  *
  * Instrumentation (docs/PLAN.md section 6, Performance): every frame records its interval since the
@@ -40,6 +42,7 @@ import {
   type Travel,
 } from './Autopilot';
 import { EncounterView } from './EncounterView';
+import { FarStarfield } from './FarStarfield';
 import { FrameClock } from './FrameClock';
 import { FrameStats } from './FrameStats';
 import { nebulaParams, nebulaProgramMaterials, type Nebula } from './Nebula';
@@ -58,7 +61,14 @@ export interface EngineOptions {
   encounterInterval?: number;
   /** Makes every encounter this kind (the seeded mix of planets and nebulae otherwise). */
   encounterKind?: EncounterKind;
+  /** Which star layers are drawn. Default: 'both'. For tests that look at one layer alone. */
+  starLayers?: StarLayers;
+  /** Whether the heading drifts (the slow yaw and pitch). Default: true. Off, the heading stays at -Z. */
+  headingDrift?: boolean;
 }
+
+/** Star layers to draw: the far stars, the near starfield, or both. */
+export type StarLayers = 'both' | 'far' | 'near';
 
 /** Called with the new paused state whenever pause() or resume() changes it. */
 export type PausedChangeListener = (paused: boolean) => void;
@@ -76,6 +86,7 @@ export class Engine {
   /** Ship, autopilot and their params, advanced by `stepTravel`. */
   private readonly travel: Travel;
   private readonly starfield: Starfield;
+  private readonly farStarfield: FarStarfield;
   private readonly encounterView: EncounterView;
   /** Keeps every encounter shader program compiled for the whole run (see ProgramWarmup.ts). */
   private readonly programWarmup: ProgramWarmup;
@@ -100,6 +111,10 @@ export class Engine {
       ...DEFAULT_STARFIELD_OPTIONS,
       streakTime: options.streakTime ?? DEFAULT_STARFIELD_OPTIONS.streakTime,
     });
+    this.farStarfield = new FarStarfield();
+    const layers = options.starLayers ?? 'both';
+    this.starfield.mesh.visible = layers !== 'far';
+    this.farStarfield.mesh.visible = layers !== 'near';
     this.renderer = new WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
     this.renderer.outputColorSpace = SRGBColorSpace;
     this.renderer.setClearColor(CLEAR_COLOR, 1);
@@ -116,8 +131,10 @@ export class Engine {
       nebulaShare: kind === undefined ? DEFAULT_AUTOPILOT_PARAMS.nebulaShare : kind === 'nebula' ? 1 : 0,
     };
     setCruiseSpeed(autopilotParams, SHIP_SPEED_LEVELS[this.speedLevel] ?? 0);
-    this.travel = createTravel(autopilotParams, DEFAULT_SHIP_PARAMS);
-    this.scene.add(this.starfield.mesh);
+    const shipParams =
+      options.headingDrift === false ? { ...DEFAULT_SHIP_PARAMS, yawAmplitude: 0, pitchAmplitude: 0 } : DEFAULT_SHIP_PARAMS;
+    this.travel = createTravel(autopilotParams, shipParams);
+    this.scene.add(this.farStarfield.mesh, this.starfield.mesh);
     // Each new encounter object's shaders compile (in parallel where supported) before it is first drawn.
     this.encounterView = new EncounterView(this.scene, (object) =>
       this.renderer.compileAsync(object, this.camera, this.scene),
@@ -159,8 +176,9 @@ export class Engine {
     this.pausedListeners.clear();
     this.encounterView.dispose();
     this.programWarmup.dispose();
-    this.scene.remove(this.starfield.mesh);
+    this.scene.remove(this.starfield.mesh, this.farStarfield.mesh);
     this.starfield.dispose();
+    this.farStarfield.dispose();
     this.renderer.dispose();
   }
 
@@ -278,10 +296,12 @@ export class Engine {
     return this.encounterView.getNebula();
   }
 
-  /** Number of objects in the scene besides the starfield: the encounter objects (planets or nebulae). */
+  /** Number of objects in the scene besides the two star layers: the encounter objects (planets or nebulae). */
   getPlanetCount(): number {
     let count = 0;
-    for (const child of this.scene.children) if (child !== this.starfield.mesh) count++;
+    for (const child of this.scene.children) {
+      if (child !== this.starfield.mesh && child !== this.farStarfield.mesh) count++;
+    }
     return count;
   }
 
@@ -309,6 +329,22 @@ export class Engine {
     return { dpr: u.uDpr.value, pixelSize: u.uPixelSize.value };
   }
 
+  /** Whether the near starfield is drawn. */
+  isStarfieldVisible(): boolean {
+    return this.starfield.mesh.visible;
+  }
+
+  /** Far-star layer: star count, whether it is drawn, and its DPR and base pixel-size uniforms (device pixels). */
+  getFarStarfieldInfo(): { count: number; visible: boolean; dpr: number; pixelSize: number } {
+    const u = this.farStarfield.uniforms;
+    return {
+      count: this.farStarfield.mesh.geometry.instanceCount,
+      visible: this.farStarfield.mesh.visible,
+      dpr: u.uDpr.value,
+      pixelSize: u.uPixelSize.value,
+    };
+  }
+
   private readonly frame = (now: number): void => {
     this.rafId = 0;
     if (this.paused || !this.running) return;
@@ -334,6 +370,7 @@ export class Engine {
     this.camera.aspect = size.cssWidth / size.cssHeight;
     this.camera.updateProjectionMatrix();
     this.starfield.setRenderSize(size);
+    this.farStarfield.setRenderSize(size);
     // Setting the canvas size clears it; redraw now so a paused view stays correct.
     this.render();
   };

@@ -18,13 +18,16 @@
  *   at the shell's edge, and it is brighter on the day side.
  * - `setFade(opacity)` drives one opacity uniform shared by the surface and the atmosphere (the
  *   Autopilot's fade); at 0 the planet is hidden.
- * - Draw order and depth, relative to the starfield (contract for whoever adds planets to the scene):
- *   the surface writes depth and draws before the starfield (renderOrder below
- *   STARFIELD_RENDER_ORDER), and the starfield depth-tests without writing, so only the stars behind
- *   the planet are hidden and stars nearer than the planet still show in front of its disc. The
- *   atmosphere draws after the starfield, additively, depth-tested and without depth writes. The
- *   surface writes depth while it fades too, so stars behind a partly faded planet are hidden; fades
- *   happen while the planet is far beyond most of the star cube, so few stars are affected.
+ * - Draw order and depth, relative to the two star layers (the full render order is in
+ *   Starfield.ts; contract for whoever adds planets to the scene): the far stars draw first of all
+ *   (FAR_STARFIELD_RENDER_ORDER), so the surface paints over the far stars behind its disc. The
+ *   surface writes depth and draws before the near starfield (renderOrder below
+ *   STARFIELD_RENDER_ORDER), and the near starfield depth-tests without writing, so only the near
+ *   stars behind the planet are hidden and those nearer than the planet still show in front of its
+ *   disc. The atmosphere draws after the near starfield, additively, depth-tested and without depth
+ *   writes. The surface writes depth while it fades too, so near stars behind a partly faded planet
+ *   are hidden; fades happen while the planet is far beyond most of the star cube, so few stars are
+ *   affected. A partly faded surface blends over the far stars, so they show through it as it fades.
  *
  * Positions are relative to the ship (floating origin): the caller sets `object.position` to
  * `planet centre - ship position`, computed in float64 on the CPU.
@@ -866,8 +869,9 @@ export interface PlanetUniforms {
 }
 
 /**
- * Render order. The surface draws before the starfield and writes depth, so the depth-tested stars
- * are hidden only where they are behind it. The additive atmosphere draws after the starfield.
+ * Render order. The surface draws after the far stars (painting over those behind it) and before the
+ * near starfield, and writes depth, so the depth-tested near stars are hidden only where they are
+ * behind it. The additive atmosphere draws after the near starfield.
  */
 export const SURFACE_RENDER_ORDER = STARFIELD_RENDER_ORDER - 1;
 export const ATMOSPHERE_RENDER_ORDER = STARFIELD_RENDER_ORDER + 1;
