@@ -165,6 +165,14 @@ async function speedViews(page: Page, query: string): Promise<SpeedViews> {
  * view at rest with the controls still on screen (they hide after UI_HIDE_DELAY_MS), which added
  * about 1,600 lit pixels to S and so understated the ratio: with the controls hidden (canvasShot
  * now hides them), main measures 4.06. It never looked at the default level either.
+ *
+ * What this guard accepts on purpose: #46 asks for dust dimmer than PR #40's first attempt (near
+ * brightness 0.3–0.8), the one that was reverted because the speed cue felt weak. That attempt
+ * scores k 2.66, e 0.72 and top/default 1.70 here, better than this design on every number, so this
+ * guard cannot reject that level of dimming. The cue at the default level is now about half of
+ * main's (e 1.25 → 0.66, top/default 1.80 → 1.54), a trade-off the owner asked for. The guard still
+ * catches dimming beyond this design: it passes at 0.7× the current dust brightness and fails at
+ * 0.5× (e 0.23), so it trips at roughly 0.7×.
  */
 const SPEED_CUE = { kMin: 1.75, eMin: 0.4 } as const;
 

@@ -99,7 +99,8 @@ export interface FarStarTint {
 /**
  * The far stars' colour temperatures, coolest first, with their shares (the weights sum to 1).
  * Subtle, but stronger than the near dust's: every tint keeps its brightest channel at 1, so it
- * changes the hue and not the brightness.
+ * changes the hue and not the peak channel (the lit-pixel brightness). Luminance does drop a little:
+ * blue-white is about 0.79 of white, yellow 0.88 and orange 0.78 (Rec. 709).
  */
 export const FAR_STAR_TINTS: readonly FarStarTint[] = [
   { rgb: [0.7, 0.8, 1.0], weight: 0.2 }, // blue-white
