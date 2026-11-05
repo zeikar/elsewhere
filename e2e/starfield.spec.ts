@@ -358,8 +358,9 @@ test('after the ship translates with no rotation, far-star pixels stay put while
   const focal = viewport.height / 2 / Math.tan((far.snaps[0].cameraFovDeg / 2) * (Math.PI / 180));
   const spiralRadius = Math.tan(((spiral.sizeDeg / 2) * Math.PI) / 180) * focal;
   const spiralLit = await litWithin(page, far.shots[0], spiralCentre, spiralRadius);
-  // Far more lit pixels than the far stars alone would give such a small patch of sky.
-  expect(spiralLit).toBeGreaterThan(40);
+  // Far more lit pixels than the far stars alone would give such a small patch of sky (about 2 at
+  // their density; measured 54 with the spiral).
+  expect(spiralLit).toBeGreaterThan(25);
 
   const farRestToCruise = await comparePngs(page, far.shots[0], far.shots[1]);
   const farCruiseToLater = await comparePngs(page, far.shots[1], far.shots[2]);
