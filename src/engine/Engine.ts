@@ -12,7 +12,8 @@
  * are compiled once at construction and kept for the whole run (`ProgramWarmup`), so encounters
  * reuse them instead of compiling their own. The two star layers keep running underneath: the far
  * stars (FarStarfield), which turn with the camera only, and the near starfield (Starfield), which
- * streams past with the ship's travel.
+ * streams past with the ship's travel. The trip's distant galaxies (Galaxies, from the trip seed)
+ * belong to the far layer and turn with the camera only, like the far stars.
  * Pausing stops the simulation, so the encounter freezes with it.
  *
  * Instrumentation (docs/PLAN.md section 6, Performance): every frame records its interval since the
@@ -47,6 +48,7 @@ import { EncounterView } from './EncounterView';
 import { FarStarfield } from './FarStarfield';
 import { FrameClock } from './FrameClock';
 import { FrameStats } from './FrameStats';
+import { Galaxies, generateGalaxies, type Galaxy } from './Galaxies';
 import { nebulaParams, nebulaProgramMaterials, type Nebula } from './Nebula';
 import { cameraFovDeg, computeRenderSize } from './renderSize';
 import { planetParams, planetProgramMaterials, type Planet } from './Planet';
@@ -75,7 +77,7 @@ export interface EngineOptions {
    * instead of dropping out of warp, so tests that only need encounter cycles pass them sooner.
    */
   arrivalSpeed?: number;
-  /** Which star layers are drawn. Default: 'both'. For tests that look at one layer alone. */
+  /** Which star layers are drawn (the distant galaxies belong to the far layer). Default: 'both'. For tests that look at one layer alone. */
   starLayers?: StarLayers;
   /** Whether the heading drifts (the slow yaw and pitch). Default: true. Off, the heading stays at -Z. */
   headingDrift?: boolean;
@@ -101,6 +103,8 @@ export class Engine {
   private readonly travel: Travel;
   private readonly starfield: Starfield;
   private readonly farStarfield: FarStarfield;
+  /** The trip's distant galaxies, on the far layer. */
+  private readonly galaxies: Galaxies;
   private readonly encounterView: EncounterView;
   /** Keeps every encounter shader program compiled for the whole run (see ProgramWarmup.ts). */
   private readonly programWarmup: ProgramWarmup;
@@ -129,6 +133,10 @@ export class Engine {
     const layers = options.starLayers ?? 'both';
     this.starfield.mesh.visible = layers !== 'far';
     this.farStarfield.mesh.visible = layers !== 'near';
+    const tripSeed = options.tripSeed === undefined ? ENCOUNTER_BASE_SEED : options.tripSeed >>> 0;
+    this.galaxies = new Galaxies(generateGalaxies(tripSeed));
+    // Hidden with no galaxy in the trip, or without the far layer.
+    if (layers === 'near') this.galaxies.mesh.visible = false;
     this.renderer = new WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
     this.renderer.outputColorSpace = SRGBColorSpace;
     this.renderer.setClearColor(CLEAR_COLOR, 1);
@@ -139,7 +147,7 @@ export class Engine {
     const kind = options.encounterKind;
     const autopilotParams: AutopilotParams = {
       ...DEFAULT_AUTOPILOT_PARAMS,
-      baseSeed: options.tripSeed === undefined ? ENCOUNTER_BASE_SEED : options.tripSeed >>> 0,
+      baseSeed: tripSeed,
       interval: interval !== undefined && interval >= 0 ? interval : DEFAULT_AUTOPILOT_PARAMS.interval,
       arrivalSpeed:
         options.arrivalSpeed !== undefined && options.arrivalSpeed > 0 ? options.arrivalSpeed : DEFAULT_AUTOPILOT_PARAMS.arrivalSpeed,
@@ -151,7 +159,7 @@ export class Engine {
     const shipParams =
       options.headingDrift === false ? { ...DEFAULT_SHIP_PARAMS, yawAmplitude: 0, pitchAmplitude: 0 } : DEFAULT_SHIP_PARAMS;
     this.travel = createTravel(autopilotParams, shipParams);
-    this.scene.add(this.farStarfield.mesh, this.starfield.mesh);
+    this.scene.add(this.farStarfield.mesh, this.galaxies.mesh, this.starfield.mesh);
     // Each new encounter object's shaders compile (in parallel where supported) before it is first drawn.
     this.encounterView = new EncounterView(this.scene, (object) =>
       this.renderer.compileAsync(object, this.camera, this.scene),
@@ -193,9 +201,10 @@ export class Engine {
     this.pausedListeners.clear();
     this.encounterView.dispose();
     this.programWarmup.dispose();
-    this.scene.remove(this.starfield.mesh, this.farStarfield.mesh);
+    this.scene.remove(this.starfield.mesh, this.farStarfield.mesh, this.galaxies.mesh);
     this.starfield.dispose();
     this.farStarfield.dispose();
+    this.galaxies.dispose();
     this.renderer.dispose();
   }
 
@@ -324,11 +333,11 @@ export class Engine {
     return this.encounterView.getNebula();
   }
 
-  /** Number of objects in the scene besides the two star layers: the encounter objects (planets or nebulae). */
+  /** Number of objects in the scene besides the star layers and galaxies: the encounter objects (planets or nebulae). */
   getPlanetCount(): number {
     let count = 0;
     for (const child of this.scene.children) {
-      if (child !== this.starfield.mesh && child !== this.farStarfield.mesh) count++;
+      if (child !== this.starfield.mesh && child !== this.farStarfield.mesh && child !== this.galaxies.mesh) count++;
     }
     return count;
   }
@@ -376,6 +385,11 @@ export class Engine {
       dpr: u.uDpr.value,
       pixelSize: u.uPixelSize.value,
     };
+  }
+
+  /** The trip's distant galaxies (read-only view; do not modify) and whether they are drawn. */
+  getGalaxyInfo(): { galaxies: readonly Galaxy[]; visible: boolean } {
+    return { galaxies: this.galaxies.galaxies, visible: this.galaxies.mesh.visible };
   }
 
   private readonly frame = (now: number): void => {

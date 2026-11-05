@@ -266,6 +266,33 @@ function comparePngs(page: Page, a: Buffer, b: Buffer): Promise<{ litA: number; 
   );
 }
 
+/**
+ * Lit pixels within `radius` CSS pixels of `centre` (CSS pixels from the canvas's top-left corner)
+ * in a canvas screenshot, decoded in the page.
+ */
+function litWithin(page: Page, png: Buffer, centre: { x: number; y: number }, radius: number): Promise<number> {
+  return page.evaluate(
+    async ({ b64, centre, radius, threshold }) => {
+      const bitmap = await createImageBitmap(await (await fetch(`data:image/png;base64,${b64}`)).blob());
+      const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+      const ctx = canvas.getContext('2d')!;
+      ctx.drawImage(bitmap, 0, 0);
+      const data = ctx.getImageData(0, 0, bitmap.width, bitmap.height).data;
+      const scale = bitmap.width / window.innerWidth;
+      let lit = 0;
+      for (let y = 0; y < bitmap.height; y++) {
+        for (let x = 0; x < bitmap.width; x++) {
+          if (Math.hypot((x + 0.5) / scale - centre.x, (y + 0.5) / scale - centre.y) > radius) continue;
+          const i = (y * bitmap.width + x) * 4;
+          if (Math.max(data[i]!, data[i + 1]!, data[i + 2]!) > threshold) lit++;
+        }
+      }
+      return lit;
+    },
+    { b64: png.toString('base64'), centre, radius, threshold: LIT_THRESHOLD },
+  );
+}
+
 interface TranslationViews {
   /** Canvas screenshots at rest, after 8 s at the top speed, and 1 s later. */
   shots: [Buffer, Buffer, Buffer];
@@ -316,6 +343,24 @@ test('after the ship translates with no rotation, far-star pixels stay put while
     for (const s of views.snaps) expect(s.ship.heading, layer).toEqual({ x: 0, y: 0, z: -1 });
   }
   expect(far.snaps[0].farStars.count).toBe(FAR_STAR_COUNT);
+  // The test default trip's galaxies belong to the far layer, and its spiral is in this view, so the
+  // pixel comparisons below cover a galaxy too (distant galaxies, docs/PLAN.md section 9, Phase 4).
+  expect(far.snaps[0].galaxies.visible).toBe(true);
+  expect(near.snaps[0].galaxies.visible).toBe(false);
+  const spiral = far.snaps[0].galaxies.items[0]!;
+  expect(spiral.type).toBe('spiral');
+  expect(spiral.ndc.z).toBeLessThan(1);
+  expect(Math.abs(spiral.ndc.x)).toBeLessThan(0.9);
+  expect(Math.abs(spiral.ndc.y)).toBeLessThan(0.9);
+  const viewport = page.viewportSize()!;
+  const spiralCentre = { x: ((spiral.ndc.x + 1) / 2) * viewport.width, y: ((1 - spiral.ndc.y) / 2) * viewport.height };
+  // Its quad's half-height (vertical field of view in the camera's projection, as the engine applies it).
+  const focal = viewport.height / 2 / Math.tan((far.snaps[0].cameraFov / 2) * (Math.PI / 180));
+  const spiralRadius = Math.tan(((spiral.sizeDeg / 2) * Math.PI) / 180) * focal;
+  const spiralLit = await litWithin(page, far.shots[0], spiralCentre, spiralRadius);
+  // Far more lit pixels than the far stars alone would give such a small patch of sky (about 2 at
+  // their density; measured 54 with the spiral).
+  expect(spiralLit).toBeGreaterThan(25);
 
   const farRestToCruise = await comparePngs(page, far.shots[0], far.shots[1]);
   const farCruiseToLater = await comparePngs(page, far.shots[1], far.shots[2]);
@@ -323,12 +368,12 @@ test('after the ship translates with no rotation, far-star pixels stay put while
   const nearCruiseToLater = await comparePngs(page, near.shots[1], near.shots[2]);
   test.info().annotations.push({
     type: 'translation views',
-    description: JSON.stringify({ farRestToCruise, farCruiseToLater, nearRestToCruise, nearCruiseToLater }),
+    description: JSON.stringify({ farRestToCruise, farCruiseToLater, nearRestToCruise, nearCruiseToLater, spiralLit, spiralRadius }),
   });
   // Both layers draw plenty of stars.
   expect(farRestToCruise.litA).toBeGreaterThan(200);
   expect(nearRestToCruise.litA).toBeGreaterThan(200);
-  // The far stars are at infinity: not one pixel changes, at rest or at the top speed.
+  // The far stars and the galaxy are at infinity: not one pixel changes, at rest or at the top speed.
   expect(farRestToCruise.differing).toBe(0);
   expect(farCruiseToLater.differing).toBe(0);
   // The near stars streak with speed, and move between two views at the same speed.

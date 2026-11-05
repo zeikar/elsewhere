@@ -194,3 +194,66 @@ test('a planet hides the far stars behind its disc, and they show all around it'
   await page.evaluate(() => window.__elsewhere!.hidePlanet());
   expect(errors).toEqual([]);
 });
+
+test('a planet hides a distant galaxy behind its disc, and one beside it shows', async ({ page }) => {
+  const errors = collectErrors(page);
+  await page.goto(appUrl());
+  await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 0);
+  await page.evaluate(() => window.__elsewhere!.pause());
+
+  // The same planet, framed the same, drawn without and then with the galaxy layer: the test
+  // default trip's first galaxy straight behind the disc's centre and beside the disc.
+  const plainInfo = await page.evaluate(() => window.__elsewhere!.showPlanet('rocky'));
+  expect(plainInfo.galaxies).toBeNull();
+  const plain = await page.locator('#planet-preview').screenshot({ style: CANVAS_ONLY });
+  const info = await page.evaluate(() => window.__elsewhere!.showPlanet('rocky', 0, { galaxies: true }));
+  const withGalaxies = await page.locator('#planet-preview').screenshot({ style: CANVAS_ONLY });
+  await test.info().attach('planet with galaxies', { body: withGalaxies, contentType: 'image/png' });
+  expect(info.galaxies).not.toBeNull();
+  const galaxies = info.galaxies!;
+  const galaxyRadius = galaxies.radius;
+  // Small against the disc, so the copy behind it is wholly hidden, and its centre on the disc's.
+  expect(galaxyRadius).toBeLessThan(0.3 * info.disc.radius);
+  expect(Math.hypot(galaxies.behind.x - info.disc.x, galaxies.behind.y - info.disc.y)).toBeLessThan(1);
+
+  const diff = await page.evaluate(
+    async ({ a, b, disc, beside, galaxyRadius }) => {
+      const decode = async (b64: string) => {
+        const bitmap = await createImageBitmap(await (await fetch(`data:image/png;base64,${b64}`)).blob());
+        const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+        const ctx = canvas.getContext('2d')!;
+        ctx.drawImage(bitmap, 0, 0);
+        return { data: ctx.getImageData(0, 0, bitmap.width, bitmap.height).data, width: bitmap.width, height: bitmap.height };
+      };
+      const [pa, pb] = await Promise.all([decode(a), decode(b)]);
+      const scale = pa.width / window.innerWidth;
+      let inside = 0;
+      let besideDiffering = 0;
+      let elsewhere = 0;
+      for (let y = 0; y < pa.height; y++) {
+        for (let x = 0; x < pa.width; x++) {
+          const cx = (x + 0.5) / scale;
+          const cy = (y + 0.5) / scale;
+          const i = (y * pa.width + x) * 4;
+          const differs = pa.data[i] !== pb.data[i] || pa.data[i + 1] !== pb.data[i + 1] || pa.data[i + 2] !== pb.data[i + 2];
+          if (!differs) continue;
+          if (Math.hypot(cx - disc.x, cy - disc.y) < 0.8 * disc.radius) inside++;
+          // Off-centre, perspective stretches the quad a little: allow 25% and a pixel of margin.
+          else if (Math.hypot(cx - beside.x, cy - beside.y) <= 1.25 * galaxyRadius + 1) besideDiffering++;
+          else elsewhere++;
+        }
+      }
+      return { inside, beside: besideDiffering, elsewhere, sameSize: pa.width === pb.width && pa.height === pb.height };
+    },
+    { a: plain.toString('base64'), b: withGalaxies.toString('base64'), disc: info.disc, beside: galaxies.beside, galaxyRadius },
+  );
+  test.info().annotations.push({ type: 'galaxy occlusion', description: JSON.stringify({ ...diff, galaxyRadius, disc: info.disc }) });
+  expect(diff.sameSize).toBe(true);
+  // Not one galaxy pixel shows through the planet...
+  expect(diff.inside).toBe(0);
+  // ...while the copy beside the disc is drawn, and nothing else changes.
+  expect(diff.beside).toBeGreaterThan(100);
+  expect(diff.elsewhere).toBe(0);
+  await page.evaluate(() => window.__elsewhere!.hidePlanet());
+  expect(errors).toEqual([]);
+});

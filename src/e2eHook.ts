@@ -27,6 +27,7 @@ import { Vector3 } from 'three';
 import type { Engine, EngineOptions } from './engine/Engine';
 import type { FrameStats } from './engine/FrameStats';
 import type { EncounterKind, EncounterSide, TravelState } from './engine/Autopilot';
+import type { GalaxyType } from './engine/Galaxies';
 import { nebulaLayerPlaneDistance } from './engine/Nebula';
 import type { PlanetType } from './engine/Planet';
 import {
@@ -133,6 +134,21 @@ export interface E2EHookSnapshot {
     /** Base star width uniform, in device pixels. */
     pixelSize: number;
   };
+  /** The trip's distant galaxies, on the far layer (generated from the trip seed). */
+  galaxies: {
+    /** Whether the galaxy layer is drawn (false with no galaxy in the trip, or without the far layer). */
+    visible: boolean;
+    items: {
+      type: GalaxyType;
+      /** Unit direction of its centre. */
+      direction: { x: number; y: number; z: number };
+      /** Angular diameter along the major axis, in degrees. */
+      sizeDeg: number;
+      axisRatio: number;
+      /** Its centre in normalised device coordinates for the current camera (z < 1 and |x|, |y| < 1 on screen). */
+      ndc: { x: number; y: number; z: number };
+    }[];
+  };
   autopilot: {
     state: TravelState;
     /** Index of the encounter in progress, or `null` in CRUISE. */
@@ -156,7 +172,7 @@ export interface E2EHookSnapshot {
     /** Side of the path the encounter object sits on, or `null` in CRUISE. */
     side: EncounterSide | null;
   };
-  /** Objects in the scene besides the two star layers (the encounter planet or nebula). */
+  /** Objects in the scene besides the two star layers and the galaxies (the encounter planet or nebula). */
   planets: number;
   /** The encounter planet as last placed for rendering, or `null`. */
   planet: {
@@ -215,7 +231,8 @@ export interface E2EHook {
   /**
    * Draws the `nth` (default 0) encounter planet of `type` at a fixed position in front of the camera
    * on an overlay canvas (`#planet-preview`), replacing any planet already shown. With
-   * `{ farStars: true }` the far-star layer is drawn behind it, as in the engine.
+   * `{ farStars: true }` the far-star layer is drawn behind it, as in the engine, and with
+   * `{ galaxies: true }` a galaxy straight behind the disc and one beside it.
    */
   showPlanet(type: PlanetType, nth?: number, options?: PlanetPreviewOptions): PlanetPreviewInfo;
   /**
@@ -344,6 +361,21 @@ export function installE2EHook(engine: Engine): void {
           })),
         };
       }
+      const galaxyInfo = engine.getGalaxyInfo();
+      const galaxies: E2EHookSnapshot['galaxies'] = {
+        visible: galaxyInfo.visible,
+        items: galaxyInfo.galaxies.map((g) => {
+          // A direction at infinity: project a point far along it, rotation only (camera at the origin).
+          ndc.set(g.direction.x, g.direction.y, g.direction.z).project(engine.getCamera());
+          return {
+            type: g.type,
+            direction: { ...g.direction },
+            sizeDeg: (g.size * 180) / Math.PI,
+            axisRatio: g.axisRatio,
+            ndc: { x: ndc.x, y: ndc.y, z: ndc.z },
+          };
+        }),
+      };
       return {
         tripSeed: engine.getTripSeed(),
         speed: engine.getSpeed(),
@@ -374,6 +406,7 @@ export function installE2EHook(engine: Engine): void {
         },
         starfield: { ...engine.getStarfieldSizing(), streakTime: engine.getStreakTime(), visible: engine.isStarfieldVisible() },
         farStars: engine.getFarStarfieldInfo(),
+        galaxies,
         autopilot: {
           state: autopilot.state,
           encounterIndex: autopilot.encounter?.index ?? null,
