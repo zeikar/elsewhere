@@ -227,11 +227,11 @@ export const GALAXY_PLACEMENT_SCREEN_SHARE = 0.8;
 /**
  * Smallest angle, in degrees, between the screen centre (the fixed heading, -Z) and the edge of any
  * galaxy. Asteroids and comets first appear within about 1.2° of the centre, and planets within 4°
- * (about 0.6% further, the largest passed far off, up to about 4.7°), and each lingers there through
+ * (about 0.5% further, the largest passed far off, up to about 4.7°), and each lingers there through
  * the far stretch. So no asteroid or comet fades in on top of a galaxy, but a rare large planet can
- * fade in at a galaxy's edge (measured over 10,000 seeds per kind; Galaxies.test.ts). A galaxy's
- * size is drawn after its direction, so the check takes the largest (GALAXY_SIZE_MAX_DEG): a centre
- * within GALAXY_SIZE_MAX_DEG / 2 + this of -Z is drawn again.
+ * fade in at a galaxy's edge (measured over 10,000 planet, 4,000 asteroid and 1,000 comet seeds;
+ * Galaxies.test.ts). A galaxy's size is drawn after its direction, so the check takes the largest
+ * (GALAXY_SIZE_MAX_DEG): a centre within GALAXY_SIZE_MAX_DEG / 2 + this of -Z is drawn again.
  */
 export const GALAXY_CENTRE_CLEARANCE_DEG = 4.5;
 

@@ -257,11 +257,11 @@ describe('galaxy generation', () => {
       expect(widest, kind).toBeLessThan(1.25 * DEG);
       expect(widest, kind).toBeLessThan(clearance);
     }
-    // Planets: within 4° but for about 0.6%, the largest passed far off, which reach about 4.7°. The
+    // Planets: within 4° but for about 0.5%, the largest passed far off, which reach about 4.7°. The
     // clearance covers the centre of all but a few of them (measured: 9,996 of these 10,000).
     const planets = spawnBearings('planet', 10_000);
     const covered = planets.filter((b) => b < clearance).length / planets.length;
-    expect(covered).toBeGreaterThanOrEqual(0.99);
+    expect(covered).toBeGreaterThanOrEqual(0.999);
     expect(planets.filter((b) => b > 4 * DEG).length / planets.length).toBeLessThan(0.01);
     expect(Math.max(...planets)).toBeGreaterThan(4 * DEG);
     expect(Math.max(...planets)).toBeLessThan(4.75 * DEG);
