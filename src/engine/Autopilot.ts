@@ -52,6 +52,11 @@
  * mean is the configured interval), no more than `maxSameKindRun` encounters of one kind come in a
  * row (`nextEncounterKind`), and the object sits to the left or right of the path at a seeded
  * elevation (`encounterSide`). `encounterSchedule` lists what the autopilot will meet.
+ *
+ * Planet variety (docs/PLAN.md section 9, Phase 4): each planet may bring its own pass factor `k`
+ * and an extent (a ring's outer radius; `PlanetSpec`). The plan uses `planetPassFactor`, which keeps
+ * the path clear of the extent, and the out-of-view test uses a sphere that holds it
+ * (`planetViewRadiusFactor`), so a ring is never crossed and leaves the view with its planet.
  */
 import {
   CAMERA_FOV_DEG,

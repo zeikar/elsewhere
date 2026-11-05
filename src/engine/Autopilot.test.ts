@@ -934,6 +934,26 @@ describe('autopilot simulation', () => {
     );
   });
 
+  it.each([1 / 60, DT_CAP_SECONDS])(
+    'a planet already out of view at its closest approach still spends one step in DEPARTURE, and the next encounter starts on schedule (dt = %f)',
+    (dt) => {
+      // A small planet passed far off: its sphere is out of the view cone at the closest approach.
+      const planet = { radius: 13, passFactor: 6 };
+      const params: Partial<AutopilotParams> = { nebulaShare: 0, planetFor: () => planet };
+      const reference = simulate(1 / 600, { params, until: afterEncounters(2) });
+      const run = simulate(dt, { params, until: afterEncounters(2) });
+      for (const { transitions } of [reference, run]) {
+        expect(transitions.slice(0, 8).map((t) => t.to)).toEqual([...CYCLE, ...CYCLE]);
+      }
+      const at = (r: typeof run, to: TravelState, n: number) => r.transitions.filter((t) => t.to === to)[n]!.time;
+      // Exactly one step in DEPARTURE: the planet was out of view when it began.
+      expect(at(run, 'CRUISE', 0) - at(run, 'DEPARTURE', 0)).toBeCloseTo(dt, 9);
+      // The held step is carried with the lateness: the next encounter starts when it would have
+      // without it, within the usual O(dt) per encounter (see `timelineTolerance`).
+      expect(Math.abs(at(run, 'APPROACH', 1) - at(reference, 'APPROACH', 1))).toBeLessThan(timelineTolerance(1, dt, 1 / 600));
+    },
+  );
+
   it('the heading resumes from where it was held, with no jump at any state change', () => {
     const dt = 1 / 60;
     const headingAtChange: Array<{ before: Vec3; after: Vec3; to: TravelState }> = [];
