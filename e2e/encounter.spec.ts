@@ -4,7 +4,11 @@ import type { E2EHookSnapshot } from '../src/e2eHook';
 import {
   CAMERA_FOV_DEG,
   DT_CAP_SECONDS,
+  ENCOUNTER_DISTANCE,
+  ENCOUNTER_FADE_IN_DISTANCE,
   ENCOUNTER_INTERVAL_SECONDS,
+  PLANET_GAS_RANGES,
+  PLANET_ROCKY_RANGES,
   SHIP_DEFAULT_SPEED_LEVEL,
   SHIP_SPEED_LEVELS,
 } from '../src/config';
@@ -17,7 +21,7 @@ const APP_PATH = '/elsewhere/';
 /** A pixel counts as lit when its brightest channel is above this (0–255). */
 const LIT_THRESHOLD = 16;
 
-// A full encounter is about 35–95 s of simulated travel, and SwiftShader renders well under 10 fps,
+// A full encounter is about 40–115 s of simulated travel, and SwiftShader renders well under 10 fps,
 // where the dt cap makes simulated time run slower than real time. Each test sets its own, long
 // timeout; this is the floor for the file.
 test.describe.configure({ timeout: 300_000 });
@@ -284,10 +288,14 @@ test('three encounters run CRUISE → APPROACH → FLYBY → DEPARTURE → CRUIS
   ]);
   // One planet in the scene during each encounter and none between them.
   expect(log.planetCountErrors).toEqual([]);
-  // The planet starts as a faint, distant dot (no pop-in).
+  // The planet starts as a faint, distant dot (no pop-in). Opacity below 0.1 is within the first
+  // quarter of the fade-in (its smoothstep is 0.156 there), so the planet is at least
+  // D − ENCOUNTER_FADE_IN_DISTANCE / 4 away, and no configured radius looks bigger than this from there.
+  const maxRadius = Math.max(PLANET_ROCKY_RANGES.radius[1], PLANET_GAS_RANGES.radius[1]);
+  const maxFirstAngularRadiusDeg = (Math.asin(maxRadius / (ENCOUNTER_DISTANCE - ENCOUNTER_FADE_IN_DISTANCE / 4)) * 180) / Math.PI;
   expect(log.firstPlanet).not.toBeNull();
-  expect(log.firstPlanet!.angularRadiusDeg).toBeLessThan(1.5);
   expect(log.firstPlanet!.opacity).toBeLessThan(0.1);
+  expect(log.firstPlanet!.angularRadiusDeg).toBeLessThan(maxFirstAngularRadiusDeg);
   // No frame moves the ship further than its speed allows.
   expect(log.worstJump).toBeLessThanOrEqual(1e-6);
 

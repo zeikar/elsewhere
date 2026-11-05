@@ -8,7 +8,7 @@
  * the window since the previous sample. A sample is due SOAK_SAMPLE_SECONDS (default 30) after the
  * previous one, but is taken at the first CRUISE from then on, so samples are spaced by the later
  * of SOAK_SAMPLE_SECONDS and the end of the encounter in progress: in practice about one per
- * encounter cycle (about 60–70 s under SwiftShader). The run fails on
+ * encounter cycle (about 70–80 s under SwiftShader). The run fails on
  *
  * - heap growth: last sample minus first above SOAK_HEAP_GROWTH_LIMIT_BYTES;
  * - frame-time degradation: the p95 frame interval at CRUISE late in the run (every CRUISE frame of

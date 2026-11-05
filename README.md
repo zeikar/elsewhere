@@ -66,7 +66,7 @@ npm run soak                  # 30 minutes (the default)
 SOAK_MINUTES=3 npm run soak   # what CI runs
 ```
 
-Each sample is taken at CRUISE, at the first one at least 30 s (`SOAK_SAMPLE_SECONDS`) after the previous sample, so samples are spaced by the later of `SOAK_SAMPLE_SECONDS` and the end of the encounter in progress (about one per encounter cycle, 60–70 s under SwiftShader). The early and late frame-time comparison fails if either side pools fewer than 30 CRUISE frames. It writes `soak-report.json` under `test-results/`. The full run can also be started from the Actions tab ([.github/workflows/soak.yml](.github/workflows/soak.yml)).
+Each sample is taken at CRUISE, at the first one at least 30 s (`SOAK_SAMPLE_SECONDS`) after the previous sample, so samples are spaced by the later of `SOAK_SAMPLE_SECONDS` and the end of the encounter in progress (about one per encounter cycle, 70–80 s under SwiftShader). The early and late frame-time comparison fails if either side pools fewer than 30 CRUISE frames. It writes `soak-report.json` under `test-results/`. The full run can also be started from the Actions tab ([.github/workflows/soak.yml](.github/workflows/soak.yml)).
 
 After `npm run build`, two checks guard the production build:
 

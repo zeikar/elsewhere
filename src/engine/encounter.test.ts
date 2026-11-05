@@ -12,6 +12,7 @@ import {
   ENCOUNTER_SIDE_OFFSET_FACTOR,
   ENCOUNTER_SLOWDOWN_DISTANCE,
   ENCOUNTER_SPEEDUP_DISTANCE,
+  SHIP_DEFAULT_SPEED_LEVEL,
   SHIP_SPEED_LEVELS,
 } from '../config';
 import {
@@ -246,8 +247,10 @@ describe('encounterTargetSpeed', () => {
           remaining = next;
         }
         // The ship lags the profile by about tau, so it reaches the closest approach a little faster.
+        // Above the default cruise speed the slowdown spans fewer time constants: from the top speed,
+        // with this unscaled minimum, it is still at about a quarter of the cruise speed there.
         expect(speedAtClosest).toBeGreaterThanOrEqual(ENCOUNTER_MIN_SPEED);
-        expect(speedAtClosest).toBeLessThan(ENCOUNTER_MIN_SPEED * 1.5);
+        expect(speedAtClosest).toBeLessThan(cruise <= SHIP_SPEED_LEVELS[SHIP_DEFAULT_SPEED_LEVEL] ? ENCOUNTER_MIN_SPEED * 1.5 : cruise / 3);
         expect(ship.speed).toBeGreaterThan(cruise * 0.95);
         expect(minDistance).toBeGreaterThan(radius * (1 + ENCOUNTER_CLEARANCE_MARGIN));
       }

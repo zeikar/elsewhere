@@ -44,7 +44,6 @@ import {
   ENCOUNTER_INTERVAL_JITTER,
   ENCOUNTER_INTERVAL_SECONDS,
   ENCOUNTER_MAX_SAME_KIND_RUN,
-  ENCOUNTER_MIN_SPEED_FLOOR,
   ENCOUNTER_NEBULA_SHARE,
   ENCOUNTER_PLANET_RADIUS,
   ENCOUNTER_SIDE_ELEVATION_RANGE,
@@ -55,6 +54,7 @@ import {
   NEBULA_FADE_OUT_DISTANCE,
   NEBULA_MIN_SPEED,
   NEBULA_MIN_SPEED_DISTANCE,
+  NEBULA_MIN_SPEED_FLOOR,
   NEBULA_RANGES,
   NEBULA_SIDE_OFFSET_FACTOR,
   NEBULA_SLOWDOWN_DISTANCE,
@@ -149,6 +149,7 @@ export interface EncounterKindParams {
 /** The nebula speed and fade profile, tuned for the default cruise speed. */
 export const NEBULA_ENCOUNTER_PROFILE: Readonly<EncounterProfile> = {
   minSpeed: NEBULA_MIN_SPEED,
+  minSpeedFloor: NEBULA_MIN_SPEED_FLOOR,
   slowdownDistance: NEBULA_SLOWDOWN_DISTANCE,
   minSpeedDistance: NEBULA_MIN_SPEED_DISTANCE,
   speedupDistance: NEBULA_SPEEDUP_DISTANCE,
@@ -518,10 +519,11 @@ export function updateAutopilot(
  * level. Distances are untouched, so the fades, the transitions and the planned path are unchanged
  * and a change in the middle of an encounter never makes it skip a state. Allocates the new profile.
  *
- * The scaled minimum speed is floored at ENCOUNTER_MIN_SPEED_FLOOR, so the slowest levels (the
- * reduced-motion start) slow down proportionally less instead of crawling through the flyby; it is
- * also capped at the cruise speed, so an encounter never speeds the ship up. Planet and nebula
- * profiles are both scaled this way.
+ * The scaled minimum speed is floored at the profile's `minSpeedFloor` (ENCOUNTER_MIN_SPEED_FLOOR
+ * for planets, NEBULA_MIN_SPEED_FLOOR for nebulae), so the slowest levels (the reduced-motion start)
+ * slow down proportionally less instead of crawling through the flyby; it is also capped at the
+ * cruise speed, so an encounter never speeds the ship up. Planet and nebula profiles are both scaled
+ * this way.
  */
 export function setCruiseSpeed(
   params: AutopilotParams,
@@ -531,7 +533,7 @@ export function setCruiseSpeed(
   const factor = base.cruiseSpeed > 0 ? cruiseSpeed / base.cruiseSpeed : 1;
   const scaled = (profile: Readonly<EncounterProfile>): EncounterProfile => ({
     ...profile,
-    minSpeed: Math.min(cruiseSpeed, Math.max(profile.minSpeed * factor, ENCOUNTER_MIN_SPEED_FLOOR)),
+    minSpeed: Math.min(cruiseSpeed, Math.max(profile.minSpeed * factor, profile.minSpeedFloor)),
   });
   params.cruiseSpeed = cruiseSpeed;
   params.profile = scaled(base.profile);

@@ -10,7 +10,6 @@ import {
   ENCOUNTER_INTERVAL_JITTER,
   ENCOUNTER_INTERVAL_SECONDS,
   ENCOUNTER_MAX_SAME_KIND_RUN,
-  ENCOUNTER_MIN_SPEED_FLOOR,
   ENCOUNTER_NEBULA_SHARE,
   ENCOUNTER_NEBULA_SHARE_BOUNDS,
   ENCOUNTER_PLANET_RADIUS,
@@ -20,6 +19,7 @@ import {
   NEBULA_DESPAWN_DISTANCE,
   NEBULA_ENCOUNTER_DISTANCE,
   NEBULA_MIN_SPEED,
+  NEBULA_MIN_SPEED_FLOOR,
   NEBULA_RANGES,
   NEBULA_SIDE_OFFSET_FACTOR,
   PLANET_GAS_RANGES,
@@ -496,7 +496,7 @@ describe('nebula encounters', () => {
       expect(transitions.map((t) => t.to)).toEqual(CYCLE);
       expect(transitions.map((t) => t.encounterIndex)).toEqual([0, 0, 0, 0]);
       // Slows for the nebula (to the scaled minimum, floored), and is back at cruise speed by the end.
-      const minSpeed = Math.min(cruiseSpeed, Math.max(NEBULA_MIN_SPEED * (cruiseSpeed / DEFAULT_AUTOPILOT_PARAMS.cruiseSpeed), ENCOUNTER_MIN_SPEED_FLOOR));
+      const minSpeed = Math.min(cruiseSpeed, Math.max(NEBULA_MIN_SPEED * (cruiseSpeed / DEFAULT_AUTOPILOT_PARAMS.cruiseSpeed), NEBULA_MIN_SPEED_FLOOR));
       expect(slowest).toBeLessThan(minSpeed * 1.25);
       expect(end).not.toBeNull();
       expect(end!.targetSpeed).toBe(cruiseSpeed);
@@ -535,7 +535,7 @@ describe('nebula encounters', () => {
       const factor = speed / DEFAULT_AUTOPILOT_PARAMS.cruiseSpeed;
       expect({ ...params.nebula.profile, minSpeed: 0 }).toEqual({ ...NEBULA_ENCOUNTER_PROFILE, minSpeed: 0 });
       expect(params.nebula.profile.minSpeed).toBeCloseTo(
-        Math.min(speed, Math.max(NEBULA_MIN_SPEED * factor, ENCOUNTER_MIN_SPEED_FLOOR)),
+        Math.min(speed, Math.max(NEBULA_MIN_SPEED * factor, NEBULA_MIN_SPEED_FLOOR)),
         12,
       );
       expect(params.nebula.encounterDistance).toBe(NEBULA_ENCOUNTER_DISTANCE);
@@ -776,13 +776,14 @@ describe('autopilot simulation', () => {
     }
   });
 
-  // Stated tolerance: 0.05 s. Each transition fires on the first frame past its threshold, so it
+  // Stated tolerance: 0.1 s. Each transition fires on the first frame past its threshold, so it
   // lands up to one frame (1/60 s) after the exact time. The autopilot carries that overshoot into
   // the next phase, so the lateness does not add up across encounters. A small O(dt) difference per
   // encounter remains, because the target speed is updated only once per frame, so the gap still
-  // grows slowly with the encounter count (it passes 0.05 s at around 30 encounters). Raising the
-  // count here needs a larger tolerance.
-  const TIMELINE_TOLERANCE_S = 0.05;
+  // grows slowly with the encounter count: about 0.005 s per encounter, most of it at the slow
+  // planet closest approach (6 units per second), so it is about 0.075 s at 15 encounters and passes
+  // 0.1 s at around 20. Raising the count here needs a larger tolerance.
+  const TIMELINE_TOLERANCE_S = 0.1;
 
   it.each([3, 15])('the timeline matches between dt = 1/60 and dt = 1/120 over %i encounters', (n) => {
     const maxSeconds = 600 * n;

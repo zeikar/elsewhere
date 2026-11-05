@@ -16,6 +16,7 @@ import {
   ENCOUNTER_FADE_OUT_DISTANCE,
   ENCOUNTER_MIN_SPEED,
   ENCOUNTER_MIN_SPEED_DISTANCE,
+  ENCOUNTER_MIN_SPEED_FLOOR,
   ENCOUNTER_SIDE_OFFSET_FACTOR,
   ENCOUNTER_SLOWDOWN_DISTANCE,
   ENCOUNTER_SPEEDUP_DISTANCE,
@@ -138,6 +139,11 @@ export function encounterRemaining(encounter: Readonly<Encounter>, shipPos: Read
 export interface EncounterProfile {
   /** Lowest target speed, held around the closest approach, in world units per second. */
   minSpeed: number;
+  /**
+   * Lowest value `setCruiseSpeed` scales `minSpeed` down to at the slower speed levels (units per
+   * second), so the flyby does not crawl there. Not used by the target speed itself.
+   */
+  minSpeedFloor: number;
   /** Remaining distance at which the slowdown starts. */
   slowdownDistance: number;
   /** Half-width of the band around the closest approach where the target speed is `minSpeed`. */
@@ -156,6 +162,7 @@ export interface EncounterProfile {
 
 export const DEFAULT_ENCOUNTER_PROFILE: Readonly<EncounterProfile> = {
   minSpeed: ENCOUNTER_MIN_SPEED,
+  minSpeedFloor: ENCOUNTER_MIN_SPEED_FLOOR,
   slowdownDistance: ENCOUNTER_SLOWDOWN_DISTANCE,
   minSpeedDistance: ENCOUNTER_MIN_SPEED_DISTANCE,
   speedupDistance: ENCOUNTER_SPEEDUP_DISTANCE,

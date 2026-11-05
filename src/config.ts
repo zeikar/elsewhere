@@ -166,7 +166,7 @@ export const ENCOUNTER_BASE_SEED = 0x91b3_a5ba;
  * also the spawn distance. Kept well inside CAMERA_FAR. A planet keeps its world size for the whole
  * encounter, so this and the planet radii (PLANET_ROCKY_RANGES, PLANET_GAS_RANGES) set how small it
  * first appears: at spawn a median-radius planet spans under 3% of the view height and the largest
- * under 5% (checked in Planet.test.ts). At the default speed the spawn is about 51 s before the
+ * under 5% (checked in Planet.test.ts). At the default speed the spawn is about 54 s before the
  * closest approach.
  */
 export const ENCOUNTER_DISTANCE = 2400;
@@ -185,18 +185,27 @@ export const ENCOUNTER_CLEARANCE_MARGIN = 0.25;
  * closest approach, then eases down to ENCOUNTER_MIN_SPEED (units per second), which it holds within
  * ENCOUNTER_MIN_SPEED_DISTANCE either side of the closest approach, then eases back up to cruise over
  * ENCOUNTER_SPEEDUP_DISTANCE. The ship follows it through its exponential speed approach
- * (SHIP_SPEED_TAU_SECONDS), so the slowdown spans several time constants even at the top speed.
+ * (SHIP_SPEED_TAU_SECONDS), so it lags the target speed, most at the top speed (see below).
+ *
+ * The minimum speed and its band are tuned for the planet radii: the closest approach is
+ * `radius × k`, so how fast the planet sweeps past in angle there is the speed over that distance.
+ * At the default speed level a median planet (radius about 41) peaks at about 4.4°/s, and the ship
+ * reaches the closest approach about 54 s after the spawn (both checked in EncounterView.test.ts).
+ * The slowdown and speed-up distances are not scaled down with the radii: the ship needs that
+ * distance to slow down from the top cruise speed, and even so it reaches the closest approach at
+ * about a third of that speed.
  */
-export const ENCOUNTER_MIN_SPEED = 15;
+export const ENCOUNTER_MIN_SPEED = 6;
 /**
- * Lowest encounter minimum speed (units per second) at any speed level. `setCruiseSpeed` scales
- * ENCOUNTER_MIN_SPEED with the cruise speed, which would make it 5 at the slowest level (the
- * reduced-motion start): one encounter would take about 290 s, about 48 s of it in FLYBY. With this
- * floor it takes about 235 s, about 27 s in FLYBY.
+ * Lowest planet minimum speed (units per second) at any speed level. `setCruiseSpeed` scales
+ * ENCOUNTER_MIN_SPEED with the cruise speed, which would make it 2 at the slowest level (the
+ * reduced-motion start): one encounter would take about 350 s, about 69 s of it in FLYBY. With this
+ * floor it takes about 285 s, about 44 s in FLYBY, and a median planet peaks at about 2.8°/s, as it
+ * did before the planets were made smaller. Nebulae have their own floor (NEBULA_MIN_SPEED_FLOOR).
  */
-export const ENCOUNTER_MIN_SPEED_FLOOR = 10;
-export const ENCOUNTER_SLOWDOWN_DISTANCE = 800;
-export const ENCOUNTER_MIN_SPEED_DISTANCE = 40;
+export const ENCOUNTER_MIN_SPEED_FLOOR = 4;
+export const ENCOUNTER_SLOWDOWN_DISTANCE = 520;
+export const ENCOUNTER_MIN_SPEED_DISTANCE = 16;
 export const ENCOUNTER_SPEEDUP_DISTANCE = 800;
 
 /**
@@ -347,6 +356,8 @@ export const NEBULA_SIDE_OFFSET_FACTOR = 1.7;
  * the wisps keep streaming past while the ship drifts through them.
  */
 export const NEBULA_MIN_SPEED = 24;
+/** Lowest nebula minimum speed at any speed level (see ENCOUNTER_MIN_SPEED_FLOOR). */
+export const NEBULA_MIN_SPEED_FLOOR = 10;
 export const NEBULA_SLOWDOWN_DISTANCE = 1200;
 export const NEBULA_MIN_SPEED_DISTANCE = 120;
 export const NEBULA_SPEEDUP_DISTANCE = 600;
