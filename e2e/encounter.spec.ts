@@ -12,9 +12,15 @@ import {
   SHIP_DEFAULT_SPEED_LEVEL,
   SHIP_SPEED_LEVELS,
 } from '../src/config';
-import { DEFAULT_AUTOPILOT_PARAMS, setCruiseSpeed, type AutopilotParams, type EncounterKind } from '../src/engine/Autopilot';
+import {
+  DEFAULT_AUTOPILOT_PARAMS,
+  encounterCruiseSpeed,
+  setCruiseSpeed,
+  type AutopilotParams,
+  type EncounterKind,
+} from '../src/engine/Autopilot';
 import { encounterTargetSpeed } from '../src/engine/encounter';
-import { SOAK_HEAP_GROWTH_LIMIT_BYTES } from './limits';
+import { FAST_ENCOUNTERS_ARRIVAL_SPEED, SOAK_HEAP_GROWTH_LIMIT_BYTES } from './limits';
 
 const APP_PATH = '/elsewhere/';
 
@@ -36,13 +42,14 @@ function collectErrors(page: Page): string[] {
 }
 
 /**
- * Opens the app, with the e2e-only overrides when given: the encounter interval, and `kind` to make
- * every encounter that kind (the seeded mix otherwise).
+ * Opens the app, with the e2e-only overrides when given: the encounter interval, `kind` to make
+ * every encounter that kind (the seeded mix otherwise), and the arrival speed.
  */
-async function openApp(page: Page, interval?: number, kind?: EncounterKind): Promise<void> {
+async function openApp(page: Page, interval?: number, kind?: EncounterKind, arrivalSpeed?: number): Promise<void> {
   const query = new URLSearchParams();
   if (interval !== undefined) query.set('encounterInterval', String(interval));
   if (kind !== undefined) query.set('encounterKind', kind);
+  if (arrivalSpeed !== undefined) query.set('arrivalSpeed', String(arrivalSpeed));
   const search = query.toString();
   await page.goto(search === '' ? APP_PATH : `${APP_PATH}?${search}`);
   await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 0);
@@ -262,7 +269,9 @@ test('three encounters run CRUISE → APPROACH → FLYBY → DEPARTURE → CRUIS
   // No pixels are checked here, and SwiftShader is fill-rate bound (the dt cap slows simulated time
   // at low frame rates), so a small viewport makes the three encounters pass much sooner.
   await page.setViewportSize({ width: 480, height: 270 });
-  await openApp(page, 1);
+  // Encounters flown from the top speed (see FAST_ENCOUNTERS_ARRIVAL_SPEED): this checks the state
+  // cycle and the resources, which do not depend on the speed profile.
+  await openApp(page, 1, undefined, FAST_ENCOUNTERS_ARRIVAL_SPEED);
   // Top speed (setSpeed clamps), so the encounters pass as quickly as the profile allows.
   await page.evaluate(() => window.__elsewhere!.setSpeed(99));
   await watchTravel(page);
@@ -270,6 +279,7 @@ test('three encounters run CRUISE → APPROACH → FLYBY → DEPARTURE → CRUIS
   const start = await travelLog(page);
   expect(start.states).toEqual([{ state: 'CRUISE', index: null, time: expect.any(Number) }]);
   expect((await snapshot(page)).autopilot.interval).toBe(1);
+  expect((await snapshot(page)).autopilot.arrivalSpeed).toBe(FAST_ENCOUNTERS_ARRIVAL_SPEED);
 
   await expect.poll(() => encountersDone(page), { timeout: 540_000, intervals: [2_000] }).toBeGreaterThanOrEqual(3);
   const log = await travelLog(page);
@@ -381,11 +391,12 @@ test('mid-APPROACH the planet is lit on the engine canvas, and pause → resume 
   const faster = await snapshot(page);
   expect(faster.autopilot.encounterIndex).toBe(paused.autopilot.encounterIndex);
   expect(['APPROACH', 'FLYBY', 'DEPARTURE']).toContain(faster.autopilot.state);
-  // The new level scales the speed profile; it does not replace the encounter's slowdown.
+  // The new level does not replace the encounter's slowdown: the encounter is flown from the
+  // arrival speed (the default level's), so it keeps the same speed profile.
   const params: AutopilotParams = { ...DEFAULT_AUTOPILOT_PARAMS };
   setCruiseSpeed(params, SHIP_SPEED_LEVELS[SHIP_DEFAULT_SPEED_LEVEL + 1]!);
   expect(faster.autopilot.targetSpeed).toBeCloseTo(
-    encounterTargetSpeed(faster.autopilot.remaining!, params.cruiseSpeed, params.profile),
+    encounterTargetSpeed(faster.autopilot.remaining!, encounterCruiseSpeed(params), params.profile),
     6,
   );
 

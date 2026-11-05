@@ -37,6 +37,7 @@ import {
   type FrameWindow,
 } from '../frameSampler';
 import {
+  FAST_ENCOUNTERS_ARRIVAL_SPEED,
   SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS,
   SOAK_FRAME_TIME_FACTOR,
   SOAK_FRAME_TIME_SLACK_MS,
@@ -226,9 +227,14 @@ test(`soak: ${SOAK_MINUTES} min, heap, frame time and GPU resources stay stable`
   test.setTimeout(durationMs + 3 * CRUISE_WAIT_MS + 120_000);
   const errors = collectErrors(page);
   await page.setViewportSize(VIEWPORT);
-  // The seeded default mix of planets and nebulae, at a short interval.
-  await page.goto(`${APP_PATH}?encounterInterval=${SOAK_ENCOUNTER_INTERVAL_SECONDS}`);
+  // The seeded default mix of planets and nebulae, at a short interval, flown from the top speed
+  // (FAST_ENCOUNTERS_ARRIVAL_SPEED in e2e/limits.ts): without that override the encounters are
+  // flown from the default speed after dropping out of warp, and a 3-minute run meets only 2 of them
+  // and takes 2 samples (measured), too few for its checks. Heap, frame time and resources do not
+  // depend on the speed profile.
+  await page.goto(`${APP_PATH}?encounterInterval=${SOAK_ENCOUNTER_INTERVAL_SECONDS}&arrivalSpeed=${FAST_ENCOUNTERS_ARRIVAL_SPEED}`);
   await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 0);
+  expect((await page.evaluate(() => window.__elsewhere!.snapshot())).autopilot.arrivalSpeed).toBe(FAST_ENCOUNTERS_ARRIVAL_SPEED);
   // Top speed (setSpeed clamps), so the encounters pass as quickly as the profile allows.
   await page.evaluate(() => window.__elsewhere!.setSpeed(99));
   await installFrameSampler(page);

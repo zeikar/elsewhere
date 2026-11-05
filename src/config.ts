@@ -142,8 +142,11 @@ export const FAR_STAR_SEED = 0xfa7_5ea5;
 
 /**
  * Encounter interval (docs/PLAN.md section 9, Phase 2): seconds of cruise before each encounter
- * starts, counted from load and again from the end of each encounter. With the default speed the
- * first planet appears as a distant dot this long after load, inside the 30–60 s the plan asks for.
+ * starts, counted from load and again from the end of each encounter. Above the arrival speed the
+ * cruise also holds the return to warp at its start and the drop out of warp at its end (see
+ * ENCOUNTER_ARRIVAL_SPEED); both count toward the interval, so the schedule is the same at every
+ * speed level. The first planet appears as a distant dot this long after load, inside the 30–60 s
+ * the plan asks for.
  */
 export const ENCOUNTER_INTERVAL_SECONDS = 40;
 
@@ -176,6 +179,32 @@ export const ENCOUNTER_SIDE_ELEVATION_RANGE = [-0.6, 0.6] as const;
  */
 export const ENCOUNTER_DRIFT_SETTLE_SECONDS = 5;
 
+/**
+ * Dropping out of warp (docs/PLAN.md section 1: cruise is the screensaver, an encounter is the
+ * exploration). Every encounter is flown as if the cruise speed were at most this arrival speed, in
+ * units per second: `setCruiseSpeed` scales the encounter speed profile for min(cruise speed, arrival
+ * speed), so at every speed level at or above the default the encounter, from its spawn to its end,
+ * has exactly the default level's speed profile, and the slower levels (the reduced-motion start)
+ * keep theirs. It is the default level's cruise speed (checked in Autopilot.test.ts).
+ *
+ * Above the arrival speed, the target speed eases (smoothstep) from the cruise speed down to the
+ * arrival speed over ENCOUNTER_WARP_EXIT_SECONDS at the end of the cruise, and that ease ends
+ * ENCOUNTER_WARP_EXIT_LEAD_SECONDS before the encounter starts. The ship lags its target by about
+ * SHIP_SPEED_TAU_SECONDS, so the lead lets the lag settle: from the top speed the ship is within
+ * about 3 units per second of the arrival speed at the spawn, and within 0.5 when the object
+ * reaches opacity 0.1 (the spawn bound is checked in Autopilot.test.ts, the opacity bound in both
+ * Autopilot.test.ts and EncounterView.test.ts). After the encounter, the target eases back
+ * up to the cruise speed over ENCOUNTER_WARP_ENTRY_SECONDS at the start of the next cruise (the first
+ * cruise, from load, starts at the cruise speed: the ship accelerates from rest). All
+ * three are cruise time, so they count toward the encounter interval. A cruise too short for them (an
+ * interval below their sum, as in tests) never reaches the full cruise speed, and is still back at
+ * the arrival speed ENCOUNTER_WARP_EXIT_LEAD_SECONDS before the encounter starts.
+ */
+export const ENCOUNTER_ARRIVAL_SPEED = 60;
+export const ENCOUNTER_WARP_EXIT_SECONDS = 10;
+export const ENCOUNTER_WARP_EXIT_LEAD_SECONDS = 3;
+export const ENCOUNTER_WARP_ENTRY_SECONDS = 8;
+
 /** Remaining distance to the closest approach at which APPROACH becomes FLYBY. */
 export const ENCOUNTER_FLYBY_DISTANCE = 300;
 
@@ -194,8 +223,8 @@ export const ENCOUNTER_BASE_SEED = 0x91b3_a5ba;
  * also the spawn distance. Kept well inside CAMERA_FAR. A planet keeps its world size for the whole
  * encounter, so this and the planet radii (PLANET_ROCKY_RANGES, PLANET_GAS_RANGES) set how small it
  * first appears: at spawn a median-radius planet spans under 3% of the view height and the largest
- * under 5% (checked in Planet.test.ts). At the default speed the spawn is about 54 s before the
- * closest approach.
+ * under 5% (checked in Planet.test.ts). At the default speed level and above (every level at or
+ * above the arrival speed) the spawn is about 54 s before the closest approach.
  */
 export const ENCOUNTER_DISTANCE = 2400;
 
@@ -219,9 +248,10 @@ export const ENCOUNTER_CLEARANCE_MARGIN = 0.25;
  * `radius × k`, so how fast the planet sweeps past in angle there is the speed over that distance.
  * At the default speed level a median planet (radius about 41) peaks at about 4.4°/s, and the ship
  * reaches the closest approach about 54 s after the spawn (both checked in EncounterView.test.ts).
- * The slowdown and speed-up distances are not scaled down with the radii: the ship needs that
- * distance to slow down from the top cruise speed, and even so it reaches the closest approach at
- * about a third of that speed.
+ * Faster levels drop to the arrival speed before the spawn (ENCOUNTER_ARRIVAL_SPEED), so they fly
+ * this same profile and the same flyby. The slowdown and speed-up distances are not scaled down with
+ * the radii: the ship needs that distance to slow down from the arrival speed within a few time
+ * constants.
  */
 export const ENCOUNTER_MIN_SPEED = 6;
 /**
@@ -381,7 +411,10 @@ export const NEBULA_SIDE_OFFSET_FACTOR = 1.7;
 
 /**
  * Nebula speed profile (see the planet one above): a gentler slowdown with a higher minimum speed, so
- * the wisps keep streaming past while the ship drifts through them.
+ * the wisps keep streaming past while the ship drifts through them. Like a planet encounter, a nebula
+ * encounter is flown from the arrival speed at the faster levels (ENCOUNTER_ARRIVAL_SPEED), so at the
+ * default level and the top level alike it slows to this minimum speed of 24, and a median nebula
+ * encounter lasts about 88 s from its spawn to its end.
  */
 export const NEBULA_MIN_SPEED = 24;
 /** Lowest nebula minimum speed at any speed level (see ENCOUNTER_MIN_SPEED_FLOOR). */

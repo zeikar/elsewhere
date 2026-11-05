@@ -2,14 +2,16 @@ import { writeFileSync } from 'node:fs';
 import { expect, test, type Page } from '@playwright/test';
 import type { E2EHookSnapshot } from '../src/e2eHook';
 import { NEBULA_NEAR_FADE_MIN_DISTANCE } from '../src/config';
+import { FAST_ENCOUNTERS_ARRIVAL_SPEED } from './limits';
 
 const APP_PATH = '/elsewhere/';
 
 /** A pixel counts as lit when its brightest channel is above this (0–255). */
 const LIT_THRESHOLD = 24;
 
-// A forced nebula encounter at the top speed is about 45 s of simulated travel; SwiftShader renders
-// slowly, and below 10 fps the dt cap slows simulated time further.
+// A forced nebula encounter at the top speed, flown from the top speed (FAST_ENCOUNTERS_ARRIVAL_SPEED),
+// is about 35 s of simulated travel; SwiftShader renders slowly, and below 10 fps the dt cap slows
+// simulated time further.
 test.describe.configure({ timeout: 420_000 });
 
 function collectErrors(page: Page): string[] {
@@ -174,9 +176,12 @@ test('a forced nebula encounter draws a coloured nebula over the stars, runs the
   const errors = collectErrors(page);
   // Pixels are checked, but SwiftShader is fill-rate bound: a small viewport keeps the encounter short.
   await page.setViewportSize({ width: 640, height: 360 });
-  await page.goto(`${APP_PATH}?encounterInterval=1&encounterKind=nebula`);
+  // Flown from the top speed (see FAST_ENCOUNTERS_ARRIVAL_SPEED): this checks the nebula's pixels,
+  // the state cycle and the resources, not the speed profile.
+  await page.goto(`${APP_PATH}?encounterInterval=1&encounterKind=nebula&arrivalSpeed=${FAST_ENCOUNTERS_ARRIVAL_SPEED}`);
   await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 0);
   await page.evaluate(() => window.__elsewhere!.setSpeed(99));
+  expect((await page.evaluate(() => window.__elsewhere!.snapshot())).autopilot.arrivalSpeed).toBe(FAST_ENCOUNTERS_ARRIVAL_SPEED);
   await watch(page);
 
   // Stars only: the watcher pauses in the first CRUISE.

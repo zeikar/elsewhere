@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   DT_CAP_SECONDS,
+  ENCOUNTER_ARRIVAL_SPEED,
   ENCOUNTER_BASE_SEED,
   ENCOUNTER_CLEARANCE_MARGIN,
   ENCOUNTER_DESPAWN_DISTANCE,
@@ -16,6 +17,9 @@ import {
   ENCOUNTER_SIDE_ELEVATION_RANGE,
   ENCOUNTER_SIDE_OFFSET_FACTOR,
   ENCOUNTER_SLOWDOWN_DISTANCE,
+  ENCOUNTER_WARP_ENTRY_SECONDS,
+  ENCOUNTER_WARP_EXIT_LEAD_SECONDS,
+  ENCOUNTER_WARP_EXIT_SECONDS,
   NEBULA_DESPAWN_DISTANCE,
   NEBULA_ENCOUNTER_DISTANCE,
   NEBULA_MIN_SPEED,
@@ -24,8 +28,10 @@ import {
   NEBULA_SIDE_OFFSET_FACTOR,
   PLANET_GAS_RANGES,
   PLANET_ROCKY_RANGES,
+  SHIP_DEFAULT_SPEED_LEVEL,
   SHIP_MAX_TURN_RATE_RAD_PER_S,
   SHIP_SPEED_LEVELS,
+  SHIP_SPEED_TAU_SECONDS,
 } from '../config';
 import {
   DEFAULT_AUTOPILOT_PARAMS,
@@ -33,10 +39,12 @@ import {
   cappedNebulaShare,
   createAutopilotState,
   cruiseInterval,
+  cruiseTargetSpeed,
   cruiseIntervalFor,
   defaultNebula,
   createTravel,
   defaultPlanet,
+  encounterCruiseSpeed,
   encounterKind,
   encounterSchedule,
   encounterSide,
@@ -49,7 +57,7 @@ import {
   type AutopilotState,
   type TravelState,
 } from './Autopilot';
-import { encounterOffset, planEncounter } from './encounter';
+import { encounterOffset, encounterTargetSpeed, planEncounter } from './encounter';
 import { nebulaParams } from './Nebula';
 import { planetParams } from './Planet';
 import { hash, mulberry32 } from './seed';
@@ -172,10 +180,25 @@ describe('autopilot config', () => {
     expect(ENCOUNTER_PLANET_RADIUS).toBeGreaterThan(0);
     // The planet is planned past the slowdown, so the encounter starts at cruise speed.
     expect(ENCOUNTER_DISTANCE).toBeGreaterThanOrEqual(ENCOUNTER_SLOWDOWN_DISTANCE);
+    // Dropping out of warp: the arrival speed is the default level's cruise speed, so the faster
+    // levels fly the default level's encounters and the slower ones keep their own.
+    expect(ENCOUNTER_ARRIVAL_SPEED).toBe(SHIP_SPEED_LEVELS[SHIP_DEFAULT_SPEED_LEVEL]);
+    expect(ENCOUNTER_WARP_EXIT_SECONDS).toBeGreaterThan(0);
+    expect(ENCOUNTER_WARP_ENTRY_SECONDS).toBeGreaterThan(0);
+    // The lead leaves the ship's speed lag (time constant tau) at least one tau to settle.
+    expect(ENCOUNTER_WARP_EXIT_LEAD_SECONDS).toBeGreaterThanOrEqual(SHIP_SPEED_TAU_SECONDS);
+    // Even the shortest jittered cruise has room to return to warp and drop out of it again.
+    expect(ENCOUNTER_INTERVAL_SECONDS * (1 - ENCOUNTER_INTERVAL_JITTER)).toBeGreaterThan(
+      ENCOUNTER_WARP_ENTRY_SECONDS + ENCOUNTER_WARP_EXIT_SECONDS + ENCOUNTER_WARP_EXIT_LEAD_SECONDS,
+    );
   });
 
   it('defaults to the config values', () => {
     expect(DEFAULT_AUTOPILOT_PARAMS.interval).toBe(ENCOUNTER_INTERVAL_SECONDS);
+    expect(DEFAULT_AUTOPILOT_PARAMS.arrivalSpeed).toBe(ENCOUNTER_ARRIVAL_SPEED);
+    expect(DEFAULT_AUTOPILOT_PARAMS.warpExitTime).toBe(ENCOUNTER_WARP_EXIT_SECONDS);
+    expect(DEFAULT_AUTOPILOT_PARAMS.warpExitLead).toBe(ENCOUNTER_WARP_EXIT_LEAD_SECONDS);
+    expect(DEFAULT_AUTOPILOT_PARAMS.warpEntryTime).toBe(ENCOUNTER_WARP_ENTRY_SECONDS);
     expect(DEFAULT_AUTOPILOT_PARAMS.encounterDistance).toBe(ENCOUNTER_DISTANCE);
     expect(DEFAULT_AUTOPILOT_PARAMS.sideOffsetFactor).toBe(ENCOUNTER_SIDE_OFFSET_FACTOR);
     expect(DEFAULT_AUTOPILOT_PARAMS.profile.despawnDistance).toBe(ENCOUNTER_DESPAWN_DISTANCE);
@@ -495,15 +518,17 @@ describe('nebula encounters', () => {
       });
       expect(transitions.map((t) => t.to)).toEqual(CYCLE);
       expect(transitions.map((t) => t.encounterIndex)).toEqual([0, 0, 0, 0]);
-      // Slows for the nebula (to the scaled minimum, floored), and is back at cruise speed by the end.
-      const minSpeed = Math.min(cruiseSpeed, Math.max(NEBULA_MIN_SPEED * (cruiseSpeed / DEFAULT_AUTOPILOT_PARAMS.cruiseSpeed), NEBULA_MIN_SPEED_FLOOR));
+      // Flown from the encounter speed: the cruise speed, or the arrival speed above it (the ship
+      // drops out of warp first). Slows for the nebula (to the scaled minimum, floored), and is back
+      // at the encounter speed by the end; the next cruise then eases back into warp from there.
+      const encounterSpeed = Math.min(cruiseSpeed, ENCOUNTER_ARRIVAL_SPEED);
+      const minSpeed = Math.min(encounterSpeed, Math.max(NEBULA_MIN_SPEED * (encounterSpeed / DEFAULT_AUTOPILOT_PARAMS.cruiseSpeed), NEBULA_MIN_SPEED_FLOOR));
       expect(slowest).toBeLessThan(minSpeed * 1.25);
       expect(end).not.toBeNull();
-      expect(end!.targetSpeed).toBe(cruiseSpeed);
-      // Within 2% of it (within 1% at the default speed; the top speed covers the margin after the
-      // speed-up in fewer time constants, as it does for planets).
-      const tolerance = cruiseSpeed === DEFAULT_AUTOPILOT_PARAMS.cruiseSpeed ? 0.01 : 0.02;
-      expect(Math.abs(end!.shipSpeed - cruiseSpeed) / cruiseSpeed).toBeLessThan(tolerance);
+      if (cruiseSpeed <= ENCOUNTER_ARRIVAL_SPEED) expect(end!.targetSpeed).toBe(cruiseSpeed);
+      else expect(end!.targetSpeed).toBeCloseTo(encounterSpeed, 0);
+      // Within 1% of it.
+      expect(Math.abs(end!.shipSpeed - encounterSpeed) / encounterSpeed).toBeLessThan(0.01);
       expect(end!.fade).toBe(0);
       expect(end!.driftRate).toBe(1);
       // Heading held, fades gradual, and clear of the core.
@@ -532,12 +557,16 @@ describe('nebula encounters', () => {
     for (const speed of SHIP_SPEED_LEVELS) {
       const params: AutopilotParams = { ...DEFAULT_AUTOPILOT_PARAMS };
       setCruiseSpeed(params, speed);
-      const factor = speed / DEFAULT_AUTOPILOT_PARAMS.cruiseSpeed;
+      // Scaled for the speed the encounter is flown from: at or above the arrival speed, the
+      // default level's profile itself.
+      const encounterSpeed = Math.min(speed, ENCOUNTER_ARRIVAL_SPEED);
+      const factor = encounterSpeed / DEFAULT_AUTOPILOT_PARAMS.cruiseSpeed;
       expect({ ...params.nebula.profile, minSpeed: 0 }).toEqual({ ...NEBULA_ENCOUNTER_PROFILE, minSpeed: 0 });
       expect(params.nebula.profile.minSpeed).toBeCloseTo(
-        Math.min(speed, Math.max(NEBULA_MIN_SPEED * factor, NEBULA_MIN_SPEED_FLOOR)),
+        Math.min(encounterSpeed, Math.max(NEBULA_MIN_SPEED * factor, NEBULA_MIN_SPEED_FLOOR)),
         12,
       );
+      if (speed >= ENCOUNTER_ARRIVAL_SPEED) expect(params.nebula.profile).toEqual(NEBULA_ENCOUNTER_PROFILE);
       expect(params.nebula.encounterDistance).toBe(NEBULA_ENCOUNTER_DISTANCE);
     }
   });
@@ -593,8 +622,9 @@ describe('autopilot simulation', () => {
   });
 
   it('over 1,000 simulated encounters: no more same-kind encounters in a row than the cap, and the mean interval holds', () => {
-    // The engine's in-place step at the capped dt and the top speed keeps this quick; each
-    // transition still fires within one step of its threshold.
+    // The engine's in-place step at the capped dt keeps this quick; each transition still fires
+    // within one step of its threshold. The top speed also runs every cruise through its warp entry
+    // and exit, which count toward the interval measured here.
     const dt = DT_CAP_SECONDS;
     const n = 1000;
     const travel = createTravel({ ...DEFAULT_AUTOPILOT_PARAMS }, DEFAULT_SHIP_PARAMS);
@@ -828,6 +858,241 @@ describe('autopilot simulation', () => {
       expect(Math.abs(end.shipSpeed - cruiseSpeed) / cruiseSpeed).toBeLessThan(0.01);
       expect(end.fade).toBe(0);
       expect(end.driftRate).toBe(1);
+    }
+  });
+});
+
+describe('dropping out of warp', () => {
+  const TOP_SPEED = SHIP_SPEED_LEVELS[SHIP_SPEED_LEVELS.length - 1]!;
+  /** The default params at cruise speed `cruiseSpeed`, through `setCruiseSpeed` as the engine sets it. */
+  const atSpeed = (cruiseSpeed: number, overrides: Partial<AutopilotParams> = {}): AutopilotParams => {
+    const params: AutopilotParams = { ...DEFAULT_AUTOPILOT_PARAMS, ...overrides };
+    setCruiseSpeed(params, cruiseSpeed);
+    return params;
+  };
+
+  it('encounters are flown from min(cruise speed, arrival speed)', () => {
+    for (const cruiseSpeed of SHIP_SPEED_LEVELS) {
+      expect(encounterCruiseSpeed(atSpeed(cruiseSpeed))).toBe(Math.min(cruiseSpeed, ENCOUNTER_ARRIVAL_SPEED));
+    }
+    // An infinite arrival speed flies every encounter from the cruise speed.
+    expect(encounterCruiseSpeed({ cruiseSpeed: TOP_SPEED, arrivalSpeed: Number.POSITIVE_INFINITY })).toBe(TOP_SPEED);
+  });
+
+  it('cruiseTargetSpeed is the cruise speed up to the arrival speed; above it, it eases back into warp after an encounter and out of it before the next', () => {
+    // The first cruise, from load, has no encounter to return from: it starts at the cruise speed.
+    for (const cruiseSpeed of SHIP_SPEED_LEVELS) {
+      const params = atSpeed(cruiseSpeed);
+      expect(cruiseTargetSpeed(0, ENCOUNTER_INTERVAL_SECONDS, params, false)).toBe(cruiseSpeed);
+      expect(createAutopilotState(params).targetSpeed).toBe(cruiseSpeed);
+      expect(cruiseTargetSpeed(ENCOUNTER_INTERVAL_SECONDS, ENCOUNTER_INTERVAL_SECONDS, params, false)).toBe(
+        Math.min(cruiseSpeed, ENCOUNTER_ARRIVAL_SPEED),
+      );
+    }
+    const interval = ENCOUNTER_INTERVAL_SECONDS;
+    const h = 0.01;
+    const exitStart = interval - ENCOUNTER_WARP_EXIT_LEAD_SECONDS - ENCOUNTER_WARP_EXIT_SECONDS;
+    for (const cruiseSpeed of SHIP_SPEED_LEVELS) {
+      const params = atSpeed(cruiseSpeed);
+      const arrival = Math.min(cruiseSpeed, ENCOUNTER_ARRIVAL_SPEED);
+      // A smoothstep's slope is at most 1.5 × range / width.
+      const maxStep = (1.5 * (cruiseSpeed - arrival) * h) / Math.min(ENCOUNTER_WARP_ENTRY_SECONDS, ENCOUNTER_WARP_EXIT_SECONDS);
+      let prev = cruiseTargetSpeed(0, interval, params, true);
+      expect(prev).toBe(arrival);
+      for (let i = 1; i * h <= interval + 1; i++) {
+        const t = i * h;
+        const v = cruiseTargetSpeed(t, interval, params, true);
+        if (cruiseSpeed <= ENCOUNTER_ARRIVAL_SPEED) {
+          // The default level and below: unchanged, the cruise speed throughout.
+          expect(v).toBe(cruiseSpeed);
+        } else {
+          expect(Math.abs(v - prev)).toBeLessThanOrEqual(maxStep + 1e-9);
+          expect(v).toBeGreaterThanOrEqual(arrival);
+          expect(v).toBeLessThanOrEqual(cruiseSpeed);
+          // Back into warp, at warp, out of warp, then held at the arrival speed for the lead.
+          if (t <= ENCOUNTER_WARP_ENTRY_SECONDS) expect(v).toBeGreaterThanOrEqual(prev);
+          else if (t <= exitStart) expect(v).toBe(cruiseSpeed);
+          else expect(v).toBeLessThanOrEqual(prev);
+          if (t >= interval - ENCOUNTER_WARP_EXIT_LEAD_SECONDS + h / 2) expect(v).toBe(arrival);
+        }
+        prev = v;
+      }
+    }
+    // A cruise too short for the entry and the exit never reaches warp, and is back at the arrival
+    // speed by the lead before the encounter; one no longer than the lead stays at the arrival speed.
+    const top = atSpeed(TOP_SPEED);
+    for (const short of [5, ENCOUNTER_WARP_ENTRY_SECONDS + ENCOUNTER_WARP_EXIT_SECONDS]) {
+      let prev = cruiseTargetSpeed(0, short, top, true);
+      for (let i = 0; i * h <= short; i++) {
+        const t = i * h;
+        const v = cruiseTargetSpeed(t, short, top, true);
+        expect(v).toBeLessThan(TOP_SPEED);
+        expect(Math.abs(v - prev)).toBeLessThan(0.2);
+        if (t >= short - ENCOUNTER_WARP_EXIT_LEAD_SECONDS + h / 2) expect(v).toBe(ENCOUNTER_ARRIVAL_SPEED);
+        prev = v;
+      }
+    }
+    for (let t = 0; t <= 5; t += 0.05) {
+      expect(cruiseTargetSpeed(t, ENCOUNTER_WARP_EXIT_LEAD_SECONDS, top, true)).toBe(ENCOUNTER_ARRIVAL_SPEED);
+    }
+  });
+
+  describe.each(SHIP_SPEED_LEVELS.map((cruiseSpeed) => ({ cruiseSpeed })))('at cruise speed $cruiseSpeed', ({ cruiseSpeed }) => {
+    const encounterSpeed = Math.min(cruiseSpeed, ENCOUNTER_ARRIVAL_SPEED);
+    const cases = (['planet', 'nebula'] as const).flatMap((kind) => [1 / 60, 1 / 120].map((dt) => ({ kind, dt })));
+
+    it.each(cases)(
+      'the ship is out of warp when the $kind reaches opacity 0.1, and flies the profile for its encounter speed from the spawn (dt $dt)',
+      ({ kind, dt }) => {
+        const params = atSpeed(cruiseSpeed, { nebulaShare: kind === 'nebula' ? 1 : 0 });
+        // At or above the arrival speed, the profile is the default level's itself.
+        if (cruiseSpeed >= ENCOUNTER_ARRIVAL_SPEED) {
+          expect(params.profile).toEqual(DEFAULT_AUTOPILOT_PARAMS.profile);
+          expect(params.nebula.profile).toEqual(DEFAULT_AUTOPILOT_PARAMS.nebula.profile);
+        }
+        const profile = kind === 'nebula' ? params.nebula.profile : params.profile;
+        // Over three encounters, so the cruises after an encounter (the return to warp, then the drop
+        // out of it) are checked as well as the first one from load.
+        const encounters = 3;
+        const speedsAtSpawn: number[] = [];
+        const speedsAtVisible: number[] = [];
+        let visible = false;
+        let encounterFrames = 0;
+        simulate(dt, {
+          params,
+          until: afterEncounters(encounters),
+          maxSeconds: 4000,
+          onFrame: ({ ship, prevAutopilot, autopilot }) => {
+            if (autopilot.encounter === null) return;
+            if (prevAutopilot.state === 'CRUISE') {
+              speedsAtSpawn.push(ship.speed);
+              visible = false;
+            }
+            if (!visible && autopilot.fade >= 0.1) {
+              speedsAtVisible.push(ship.speed);
+              visible = true;
+            }
+            // Exactly the encounter speed's profile, from the spawn to the end.
+            expect(autopilot.targetSpeed).toBe(encounterTargetSpeed(autopilot.remaining, encounterSpeed, profile));
+            encounterFrames++;
+          },
+        });
+        expect(encounterFrames).toBeGreaterThan(1000 * encounters);
+        expect(speedsAtSpawn).toHaveLength(encounters);
+        expect(speedsAtVisible).toHaveLength(encounters);
+        // From the top speed the lag is about 3 units per second at the spawn and under 0.5 by the
+        // time the object is noticeably visible, in every encounter; at or below the arrival speed
+        // there is none.
+        expect(Math.max(...speedsAtSpawn)).toBeLessThanOrEqual(encounterSpeed + 3.5);
+        expect(Math.max(...speedsAtVisible)).toBeLessThanOrEqual(encounterSpeed + 0.5);
+        // At or below the arrival speed, the ship has long reached its cruise speed (from rest at
+        // load, or back from the previous encounter's departure).
+        if (cruiseSpeed <= ENCOUNTER_ARRIVAL_SPEED) {
+          for (const speed of speedsAtVisible) expect(speed).toBeCloseTo(cruiseSpeed, 6);
+        }
+      },
+    );
+
+    it.each((['planet', 'nebula'] as const).flatMap((kind) => [1 / 60, 1 / 120].map((dt) => ({ kind, dt }))))(
+      'the drop out of warp and the return to it are smooth around $kind encounters: no step in the target speed or the speed at any frame (dt $dt)',
+      ({ kind, dt }) => {
+        // Over two encounters: load, a full cruise, the drop out of warp, an encounter, the return
+        // to warp, and again. Streaks are the ship velocity × the streak time, so a smooth speed
+        // also means smooth streak lengths.
+        let worstTargetRate = 0;
+        let worstSpeedRate = 0;
+        let backInWarp = Number.NaN;
+        let endedAt = Number.NaN;
+        simulate(dt, {
+          params: atSpeed(cruiseSpeed, { nebulaShare: kind === 'nebula' ? 1 : 0 }),
+          until: afterEncounters(2),
+          maxSeconds: 4000,
+          onFrame: ({ prev, ship, prevAutopilot, autopilot }) => {
+            worstTargetRate = Math.max(worstTargetRate, Math.abs(autopilot.targetSpeed - prevAutopilot.targetSpeed) / dt);
+            // The speed from the first spawn on: before it the ship also accelerates from rest at load.
+            if (autopilot.encounterCount > 0) worstSpeedRate = Math.max(worstSpeedRate, Math.abs(ship.speed - prev.speed) / dt);
+            if (prevAutopilot.state === 'DEPARTURE' && autopilot.state === 'CRUISE' && Number.isNaN(endedAt)) endedAt = ship.time;
+            if (!Number.isNaN(endedAt) && Number.isNaN(backInWarp) && ship.speed >= 0.95 * cruiseSpeed) backInWarp = ship.time;
+          },
+        });
+        // Bounded rates of change, in units per second per second. The target: the eases are
+        // smoothsteps over seconds, whose slope is at most 1.5 × 90 / 8 ≈ 17 from the top speed, and
+        // the encounter profile is the default level's (about 8). The ship lags it, so its speed
+        // changes more gently (at most about 14, in the drop from the top speed). Before the drop
+        // out of warp, the top-speed encounter slowdown reached about 54 and 32.
+        const maxTargetRate = Math.max(
+          8,
+          (1.5 * (cruiseSpeed - encounterSpeed)) / Math.min(ENCOUNTER_WARP_ENTRY_SECONDS, ENCOUNTER_WARP_EXIT_SECONDS),
+        );
+        expect(worstTargetRate).toBeGreaterThan(0);
+        expect(worstTargetRate).toBeLessThanOrEqual(maxTargetRate * 1.01);
+        expect(worstSpeedRate).toBeLessThan(15);
+        // Back in warp (95% of the cruise speed) within the entry time plus one time constant.
+        expect(backInWarp - endedAt).toBeLessThanOrEqual(ENCOUNTER_WARP_ENTRY_SECONDS + SHIP_SPEED_TAU_SECONDS);
+      },
+    );
+  });
+
+  it.each(SHIP_SPEED_LEVELS.filter((speed) => speed <= ENCOUNTER_ARRIVAL_SPEED))(
+    'at cruise speed %i (at most the arrival speed) the travel is exactly what it was without an arrival speed',
+    (cruiseSpeed) => {
+      // An infinite arrival speed flies every encounter from the cruise speed, with no warp entry
+      // or exit: the behaviour before the drop out of warp. Planets and nebulae, the default mix.
+      const run = (arrivalSpeed: number) => {
+        const frames: Array<{ time: number; speed: number; targetSpeed: number; fade: number; state: TravelState }> = [];
+        const result = simulate(1 / 60, {
+          params: atSpeed(cruiseSpeed, { arrivalSpeed }),
+          until: afterEncounters(3),
+          maxSeconds: 4000,
+          onFrame: ({ ship, autopilot }) => {
+            frames.push({ time: ship.time, speed: ship.speed, targetSpeed: autopilot.targetSpeed, fade: autopilot.fade, state: autopilot.state });
+          },
+        });
+        return { transitions: result.transitions, ship: result.ship, frames };
+      };
+      const now = run(ENCOUNTER_ARRIVAL_SPEED);
+      const before = run(Number.POSITIVE_INFINITY);
+      expect(new Set(now.transitions.map((t) => t.to))).toEqual(new Set(CYCLE));
+      expect(now.transitions).toEqual(before.transitions);
+      expect(now.frames).toEqual(before.frames);
+      expect(now.ship).toEqual(before.ship);
+    },
+  );
+
+  it('at the top speed level the warp entry and exit count toward the interval: APPROACH begins after the configured interval, every cycle', () => {
+    const dt = 1 / 60;
+    const interval = ENCOUNTER_INTERVAL_SECONDS;
+    const params = atSpeed(TOP_SPEED, { interval, intervalJitter: 0 });
+    let topSpeedReached = false;
+    const { transitions } = simulate(dt, {
+      params,
+      until: afterEncounters(2),
+      onFrame: ({ ship }) => {
+        topSpeedReached ||= ship.speed > 0.99 * TOP_SPEED;
+      },
+    });
+    expect(topSpeedReached).toBe(true);
+    const approaches = transitions.filter((t) => t.to === 'APPROACH');
+    const cruises = transitions.filter((t) => t.to === 'CRUISE');
+    expect(approaches).toHaveLength(2);
+    expect(approaches[0]!.time).toBeGreaterThanOrEqual(interval - 1e-9);
+    expect(approaches[0]!.time).toBeLessThanOrEqual(interval + dt + 1e-9);
+    const gap = approaches[1]!.time - cruises[0]!.time;
+    expect(gap).toBeGreaterThanOrEqual(interval - dt - 1e-9);
+    expect(gap).toBeLessThanOrEqual(interval + dt + 1e-9);
+  });
+
+  // Stated tolerance: as for the default level (see TIMELINE_TOLERANCE_S above). The warp entry and
+  // exit are functions of the cruise time, so they add no lateness of their own.
+  it.each([3, 15])('at the top speed level the timeline, warp entry and exit included, matches between dt = 1/60 and dt = 1/120 over %i encounters', (n) => {
+    const params = atSpeed(TOP_SPEED);
+    const maxSeconds = 600 * n;
+    const at60 = simulate(1 / 60, { params, until: afterEncounters(n), maxSeconds }).transitions;
+    const at120 = simulate(1 / 120, { params, until: afterEncounters(n), maxSeconds }).transitions;
+    expect(at60.map((t) => t.to)).toEqual(at120.map((t) => t.to));
+    expect(at60).toHaveLength(4 * n);
+    for (let i = 0; i < at60.length; i++) {
+      expect(Math.abs(at60[i]!.time - at120[i]!.time)).toBeLessThanOrEqual(0.1);
     }
   });
 });

@@ -17,8 +17,10 @@
  * `e2eEngineOptions` reads e2e-only engine overrides from the page URL (also absent from the
  * production build): `?encounterInterval=<seconds>` shortens (or, with a huge value, effectively
  * disables) the encounter interval so tests run quickly, `?encounterKind=planet|nebula` makes
- * every encounter that kind, `?starLayers=far|near` draws only that star layer, and `?headingDrift=0`
- * holds the heading at -Z (so the ship only translates).
+ * every encounter that kind, `?starLayers=far|near` draws only that star layer, `?headingDrift=0`
+ * holds the heading at -Z (so the ship only translates), and `?arrivalSpeed=<u/s>` sets the arrival
+ * speed (a value at or above the top speed flies encounters from the top speed, without dropping
+ * out of warp, so tests that only need encounter cycles pass them about 2.5–3× sooner).
  */
 import { Vector3 } from 'three';
 import type { Engine, EngineOptions } from './engine/Engine';
@@ -138,6 +140,8 @@ export interface E2EHookSnapshot {
     driftRate: number;
     /** Mean encounter interval in use, in seconds (each cruise is jittered around it). */
     interval: number;
+    /** Arrival speed in use, in units per second (encounters are flown from min(cruise, this)). */
+    arrivalSpeed: number;
     /** Planned closest distance between the path and the planet centre, or `null` with no encounter. */
     closestDistance: number | null;
     /** Kind of the encounter in progress, or `null` in CRUISE. */
@@ -221,18 +225,21 @@ declare global {
 /** Reads the e2e-only engine overrides from a URL query string (see the module comment). */
 export function e2eEngineOptions(
   search: string,
-): Pick<EngineOptions, 'encounterInterval' | 'encounterKind' | 'starLayers' | 'headingDrift'> {
+): Pick<EngineOptions, 'encounterInterval' | 'encounterKind' | 'starLayers' | 'headingDrift' | 'arrivalSpeed'> {
   const query = new URLSearchParams(search);
   const raw = query.get('encounterInterval');
   const interval = raw === null ? Number.NaN : Number(raw);
   const kind = query.get('encounterKind');
   const layers = query.get('starLayers');
   const drift = query.get('headingDrift');
+  const rawArrival = query.get('arrivalSpeed');
+  const arrival = rawArrival === null ? Number.NaN : Number(rawArrival);
   return {
     ...(interval >= 0 ? { encounterInterval: interval } : {}),
     ...(kind === 'planet' || kind === 'nebula' ? { encounterKind: kind } : {}),
     ...(layers === 'far' || layers === 'near' || layers === 'both' ? { starLayers: layers } : {}),
     ...(drift === '0' ? { headingDrift: false } : {}),
+    ...(arrival > 0 ? { arrivalSpeed: arrival } : {}),
   };
 }
 
@@ -355,6 +362,7 @@ export function installE2EHook(engine: Engine): void {
           targetSpeed: autopilot.targetSpeed,
           driftRate: autopilot.driftRate,
           interval: engine.getEncounterInterval(),
+          arrivalSpeed: engine.getArrivalSpeed(),
           closestDistance: autopilot.encounter?.plan.closestDistance ?? null,
           kind: autopilot.encounter?.kind ?? null,
           side: autopilot.encounter?.side ?? null,

@@ -2,9 +2,11 @@ import { Scene, Vector3, type Object3D } from 'three';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   DT_CAP_SECONDS,
+  ENCOUNTER_ARRIVAL_SPEED,
   ENCOUNTER_BASE_SEED,
   ENCOUNTER_CLEARANCE_MARGIN,
   ENCOUNTER_DISTANCE,
+  ENCOUNTER_MIN_SPEED,
   ENCOUNTER_MIN_SPEED_FLOOR,
   ENCOUNTER_SIDE_OFFSET_FACTOR,
   PLANET_GAS_RANGES,
@@ -13,10 +15,13 @@ import {
   REDUCED_MOTION_SPEED_LEVEL,
   SHIP_DEFAULT_SPEED_LEVEL,
   SHIP_SPEED_LEVELS,
+  SHIP_SPEED_TAU_SECONDS,
+  ENCOUNTER_WARP_ENTRY_SECONDS,
 } from '../config';
 import {
   DEFAULT_AUTOPILOT_PARAMS,
   createTravel,
+  encounterCruiseSpeed,
   encounterProfile,
   encounterSchedule,
   setCruiseSpeed,
@@ -458,6 +463,78 @@ describe('EncounterView shader warm-up', () => {
   });
 });
 
+/** Median radius of the seeded planet draw: gas with probability PLANET_GAS_SHARE, the radius uniform over the type's range. */
+function medianPlanetRadius(): number {
+  // Found by bisection on the mixture's CDF.
+  const uniformCdf = ([min, max]: readonly [number, number], r: number) => Math.min(1, Math.max(0, (r - min) / (max - min)));
+  const cdf = (r: number) =>
+    (1 - PLANET_GAS_SHARE) * uniformCdf(PLANET_ROCKY_RANGES.radius, r) + PLANET_GAS_SHARE * uniformCdf(PLANET_GAS_RANGES.radius, r);
+  let low = Math.min(PLANET_ROCKY_RANGES.radius[0], PLANET_GAS_RANGES.radius[0]);
+  let high = Math.max(PLANET_ROCKY_RANGES.radius[1], PLANET_GAS_RANGES.radius[1]);
+  for (let i = 0; i < 60; i++) {
+    const mid = (low + high) / 2;
+    if (cdf(mid) < 0.5) low = mid;
+    else high = mid;
+  }
+  return (low + high) / 2;
+}
+
+/**
+ * One median-radius planet encounter at speed level `level`, simulated from load at dt = 1/60 with
+ * the default (jittered) interval: the peak bearing rate (°/s), the 30°→80° bearing sweep, the times
+ * from the spawn to the closest approach and to the end (s), and the ship's speed when the planet
+ * first reaches opacity 0.1 and at the closest approach. The bearing is the angle between the planned
+ * path and the line of sight to the planet centre.
+ */
+function medianPlanetFlyby(level: number) {
+  const radius = medianPlanetRadius();
+  const params: AutopilotParams = { ...DEFAULT_AUTOPILOT_PARAMS, nebulaShare: 0, planetFor: () => ({ radius }) };
+  setCruiseSpeed(params, SHIP_SPEED_LEVELS[level]!);
+  const travel = createTravel(params, DEFAULT_SHIP_PARAMS);
+  const dt = 1 / 60;
+  const rel = { x: 0, y: 0, z: 0 };
+  let spawnedAt = Number.NaN;
+  let closestAt = Number.NaN;
+  let endedAt = Number.NaN;
+  let at30 = Number.NaN;
+  let at80 = Number.NaN;
+  let speedAtVisible = Number.NaN;
+  let speedAtClosest = Number.NaN;
+  let prevBearing = Number.NaN;
+  let peak = 0;
+  for (let i = 0; i < 1e6 && Number.isNaN(endedAt); i++) {
+    const before = travel.autopilot.state;
+    stepTravel(travel, dt);
+    const { autopilot, ship } = travel;
+    if (before === 'CRUISE' && autopilot.state === 'APPROACH') spawnedAt = ship.time;
+    if (before === 'DEPARTURE' && autopilot.state === 'CRUISE') endedAt = ship.time;
+    const encounter = autopilot.encounter;
+    if (encounter === null) continue;
+    expect(encounter.plan.radius).toBe(radius);
+    if (Number.isNaN(speedAtVisible) && autopilot.fade >= 0.1) speedAtVisible = ship.speed;
+    if (Number.isNaN(closestAt) && autopilot.remaining <= 0) {
+      closestAt = ship.time;
+      speedAtClosest = ship.speed;
+    }
+    const toPlanet = encounterOffset(encounter.plan, ship.position, rel);
+    const bearing = (Math.acos(Math.min(1, dot(toPlanet, encounter.plan.direction) / len(toPlanet))) * 180) / Math.PI;
+    if (Number.isNaN(at30) && bearing >= 30) at30 = ship.time;
+    if (Number.isNaN(at80) && bearing >= 80) at80 = ship.time;
+    if (!Number.isNaN(prevBearing)) peak = Math.max(peak, Math.abs(bearing - prevBearing) / dt);
+    prevBearing = bearing;
+  }
+  expect(endedAt).toBeGreaterThan(closestAt);
+  expect(at80).toBeGreaterThan(at30);
+  return {
+    peak,
+    sweep: at80 - at30,
+    approach: closestAt - spawnedAt,
+    duration: endedAt - spawnedAt,
+    speedAtVisible,
+    speedAtClosest,
+  };
+}
+
 describe('the travel step', () => {
   it('stepTravel is updateShip, then updateAutopilot, then feeds the ship params', () => {
     const params = engineParams(1, 3);
@@ -481,21 +558,34 @@ describe('the travel step', () => {
     expect(travel.autopilot.encounterCount).toBeGreaterThan(0);
   });
 
-  it('setCruiseSpeed scales the whole speed profile by the speed level instead of overriding it', () => {
+  it('setCruiseSpeed scales the whole speed profile for the encounter speed instead of overriding it', () => {
     const base = DEFAULT_AUTOPILOT_PARAMS;
     let floored = 0;
+    let outOfWarp = 0;
     for (const speed of SHIP_SPEED_LEVELS) {
       const params: AutopilotParams = { ...base };
       setCruiseSpeed(params, speed);
-      const factor = speed / base.cruiseSpeed;
+      // Encounters are flown from the cruise speed, or from the arrival speed above it.
+      const encounterSpeed = encounterCruiseSpeed(params);
+      expect(encounterSpeed).toBe(Math.min(speed, ENCOUNTER_ARRIVAL_SPEED));
+      const factor = encounterSpeed / base.cruiseSpeed;
       const scaledMin = DEFAULT_ENCOUNTER_PROFILE.minSpeed * factor;
       expect(params.cruiseSpeed).toBe(speed);
       // Distances, and so the fades and transitions, are unchanged.
       expect({ ...params.profile, minSpeed: 0 }).toEqual({ ...DEFAULT_ENCOUNTER_PROFILE, minSpeed: 0 });
-      if (scaledMin >= ENCOUNTER_MIN_SPEED_FLOOR) {
+      if (speed >= ENCOUNTER_ARRIVAL_SPEED) {
+        // At and above the arrival speed (the default level's), exactly the default level's profile.
+        if (speed > ENCOUNTER_ARRIVAL_SPEED) outOfWarp++;
+        expect(params.profile).toEqual(DEFAULT_ENCOUNTER_PROFILE);
+        for (const remaining of [2000, 900, 500, 100, 0, -30, -300, -900, -2000]) {
+          expect(encounterTargetSpeed(remaining, encounterSpeed, params.profile)).toBe(
+            encounterTargetSpeed(remaining, base.cruiseSpeed, base.profile),
+          );
+        }
+      } else if (scaledMin >= ENCOUNTER_MIN_SPEED_FLOOR) {
         expect(params.profile.minSpeed).toBeCloseTo(scaledMin, 12);
         for (const remaining of [2000, 900, 500, 100, 0, -30, -300, -900, -2000]) {
-          const scaled = encounterTargetSpeed(remaining, params.cruiseSpeed, params.profile);
+          const scaled = encounterTargetSpeed(remaining, encounterSpeed, params.profile);
           expect(scaled).toBeCloseTo(factor * encounterTargetSpeed(remaining, base.cruiseSpeed, base.profile), 9);
         }
       } else {
@@ -503,22 +593,24 @@ describe('the travel step', () => {
         floored++;
         expect(params.profile.minSpeed).toBe(Math.min(speed, ENCOUNTER_MIN_SPEED_FLOOR));
         for (const remaining of [2000, 900, 500, 100, 0, -30, -300, -900, -2000]) {
-          const target = encounterTargetSpeed(remaining, params.cruiseSpeed, params.profile);
+          const target = encounterTargetSpeed(remaining, encounterSpeed, params.profile);
           expect(target).toBeGreaterThanOrEqual(params.profile.minSpeed - 1e-9);
           expect(target).toBeLessThanOrEqual(speed + 1e-9);
         }
       }
     }
-    // The reduced-motion level is the floored one (6 × 20 / 60 = 2 would be below the floor).
+    // The reduced-motion level is the floored one (6 × 20 / 60 = 2 would be below the floor), and
+    // the top level is above the arrival speed.
     expect(floored).toBeGreaterThan(0);
+    expect(outOfWarp).toBeGreaterThan(0);
     // A cruise speed below the floor is never sped up by an encounter.
     const crawl: AutopilotParams = { ...base };
     setCruiseSpeed(crawl, ENCOUNTER_MIN_SPEED_FLOOR / 2);
     expect(crawl.profile.minSpeed).toBe(ENCOUNTER_MIN_SPEED_FLOOR / 2);
-    // Still slows right down around the planet at the top speed.
+    // At the top speed the planet is passed at the default level's minimum speed.
     const top: AutopilotParams = { ...base };
     setCruiseSpeed(top, SHIP_SPEED_LEVELS[SHIP_SPEED_LEVELS.length - 1]!);
-    expect(encounterTargetSpeed(0, top.cruiseSpeed, top.profile)).toBeLessThan(top.cruiseSpeed / 3);
+    expect(encounterTargetSpeed(0, encounterCruiseSpeed(top), top.profile)).toBe(ENCOUNTER_MIN_SPEED);
   });
 
   it.each([1 / 60, DT_CAP_SECONDS])(
@@ -563,57 +655,44 @@ describe('the travel step', () => {
     },
   );
 
-  it('at the default speed level a median planet sweeps past no faster in angle than before #36, and is reached within 1.5× the time', () => {
-    // Measured with this same simulation before #36, for that median planet (radius about 102, at
-    // D = 1600, minimum speed 15): the bearing peaked at 4.25°/s, 38.6 s after the spawn.
-    const BEFORE_PEAK_DEG_PER_S = 4.25;
-    const BEFORE_APPROACH_S = 38.6;
-    // Median radius of the seeded draw: gas with probability PLANET_GAS_SHARE, the radius uniform
-    // over the type's range. Found by bisection on the mixture's CDF.
-    const uniformCdf = ([min, max]: readonly [number, number], r: number) => Math.min(1, Math.max(0, (r - min) / (max - min)));
-    const cdf = (r: number) =>
-      (1 - PLANET_GAS_SHARE) * uniformCdf(PLANET_ROCKY_RANGES.radius, r) + PLANET_GAS_SHARE * uniformCdf(PLANET_GAS_RANGES.radius, r);
-    let low = Math.min(PLANET_ROCKY_RANGES.radius[0], PLANET_GAS_RANGES.radius[0]);
-    let high = Math.max(PLANET_ROCKY_RANGES.radius[1], PLANET_GAS_RANGES.radius[1]);
-    for (let i = 0; i < 60; i++) {
-      const mid = (low + high) / 2;
-      if (cdf(mid) < 0.5) low = mid;
-      else high = mid;
-    }
-    const radius = (low + high) / 2;
+  // Measured with this same simulation before #36, for that median planet (radius about 102, at
+  // D = 1600, minimum speed 15) at the default speed level: the bearing peaked at 4.25°/s, 38.6 s
+  // after the spawn.
+  const BEFORE_PEAK_DEG_PER_S = 4.25;
+  const BEFORE_APPROACH_S = 38.6;
+  const fasterLevels = SHIP_SPEED_LEVELS.map((cruiseSpeed, level) => ({ level, cruiseSpeed })).filter(
+    ({ level }) => level >= SHIP_DEFAULT_SPEED_LEVEL,
+  );
 
-    const params: AutopilotParams = { ...DEFAULT_AUTOPILOT_PARAMS, interval: 2, nebulaShare: 0, planetFor: () => ({ radius }) };
-    setCruiseSpeed(params, SHIP_SPEED_LEVELS[SHIP_DEFAULT_SPEED_LEVEL]!);
-    const travel = createTravel(params, DEFAULT_SHIP_PARAMS);
-    const dt = 1 / 60;
-    const rel = { x: 0, y: 0, z: 0 };
-    let spawnedAt = Number.NaN;
-    let closestAt = Number.NaN;
-    let endedAt = Number.NaN;
-    let prevBearing = Number.NaN;
-    let peak = 0;
-    for (let i = 0; i < 1e6 && Number.isNaN(endedAt); i++) {
-      const before = travel.autopilot.state;
-      stepTravel(travel, dt);
-      const { autopilot, ship } = travel;
-      if (before === 'CRUISE' && autopilot.state === 'APPROACH') spawnedAt = ship.time;
-      if (before === 'DEPARTURE' && autopilot.state === 'CRUISE') endedAt = ship.time;
-      const encounter = autopilot.encounter;
-      if (encounter === null) continue;
-      expect(encounter.plan.radius).toBe(radius);
-      if (Number.isNaN(closestAt) && autopilot.remaining <= 0) closestAt = ship.time;
-      // Bearing: the angle between the planned path and the line of sight to the planet centre.
-      const toPlanet = encounterOffset(encounter.plan, ship.position, rel);
-      const bearing = (Math.acos(Math.min(1, dot(toPlanet, encounter.plan.direction) / len(toPlanet))) * 180) / Math.PI;
-      if (!Number.isNaN(prevBearing)) peak = Math.max(peak, Math.abs(bearing - prevBearing) / dt);
-      prevBearing = bearing;
-    }
-    expect(endedAt).toBeGreaterThan(closestAt);
-    // The closest approach is 0.4× as far as before, so the ship passes it 0.4× as fast: about 4.4°/s.
-    expect(peak).toBeGreaterThan(BEFORE_PEAK_DEG_PER_S * 0.8);
-    expect(peak).toBeLessThanOrEqual(BEFORE_PEAK_DEG_PER_S * 1.2);
-    // About 54 s.
-    expect(closestAt - spawnedAt).toBeLessThanOrEqual(BEFORE_APPROACH_S * 1.5);
+  it.each(fasterLevels)(
+    'at speed level $level ($cruiseSpeed u/s) a median planet sweeps past no faster in angle than before #36, and is reached within 1.5× the time',
+    ({ level }) => {
+      const flyby = medianPlanetFlyby(level);
+      // The closest approach is 0.4× as far as before, so the ship passes it 0.4× as fast: about
+      // 4.4°/s. Faster levels drop out of warp first, so they fly the same flyby.
+      expect(flyby.peak).toBeGreaterThan(BEFORE_PEAK_DEG_PER_S * 0.8);
+      expect(flyby.peak).toBeLessThanOrEqual(BEFORE_PEAK_DEG_PER_S * 1.2);
+      // About 54 s.
+      expect(flyby.approach).toBeLessThanOrEqual(BEFORE_APPROACH_S * 1.5);
+      // Out of warp before the planet is noticeably visible, and past it at near the minimum speed
+      // (the ship lags the profile by about its time constant).
+      expect(flyby.speedAtVisible).toBeLessThanOrEqual(ENCOUNTER_ARRIVAL_SPEED + 0.5);
+      expect(flyby.speedAtClosest).toBeGreaterThanOrEqual(ENCOUNTER_MIN_SPEED);
+      expect(flyby.speedAtClosest).toBeLessThan(ENCOUNTER_MIN_SPEED * 1.5);
+    },
+  );
+
+  it("at the top speed level a median planet's flyby matches the default level's: peak bearing rate within ±20%, the same sweep and approach time", () => {
+    const top = medianPlanetFlyby(SHIP_SPEED_LEVELS.length - 1);
+    const normal = medianPlanetFlyby(SHIP_DEFAULT_SPEED_LEVEL);
+    // Before the drop out of warp the top level peaked at about 37°/s (8.4× the default level),
+    // swept from 30° to 80° in 1.7 s and reached the planet 17 s after the spawn.
+    expect(Math.abs(top.peak - normal.peak)).toBeLessThanOrEqual(0.2 * normal.peak);
+    // The same within a few frames: from the spawn on the profile is the same, and the ship has
+    // settled to the arrival speed by the time the planet is noticeably visible.
+    expect(Math.abs(top.sweep - normal.sweep)).toBeLessThanOrEqual(0.1);
+    expect(Math.abs(top.approach - normal.approach)).toBeLessThanOrEqual(0.5);
+    expect(Math.abs(top.duration - normal.duration)).toBeLessThanOrEqual(0.5);
   });
 
   it.each([1 / 60, 1 / 120])(
@@ -646,24 +725,30 @@ describe('the travel step', () => {
       step(0);
       expect(JSON.parse(JSON.stringify({ ship: travel.ship, autopilot: travel.autopilot }))).toEqual(frozen);
 
-      // ArrowUp: one speed level up, mid-encounter.
+      // ArrowUp: one speed level up, mid-encounter. The encounter is already flown from the arrival
+      // speed (the default level's), so its target speed stays as it was.
       const remainingBefore = travel.autopilot.remaining;
       setCruiseSpeed(travel.autopilotParams, SHIP_SPEED_LEVELS[SHIP_DEFAULT_SPEED_LEVEL + 1]!);
       step(0);
       expect(travel.autopilot.state).toBe('APPROACH');
       expect(travel.autopilot.remaining).toBe(remainingBefore);
-      expect(travel.shipParams.targetSpeed).toBeCloseTo(
-        encounterTargetSpeed(remainingBefore, travel.autopilotParams.cruiseSpeed, travel.autopilotParams.profile),
-        12,
+      expect(travel.shipParams.targetSpeed).toBe(
+        encounterTargetSpeed(remainingBefore, encounterCruiseSpeed(travel.autopilotParams), travel.autopilotParams.profile),
       );
-      expect(travel.shipParams.targetSpeed).toBeGreaterThan(frozen.autopilot.targetSpeed);
+      expect(travel.shipParams.targetSpeed).toBe(frozen.autopilot.targetSpeed);
 
       // (Read through a function: TypeScript would otherwise keep the narrowing from the loop above.)
       const state = (): TravelState => travel.autopilot.state;
       while (state() !== 'CRUISE') step(dt);
       expect(states).toEqual(['CRUISE', ...CYCLE]);
+      // Then, given a cruise long enough for it (this one's interval is 2 s), back into warp at the
+      // new level.
+      travel.autopilotParams.interval = 60;
+      const endedAt = travel.ship.time;
+      while (travel.ship.time < endedAt + ENCOUNTER_WARP_ENTRY_SECONDS + SHIP_SPEED_TAU_SECONDS) step(dt);
+      expect(states).toEqual(['CRUISE', ...CYCLE]);
       expect(worstJump).toBeLessThan(1e-9);
-      expect(travel.ship.speed).toBeGreaterThan(SHIP_SPEED_LEVELS[SHIP_DEFAULT_SPEED_LEVEL]!);
+      expect(travel.ship.speed).toBeGreaterThan(SHIP_SPEED_LEVELS[SHIP_DEFAULT_SPEED_LEVEL]! * 2);
     },
   );
 });
