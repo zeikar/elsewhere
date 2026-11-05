@@ -301,8 +301,10 @@ export const ENCOUNTER_MIN_SPEED = 6;
  * Lowest planet minimum speed (units per second) at any speed level. `setCruiseSpeed` scales
  * ENCOUNTER_MIN_SPEED with the cruise speed, which would make it 2 at the slowest level (the
  * reduced-motion start): one encounter would take about 350 s, about 69 s of it in FLYBY. With this
- * floor it takes about 285 s, about 44 s in FLYBY, and a median planet peaks at about 2.8°/s, as it
- * did before the planets were made smaller. Nebulae have their own floor (NEBULA_MIN_SPEED_FLOOR).
+ * floor it took about 285 s, about 44 s in FLYBY, and a median planet peaks at about 2.8°/s, as it
+ * did before the planets were made smaller; ending once the planet is out of view (see
+ * VIEW_WIDEST_ASPECT) brings it down to about 153 s. Nebulae have their own floor
+ * (NEBULA_MIN_SPEED_FLOOR).
  */
 export const ENCOUNTER_MIN_SPEED_FLOOR = 4;
 export const ENCOUNTER_SLOWDOWN_DISTANCE = 520;
@@ -314,8 +316,11 @@ export const ENCOUNTER_SPEEDUP_DISTANCE = 800;
  * up from 0 to 1 over ENCOUNTER_FADE_IN_DISTANCE. The planet's size does not change (its spawn scale
  * is 1, as for nebulae), so it starts as a distant dot because it is far away, and grows on screen by
  * perspective alone. After passing, opacity eases back down to 0 over ENCOUNTER_FADE_OUT_DISTANCE,
- * reaching 0 at ENCOUNTER_DESPAWN_DISTANCE past the closest approach. The fade distances are long
- * enough that at the top cruise speed one capped frame changes opacity by less than 2%.
+ * reaching 0 at ENCOUNTER_DESPAWN_DISTANCE past the closest approach, where DEPARTURE ends at the
+ * latest; in practice a planet encounter ends once the planet is out of view (VIEW_WIDEST_ASPECT),
+ * shortly after the closest approach, and the planet is removed unseen before it fades. The fade
+ * distances are long enough that at the top cruise speed one capped frame changes opacity by less
+ * than 2%.
  */
 export const ENCOUNTER_FADE_IN_DISTANCE = 1200;
 export const ENCOUNTER_FADE_OUT_DISTANCE = 1200;
@@ -457,7 +462,8 @@ export const NEBULA_SIDE_OFFSET_FACTOR = 1.7;
  * the wisps keep streaming past while the ship drifts through them. Like a planet encounter, a nebula
  * encounter is flown from the arrival speed at the faster levels (ENCOUNTER_ARRIVAL_SPEED), so at the
  * default level and the top level alike it slows to this minimum speed of 24, and a median nebula
- * encounter lasts about 88 s from its spawn to its end.
+ * encounter lasts about 79 s from its spawn to its end, once every layer is behind the camera (see
+ * VIEW_WIDEST_ASPECT; about 88 s when it ran on to the despawn distance).
  */
 export const NEBULA_MIN_SPEED = 24;
 /** Lowest nebula minimum speed at any speed level (see ENCOUNTER_MIN_SPEED_FLOOR). */
@@ -468,8 +474,9 @@ export const NEBULA_SPEEDUP_DISTANCE = 600;
 
 /**
  * Nebula fade (see the planet one above). Like a planet, a nebula keeps its size (its spawn scale is
- * 1): it is far beyond the star cube when it spawns and fades in from opacity 0. It ends shortly after
- * every layer is behind the camera.
+ * 1): it is far beyond the star cube when it spawns and fades in from opacity 0. The despawn distance
+ * is shortly after every layer is behind the camera; the encounter ends sooner, as soon as every
+ * layer is (see VIEW_WIDEST_ASPECT).
  */
 export const NEBULA_FADE_IN_DISTANCE = 1400;
 export const NEBULA_FADE_OUT_DISTANCE = 700;

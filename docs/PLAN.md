@@ -126,7 +126,7 @@ Travelling forward forever makes positions grow until float32 precision on the G
 - Start with sphere geometry and procedural colour and surface patterns, with basic lighting, shading and optional atmospheric glow.
 - **Plan the path first, then place the planet beside it.** When an encounter starts, put the planet at distance `D` ahead along the current heading, offset sideways by `radius × k`. The closest approach is fixed from the start, so the camera can't pass through it and no collision-avoidance logic is needed.
 - Deceleration depends on the remaining distance to the planet; the ship speeds up again after passing.
-- A planet starts as a dot far away and grows gradually, and fades out gradually as it recedes.
+- A planet starts as a dot far away and grows gradually, and fades out gradually as it recedes (from Phase 4 it is removed once out of view, before any of that fade-out shows).
 - Its appearance seed is `hash(base seed, encounter index)`. The base seed is the trip seed: random on each load, or replayed from `?seed=<8 hex digits>`, and shown in the URL after load. The first encounter of every trip is a planet.
 
 ### Nebulae (Phase 3)
@@ -138,6 +138,7 @@ Travelling forward forever makes positions grow until float32 precision on the G
 
 - **Trip seed:** Each load picks a random base seed unless the URL already carries one, and writes the seed in use to the URL, so a trip can be shared and replayed. Encounter seeds stay `hash(base seed, encounter index)`.
 - **New encounters:** Ringed planets, icy dwarfs, asteroids and comets follow the planet rule: the path is planned first and the object is placed beside it, so the closest approach is fixed and the camera never passes through a solid part (planet, ring, asteroid or comet nucleus). A comet's tail may reach the camera, but it must never cover the view so that the scene is hidden; check its screen coverage at the closest approach.
+- **Speed driven by visibility:** After the closest approach, the encounter ends as soon as its object is out of view, and the ship eases back into warp from the speed the encounter ended at. Out of view is a pure function of the simulation state and the fixed vertical field of view: the object lies wholly outside the cone that holds the view at the widest supported aspect ratio, 21:9. A planet is out of view once a sphere holding everything drawn for it is outside that cone; a nebula, whose layers reach across the path, once every layer is behind the camera. While the object is in view the speed profile is unchanged. The encounter interval still counts the cruise from the end of each encounter.
 - **Distant galaxies:** Part of the far layer, not encounters. They are fixed, seeded directions turned by the camera's rotation only, drawn with the far stars and never writing depth, so they never move with travel and never hide anything.
 
 ### Performance
