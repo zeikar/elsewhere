@@ -49,7 +49,7 @@ Each automated check is written as `file` — `test title`, using the title as i
 - `src/engine/encounter.test.ts` — `a ship flying the straight path never gets closer than radius × k`
 - `src/engine/Autopilot.test.ts` — `keeps clear of the planet, never jumps and turns smoothly (radius $radius, cruise $cruiseSpeed)`
 - `src/engine/Autopilot.test.ts` — `%s: clearance ≥ radius × (1 + margin) and no frame jumps`
-- `src/engine/Autopilot.test.ts` — `the drop out of warp and the return to it are smooth: no step in the target speed or the speed at any frame (dt %f)`
+- `src/engine/Autopilot.test.ts` — `the drop out of warp and the return to it are smooth around $kind encounters: no step in the target speed or the speed at any frame (dt $dt)`
 - `src/engine/Planet.test.ts` — `the atmosphere shell stays inside the guaranteed clearance, so the camera never enters it`
 - `src/engine/EncounterView.test.ts` — `at the reduced-motion level the floored minimum speed keeps the clearance and gradual fades (dt = %f)`
 - `e2e/encounter.spec.ts` — `three encounters run CRUISE → APPROACH → FLYBY → DEPARTURE → CRUISE and free their GPU resources`
