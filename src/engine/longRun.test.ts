@@ -1,7 +1,8 @@
 // Long-run stability at the simulation level (docs/PLAN.md sections 5, 6 Performance and 9 Phase 3):
 // 100 accelerated encounters through the engine's own frame sequence (stepTravel, then the
 // encounter view's sync and place) leave every encounter resource freed, with the scene and the
-// shared geometries back at their baseline after each one.
+// shared geometries back at their baseline after each one. Asteroids (Phase 4) own their rocks'
+// geometries, so those are checked to be freed too, over a long run of asteroids alone.
 import { Scene, type BufferGeometry, type Material, type Object3D } from 'three';
 import { afterEach, describe, expect, it } from 'vitest';
 import { DT_CAP_SECONDS, SHIP_SPEED_LEVELS } from '../config';
@@ -15,9 +16,10 @@ import {
   type EncounterKind,
   type Travel,
 } from './Autopilot';
+import { asteroidParams } from './Asteroid';
 import { EncounterView } from './EncounterView';
 import { disposeNebulaGeometry, nebulaGeometryRefs, nebulaParams } from './Nebula';
-import { disposePlanetGeometry, planetGeometryRefs, planetParams } from './Planet';
+import { disposePlanetGeometry, planetGeometryRefs, planetParams, planetProgramMaterials } from './Planet';
 import { mulberry32 } from './seed';
 import { DEFAULT_SHIP_PARAMS } from './Ship';
 
@@ -26,16 +28,24 @@ afterEach(() => {
   disposeNebulaGeometry();
 });
 
-/** Engine-like params: seeded planets and nebulae in the default mix, a short interval, top speed. */
-function longRunParams(interval: number): AutopilotParams {
+/** Engine-like params: seeded planets, nebulae and asteroids in the default mix (or `overrides`), a short interval, top speed. */
+function longRunParams(interval: number, overrides: Partial<AutopilotParams> = {}): AutopilotParams {
   const params: AutopilotParams = {
     ...DEFAULT_AUTOPILOT_PARAMS,
     interval,
     planetFor: planetParams,
     nebulaFor: nebulaParams,
+    asteroidFor: asteroidParams,
+    ...overrides,
   };
   setCruiseSpeed(params, SHIP_SPEED_LEVELS[SHIP_SPEED_LEVELS.length - 1]!);
   return params;
+}
+
+/** What a material's shader program is keyed on, as far as these materials differ: its sources and defines. */
+function programKey(material: Material): string {
+  const s = material as Material & { vertexShader?: string; fragmentShader?: string; defines?: object };
+  return `${s.vertexShader}\n${s.fragmentShader}\n${JSON.stringify(s.defines ?? {})}`;
 }
 
 /**
@@ -47,12 +57,14 @@ class ResourceLedger {
   readonly materials = new Set<Material>();
   /** Distinct shader sources among live materials (what `renderer.info.programs` would hold). */
   programs(): number {
+    return this.programKeys().size;
+  }
+
+  /** The program key (shader sources and defines) of every live material. */
+  programKeys(): Set<string> {
     const keys = new Set<string>();
-    for (const m of this.materials) {
-      const s = m as Material & { vertexShader?: string; fragmentShader?: string; defines?: object };
-      keys.add(`${s.vertexShader}\n${s.fragmentShader}\n${JSON.stringify(s.defines ?? {})}`);
-    }
-    return keys.size;
+    for (const m of this.materials) keys.add(programKey(m));
+    return keys;
   }
 
   track(root: Object3D): void {
@@ -81,8 +93,13 @@ interface LongRunResult {
   leaks: string[];
   /** Largest per-frame step beyond what the ship's speed allows (≤ 0 is fine). */
   worstJump: number;
-  /** Peak live resources during an encounter. */
-  peak: { geometries: number; materials: number; programs: number };
+  /** Peak live resources during an encounter, by kind. */
+  peak: Record<EncounterKind, { geometries: number; materials: number; programs: number }>;
+  /** Asteroid encounters that were a field of several rocks, and the most rocks in one. */
+  fields: number;
+  mostRocks: number;
+  /** The program keys asteroid rocks drew with. */
+  asteroidPrograms: Set<string>;
   frames: number;
 }
 
@@ -92,11 +109,18 @@ function runEncounters(travel: Travel, count: number, dt: (frame: number) => num
   const view = new EncounterView(scene);
   const ledger = new ResourceLedger();
   const result: LongRunResult = {
-    kinds: { planet: 0, nebula: 0 },
+    kinds: { planet: 0, nebula: 0, asteroid: 0 },
     ringed: 0,
     leaks: [],
     worstJump: Number.NEGATIVE_INFINITY,
-    peak: { geometries: 0, materials: 0, programs: 0 },
+    peak: {
+      planet: { geometries: 0, materials: 0, programs: 0 },
+      nebula: { geometries: 0, materials: 0, programs: 0 },
+      asteroid: { geometries: 0, materials: 0, programs: 0 },
+    },
+    fields: 0,
+    mostRocks: 0,
+    asteroidPrograms: new Set(),
     frames: 0,
   };
   let tracked: object | null = null;
@@ -124,11 +148,21 @@ function runEncounters(travel: Travel, count: number, dt: (frame: number) => num
     if (current !== null && current !== tracked) {
       tracked = current;
       ledger.track(current.object);
-      result.kinds[travel.autopilot.encounter!.kind]++;
+      const kind = travel.autopilot.encounter!.kind;
+      result.kinds[kind]++;
       if (view.getPlanet()?.ring) result.ringed++;
-      result.peak.geometries = Math.max(result.peak.geometries, ledger.geometries.size);
-      result.peak.materials = Math.max(result.peak.materials, ledger.materials.size);
-      result.peak.programs = Math.max(result.peak.programs, ledger.programs());
+      const asteroid = view.getAsteroid();
+      if (asteroid !== null) {
+        if (asteroid.rocks.length > 1) result.fields++;
+        result.mostRocks = Math.max(result.mostRocks, asteroid.rocks.length);
+        // One geometry and one material per rock.
+        if (ledger.geometries.size !== asteroid.rocks.length) result.leaks.push(`asteroid with ${asteroid.rocks.length} rocks holds ${ledger.geometries.size} geometries`);
+        for (const key of ledger.programKeys()) result.asteroidPrograms.add(key);
+      }
+      const peak = result.peak[kind];
+      peak.geometries = Math.max(peak.geometries, ledger.geometries.size);
+      peak.materials = Math.max(peak.materials, ledger.materials.size);
+      peak.programs = Math.max(peak.programs, ledger.programs());
     }
 
     const next = travel.autopilot.state;
@@ -168,7 +202,7 @@ describe('long run (simulation level)', () => {
     expect(ledger.materials.size).toBe(0);
   });
 
-  it('100 accelerated encounters, planets and nebulae, each return every resource to baseline', () => {
+  it('100 accelerated encounters, planets, nebulae and asteroids, each return every resource to baseline', () => {
     // Top speed, a 1 s interval and the capped 0.1 s step: the fastest the engine can run them.
     const travel = createTravel(longRunParams(1), DEFAULT_SHIP_PARAMS);
     const result = runEncounters(travel, 100, () => DT_CAP_SECONDS);
@@ -176,16 +210,27 @@ describe('long run (simulation level)', () => {
     expect(travel.autopilot.encounterCount).toBe(100);
     expect(travel.autopilot.state).toBe('CRUISE');
     expect(result.leaks).toEqual([]);
-    // The default mix: both kinds, many times.
-    expect(result.kinds.planet + result.kinds.nebula).toBe(100);
+    // The default mix: every kind, many times.
+    expect(result.kinds.planet + result.kinds.nebula + result.kinds.asteroid).toBe(100);
     expect(result.kinds.planet).toBeGreaterThan(30);
     expect(result.kinds.nebula).toBeGreaterThan(20);
-    // An encounter holds one shared geometry (a ringed planet its own ring geometry too) and a
+    expect(result.kinds.asteroid).toBeGreaterThan(5);
+    // A planet encounter holds one shared geometry (a ringed planet its own ring geometry too) and a
     // handful of materials, never more. A ring draws with the atmosphere's (halo) program.
     expect(result.ringed).toBeGreaterThan(0);
-    expect(result.peak.geometries).toBe(2);
-    expect(result.peak.materials).toBeLessThanOrEqual(8);
-    expect(result.peak.programs).toBeLessThanOrEqual(2);
+    expect(result.peak.planet.geometries).toBe(2);
+    expect(result.peak.planet.materials).toBeLessThanOrEqual(3);
+    expect(result.peak.planet.programs).toBeLessThanOrEqual(2);
+    // A nebula: the shared plane, one material per layer, one program.
+    expect(result.peak.nebula.geometries).toBe(1);
+    expect(result.peak.nebula.materials).toBeLessThanOrEqual(8);
+    expect(result.peak.nebula.programs).toBe(1);
+    // An asteroid: a geometry and a material per rock (at most 7) and one program, the rocky
+    // planet surface's (config.ts, ASTEROID_DETAIL).
+    expect(result.peak.asteroid.geometries).toBeLessThanOrEqual(7);
+    expect(result.peak.asteroid.materials).toBeLessThanOrEqual(7);
+    expect(result.peak.asteroid.programs).toBe(1);
+    expect(result.asteroidPrograms).toEqual(new Set([programKey(planetProgramMaterials()[0]!)]));
     // No frame moves the ship further than its speed allows.
     expect(result.worstJump).toBeLessThanOrEqual(1e-6);
     // Positions stay finite (float64 on the CPU) after the long run.
@@ -193,6 +238,22 @@ describe('long run (simulation level)', () => {
     for (const v of [position.x, position.y, position.z, heading.x, heading.y, heading.z]) expect(Number.isFinite(v)).toBe(true);
     expect(Math.hypot(heading.x, heading.y, heading.z)).toBeCloseTo(1, 12);
   });
+
+  it('120 accelerated asteroid encounters, fields of up to 7 rocks among them, each free every rock geometry and material', () => {
+    const travel = createTravel(longRunParams(1, { nebulaShare: 0, asteroidShare: 1 }), DEFAULT_SHIP_PARAMS);
+    const result = runEncounters(travel, 120, () => DT_CAP_SECONDS);
+    expect(travel.autopilot.encounterCount).toBe(120);
+    expect(result.kinds).toEqual({ planet: 0, nebula: 0, asteroid: 120 });
+    // Nothing left after any of them (no growth over the run), with every encounter's rocks counted.
+    expect(result.leaks).toEqual([]);
+    expect(result.fields).toBeGreaterThan(30);
+    expect(result.fields).toBeLessThan(90);
+    expect(result.mostRocks).toBe(7);
+    expect(result.peak.asteroid.geometries).toBe(7);
+    expect(result.peak.asteroid.materials).toBe(7);
+    expect(result.peak.asteroid.programs).toBe(1);
+    expect(result.worstJump).toBeLessThanOrEqual(1e-6);
+  }, 60_000);
 
   it('irregular frame times (seeded, 0 to beyond the cap) change nothing about the cleanup', () => {
     const travel = createTravel(longRunParams(2), DEFAULT_SHIP_PARAMS);

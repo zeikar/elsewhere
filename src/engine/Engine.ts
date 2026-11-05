@@ -7,10 +7,10 @@
  *
  * Each frame runs one simulation step (`stepTravel`: the ship, then the Autopilot, which sets the
  * ship's target speed and drift rate), then the encounter view creates or disposes the encounter
- * object, a planet or a nebula (compiling its shaders with `renderer.compileAsync` before it is first
- * drawn), and the render places it relative to the ship. The encounter shader programs themselves
- * are compiled once at construction and kept for the whole run (`ProgramWarmup`), so encounters
- * reuse them instead of compiling their own. The two star layers keep running underneath: the far
+ * object, a planet, a nebula or an asteroid (compiling its shaders with `renderer.compileAsync`
+ * before it is first drawn), and the render places it relative to the ship. The encounter shader
+ * programs themselves are compiled once at construction and kept for the whole run
+ * (`ProgramWarmup`), so encounters reuse them instead of compiling their own. The two star layers keep running underneath: the far
  * stars (FarStarfield), which turn with the camera only, and the near starfield (Starfield), which
  * streams past with the ship's travel. The trip's distant galaxies (Galaxies, from the trip seed)
  * belong to the far layer and turn with the camera only, like the far stars.
@@ -44,6 +44,7 @@ import {
   type EncounterKind,
   type Travel,
 } from './Autopilot';
+import { asteroidParams, prepareAsteroids, type Asteroid } from './Asteroid';
 import { EncounterView } from './EncounterView';
 import { FarStarfield } from './FarStarfield';
 import { FrameClock } from './FrameClock';
@@ -69,7 +70,7 @@ export interface EngineOptions {
   streakTime?: number;
   /** Encounter interval: seconds of cruise before each encounter. Default: ENCOUNTER_INTERVAL_SECONDS. */
   encounterInterval?: number;
-  /** Makes every encounter this kind (the seeded mix of planets and nebulae otherwise). */
+  /** Makes every encounter this kind (the seeded mix of planets, nebulae and asteroids otherwise). */
   encounterKind?: EncounterKind;
   /**
    * Arrival speed, in units per second: encounters are flown from min(cruise speed, this). Default:
@@ -153,7 +154,9 @@ export class Engine {
         options.arrivalSpeed !== undefined && options.arrivalSpeed > 0 ? options.arrivalSpeed : DEFAULT_AUTOPILOT_PARAMS.arrivalSpeed,
       planetFor: planetParams,
       nebulaFor: nebulaParams,
+      asteroidFor: asteroidParams,
       nebulaShare: kind === undefined ? DEFAULT_AUTOPILOT_PARAMS.nebulaShare : kind === 'nebula' ? 1 : 0,
+      asteroidShare: kind === undefined ? DEFAULT_AUTOPILOT_PARAMS.asteroidShare : kind === 'asteroid' ? 1 : 0,
     };
     setCruiseSpeed(autopilotParams, SHIP_SPEED_LEVELS[this.speedLevel] ?? 0);
     const shipParams =
@@ -165,8 +168,11 @@ export class Engine {
       this.renderer.compileAsync(object, this.camera, this.scene),
     );
     // Compile the planet and nebula programs once, now, and keep them, so no encounter compiles any.
+    // Asteroid rocks draw with the rocky planet surface program, so they need no holder of their own;
+    // their CPU-side building blocks are made now too, so the first asteroid's frame does not.
     this.programWarmup = new ProgramWarmup([...planetProgramMaterials(), ...nebulaProgramMaterials()]);
     void this.programWarmup.compile(this.renderer, this.camera, this.scene);
+    prepareAsteroids();
     this.applyHeading();
   }
 
@@ -293,7 +299,7 @@ export class Engine {
     return this.clock.lastIntervalMs;
   }
 
-  /** Whether the current encounter object, planet or nebula, is drawn; false with none. */
+  /** Whether the current encounter object, planet, nebula or asteroid, is drawn; false with none. */
   isEncounterVisible(): boolean {
     return this.encounterView.getObject()?.object.visible ?? false;
   }
@@ -333,7 +339,12 @@ export class Engine {
     return this.encounterView.getNebula();
   }
 
-  /** Number of objects in the scene besides the star layers and galaxies: the encounter objects (planets or nebulae). */
+  /** The current encounter's asteroid, or `null` outside asteroid encounters (read-only view; do not modify). */
+  getAsteroid(): Asteroid | null {
+    return this.encounterView.getAsteroid();
+  }
+
+  /** Number of objects in the scene besides the star layers and galaxies: the encounter objects (planets, nebulae or asteroids). */
   getPlanetCount(): number {
     let count = 0;
     for (const child of this.scene.children) {

@@ -152,7 +152,7 @@ export interface EncounterProfile {
   speedupDistance: number;
   /** Distance after spawning over which opacity (and, below 1, the size scale) eases up. */
   fadeInDistance: number;
-  /** Size scale at spawn. 1 for both planets and nebulae: they keep their world size throughout. */
+  /** Size scale at spawn. 1 for planets, nebulae and asteroids: they keep their world size throughout. */
   spawnScale: number;
   /** Distance before despawning over which opacity eases down. */
   fadeOutDistance: number;
@@ -263,7 +263,7 @@ export function encounterOpacity(
 /**
  * Size scale in [spawnScale, 1] at `remaining` distance: `spawnScale` at the encounter's spawn
  * distance, easing up to 1 over `fadeInDistance` and staying 1 after that. Both default profiles
- * (planets and nebulae) have a spawn scale of 1, so it is 1 throughout: the object keeps its world
+ * (planets, nebulae and asteroids) have a spawn scale of 1, so it is 1 throughout: the object keeps its world
  * size and only its opacity fades.
  */
 export function encounterScale(

@@ -1,7 +1,8 @@
 /**
  * Planets (docs/PLAN.md section 6, Planets (Phase 2), Variety (Phase 4) and Performance): seeded
  * rocky planets, icy dwarfs and gas giants with procedural surfaces, basic lighting, an additive
- * atmospheric rim glow, and for some a ring system.
+ * atmospheric rim glow, and for some a ring system. Asteroid rocks (Asteroid.ts) are shaded with the
+ * rocky surface program too (`rockySurfaceMaterial`).
  *
  * - `planetParams(seed)` is pure: it derives the type, radius, palette, noise or band parameters,
  *   rotation and atmosphere from an encounter's appearance seed (`hash(baseSeed, encounterIndex)`),
@@ -385,8 +386,11 @@ function clamp01(x: number): number {
   return Math.min(1, Math.max(0, x));
 }
 
-/** The family palette with a small seeded tint and brightness shift, so no two planets match exactly. */
-function jitterPalette(palette: Hex4, random: () => number): [Rgb, Rgb, Rgb, Rgb] {
+/**
+ * The family palette with a small seeded tint and brightness shift, so no two planets match exactly.
+ * Asteroids (Asteroid.ts) tint their palettes the same way.
+ */
+export function jitterPalette(palette: Hex4, random: () => number): [Rgb, Rgb, Rgb, Rgb] {
   const t = 2 * PLANET_PALETTE_TINT;
   const tint = [1 + (random() - 0.5) * t, 1 + (random() - 0.5) * t, 1 + (random() - 0.5) * t];
   const brightness = 0.92 + random() * 0.16;
@@ -1203,6 +1207,15 @@ function createRingMaterial(uniforms: Uniforms): ShaderMaterial {
     depthTest: true,
     depthWrite: true,
   });
+}
+
+/**
+ * A rocky surface material with `uniforms`: exactly the rocky planets' surface material, so it draws
+ * with their shader program. Asteroid rocks (Asteroid.ts) use it, so they add no program; `uniforms`
+ * must hold everything the rocky surface shader reads (see `Planet`'s constructor).
+ */
+export function rockySurfaceMaterial(uniforms: Uniforms): ShaderMaterial {
+  return createSurfaceMaterial('rocky', uniforms);
 }
 
 /**

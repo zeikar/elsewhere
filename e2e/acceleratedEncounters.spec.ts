@@ -110,8 +110,9 @@ test('ten encounters, accelerated with a fake clock, leave the GPU resources at 
     description: JSON.stringify({ wallSeconds: (Date.now() - startedAt) / 1000, kinds: log.kinds, baseline: log.baseline }),
   });
 
-  // Both kinds, the default seeded mix (with the test default trip seed that appUrl pins).
-  expect(new Set(log.kinds)).toEqual(new Set(['planet', 'nebula']));
+  // Every kind, the default seeded mix (with the test default trip seed that appUrl pins: its fifth
+  // encounter is an asteroid).
+  expect(new Set(log.kinds)).toEqual(new Set(['planet', 'nebula', 'asteroid']));
   // After every encounter the geometries, textures and programs are back at the pre-encounter
   // baseline, with no encounter object left in the scene.
   expect(log.baseline.geometries).toBeGreaterThan(0);
