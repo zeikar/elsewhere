@@ -24,9 +24,11 @@ import {
   encounterCruiseSpeed,
   encounterProfile,
   encounterSchedule,
+  encounterViewMargin,
   setCruiseSpeed,
   stepTravel,
   updateAutopilot,
+  warpEntryDuration,
   type AutopilotParams,
   type TravelState,
   type Travel,
@@ -627,14 +629,20 @@ describe('the travel step', () => {
       let startedAt = Number.NaN;
       let endedAt = Number.NaN;
       let prevFade = travel.autopilot.fade;
+      let endedOutOfView = false;
       for (let i = 0; i < 1e6 && Number.isNaN(endedAt); i++) {
         const before = travel.autopilot.state;
+        const prevEncounter = travel.autopilot.encounter;
         stepTravel(travel, dt);
         const { autopilot, ship } = travel;
-        worstFadeStep = Math.max(worstFadeStep, Math.abs(autopilot.fade - prevFade));
-        prevFade = autopilot.fade;
         if (before === 'CRUISE' && autopilot.state === 'APPROACH') startedAt = ship.time;
-        if (before === 'DEPARTURE' && autopilot.state === 'CRUISE') endedAt = ship.time;
+        if (before === 'DEPARTURE' && autopilot.state === 'CRUISE') {
+          endedAt = ship.time;
+          endedOutOfView = encounterViewMargin(prevEncounter!, ship, params.viewHalfAngle) > 0;
+        }
+        // The planet is removed once out of view, at whatever fade it has, which no one sees.
+        if (!endedOutOfView) worstFadeStep = Math.max(worstFadeStep, Math.abs(autopilot.fade - prevFade));
+        prevFade = autopilot.fade;
         const encounter = autopilot.encounter;
         if (encounter === null) continue;
         radius = encounter.plan.radius;
@@ -642,16 +650,18 @@ describe('the travel step', () => {
         if (autopilot.state === 'FLYBY') slowest = Math.min(slowest, autopilot.targetSpeed);
       }
       expect(endedAt).toBeGreaterThan(startedAt);
+      expect(endedOutOfView).toBe(true);
       // Clear of the planet, at its planned closest approach.
       expect(minClearance).toBeGreaterThanOrEqual(radius * (1 + ENCOUNTER_CLEARANCE_MARGIN));
       expect(minClearance).toBeCloseTo(radius * ENCOUNTER_SIDE_OFFSET_FACTOR, 0);
-      // Fades in and out gradually: no frame changes the opacity by more than 2%.
+      // Fades in gradually: no frame changes the opacity by more than 2% while it is in view.
       expect(worstFadeStep).toBeGreaterThan(0);
       expect(worstFadeStep).toBeLessThan(0.02);
-      // Slows to the floor, not below it, so it does not crawl: one encounter takes about 285 s
-      // (about 350 s with the unfloored minimum of 2).
+      // Slows to the floor, not below it, so it does not crawl, and ends once the planet is out of
+      // view, shortly after the closest approach: one encounter takes about 153 s (about 285 s when it
+      // ran on to the despawn distance, and about 350 s with the unfloored minimum of 2).
       expect(slowest).toBeCloseTo(ENCOUNTER_MIN_SPEED_FLOOR, 9);
-      expect(endedAt - startedAt).toBeLessThan(300);
+      expect(endedAt - startedAt).toBeLessThan(170);
     },
   );
 
@@ -745,7 +755,10 @@ describe('the travel step', () => {
       // new level.
       travel.autopilotParams.interval = 60;
       const endedAt = travel.ship.time;
-      while (travel.ship.time < endedAt + ENCOUNTER_WARP_ENTRY_SECONDS + SHIP_SPEED_TAU_SECONDS) step(dt);
+      // The encounter ended out of view, near its minimum speed, so the return to warp starts there.
+      const entry = warpEntryDuration(travel.autopilotParams, travel.autopilot.entrySpeed);
+      expect(entry).toBeGreaterThan(ENCOUNTER_WARP_ENTRY_SECONDS);
+      while (travel.ship.time < endedAt + entry + SHIP_SPEED_TAU_SECONDS) step(dt);
       expect(states).toEqual(['CRUISE', ...CYCLE]);
       expect(worstJump).toBeLessThan(1e-9);
       expect(travel.ship.speed).toBeGreaterThan(SHIP_SPEED_LEVELS[SHIP_DEFAULT_SPEED_LEVEL]! * 2);
