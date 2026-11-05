@@ -23,7 +23,6 @@ import { encounterTargetSpeed } from '../src/engine/encounter';
 import { FAST_ENCOUNTERS_ARRIVAL_SPEED, SOAK_HEAP_GROWTH_LIMIT_BYTES } from './limits';
 import { appUrl } from './app';
 
-
 /** A pixel counts as lit when its brightest channel is above this (0–255). */
 const LIT_THRESHOLD = 16;
 

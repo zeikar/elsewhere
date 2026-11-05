@@ -3,7 +3,6 @@ import type { E2EHookSnapshot } from '../src/e2eHook';
 import { DT_CAP_SECONDS } from '../src/config';
 import { appUrl } from './app';
 
-
 /** Collects console errors and uncaught page errors from the moment it is called. */
 function collectErrors(page: Page): string[] {
   const errors: string[] = [];

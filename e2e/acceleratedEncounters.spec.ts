@@ -8,7 +8,6 @@ import { SHIP_SPEED_LEVELS } from '../src/config';
 import { FAST_ENCOUNTERS_ARRIVAL_SPEED } from './limits';
 import { appUrl } from './app';
 
-
 // Thousands of clock steps would make a trace of thousands of actions, which takes minutes to write
 // when the test ends (even when it passes, with 'retain-on-failure'), so this file records none.
 test.use({ trace: 'off' });

@@ -5,7 +5,6 @@ import { NEBULA_NEAR_FADE_MIN_DISTANCE } from '../src/config';
 import { FAST_ENCOUNTERS_ARRIVAL_SPEED } from './limits';
 import { appUrl } from './app';
 
-
 /** A pixel counts as lit when its brightest channel is above this (0–255). */
 const LIT_THRESHOLD = 24;
 

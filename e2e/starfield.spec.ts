@@ -4,7 +4,6 @@ import { FAR_STAR_BASE_SIZE_PX, FAR_STAR_COUNT, STAR_BASE_SIZE_PX } from '../src
 import { SOAK_HEAP_GROWTH_LIMIT_BYTES } from './limits';
 import { appUrl } from './app';
 
-
 /** A pixel counts as lit when its brightest channel is above this (0–255). */
 const LIT_THRESHOLD = 16;
 

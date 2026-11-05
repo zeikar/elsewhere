@@ -8,7 +8,6 @@ import type { E2EHookSnapshot } from '../src/e2eHook';
 import { installFrameSampler, takeFrameWindow } from './frameSampler';
 import { appUrl } from './app';
 
-
 // SwiftShader renders at only a few fps; each test sets its own, longer timeout where it needs one.
 test.describe.configure({ timeout: 300_000 });
 

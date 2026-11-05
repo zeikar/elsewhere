@@ -3,7 +3,6 @@ import type { E2EHookSnapshot } from '../src/e2eHook';
 import { SHIP_SPEED_LEVELS, initialSpeedSettings } from '../src/config';
 import { appUrl } from './app';
 
-
 // SwiftShader renders at only a few fps, which slows every page interaction; leave headroom over
 // Playwright's 30 s default.
 test.describe.configure({ timeout: 60_000 });
