@@ -300,14 +300,14 @@ interface TranslationViews {
 }
 
 /**
- * Loads the app with only star layer `layer` drawn (an e2e-only URL override), the heading drift
- * off, so the ship only translates along -Z, and a paused fake clock, so each view is drawn at
- * exactly the step it is taken. Takes views at rest, after 8 s at the top speed and 1 s later.
+ * Loads the app with only star layer `layer` drawn (an e2e-only URL override; the heading is fixed,
+ * so the ship only translates along -Z) and a paused fake clock, so each view is drawn at exactly the
+ * step it is taken. Takes views at rest, after 8 s of cruise at the top speed and 1 s later.
  */
 async function translationViews(page: Page, layer: 'far' | 'near'): Promise<TranslationViews> {
   await page.clock.install({ time: 0 });
   await page.clock.pauseAt(1000);
-  await page.goto(appUrl(`encounterInterval=1e9&headingDrift=0&starLayers=${layer}`));
+  await page.goto(appUrl(`encounterInterval=1e9&starLayers=${layer}`));
   await page.waitForFunction(() => window.__elsewhere !== undefined);
   for (let i = 0; i < 2; i++) await page.clock.fastForward(100);
   const shot = () => page.locator('#scene').screenshot({ style: CANVAS_ONLY });
@@ -323,7 +323,7 @@ async function translationViews(page: Page, layer: 'far' | 'near'): Promise<Tran
   return { shots: [atRest, cruise, later], snaps: [s0, s1, s2] };
 }
 
-test('after the ship translates with no rotation, far-star pixels stay put while near stars move', async ({ page, browser }) => {
+test('over seconds of cruise the camera never turns: far-star and galaxy pixels stay put while near stars move', async ({ page, browser }) => {
   const errors = collectErrors(page);
   const far = await translationViews(page, 'far');
   const nearPage = await browser.newPage();
@@ -337,16 +337,29 @@ test('after the ship translates with no rotation, far-star pixels stay put while
     const [s0, s1, s2] = views.snaps;
     expect(s0.starfield.visible, layer).toBe(layer === 'near');
     expect(s0.farStars.visible, layer).toBe(layer === 'far');
-    // A pure translation: hundreds of units along -Z, with the heading exactly unchanged.
+    // A pure translation: hundreds of units along -Z, with the heading and the camera's rotation
+    // exactly unchanged (the identity: looking along -Z, +Y up).
     expect(s1.ship.speed, layer).toBeGreaterThan(100);
     expect(s0.ship.position.z - s2.ship.position.z, layer).toBeGreaterThan(500);
-    for (const s of views.snaps) expect(s.ship.heading, layer).toEqual({ x: 0, y: 0, z: -1 });
+    for (const s of views.snaps) {
+      expect(s.ship.heading, layer).toEqual({ x: 0, y: 0, z: -1 });
+      expect(s.cameraQuaternion, layer).toEqual({ x: 0, y: 0, z: 0, w: 1 });
+    }
   }
   expect(far.snaps[0].farStars.count).toBe(FAR_STAR_COUNT);
-  // The test default trip's galaxies belong to the far layer, and its spiral is in this view, so the
-  // pixel comparisons below cover a galaxy too (distant galaxies, docs/PLAN.md section 9, Phase 4).
+  // The test default trip's galaxies belong to the far layer, and both are in this view, from the
+  // first frame (placed inside the 16:9 view, the heading being fixed), so the pixel comparisons
+  // below cover them too (distant galaxies, docs/PLAN.md section 9, Phase 4). Their screen positions
+  // never change.
   expect(far.snaps[0].galaxies.visible).toBe(true);
   expect(near.snaps[0].galaxies.visible).toBe(false);
+  expect(far.snaps[0].galaxies.items).toHaveLength(2);
+  for (const g of far.snaps[0].galaxies.items) {
+    expect(g.ndc.z).toBeLessThan(1);
+    expect(Math.abs(g.ndc.x)).toBeLessThan(0.9);
+    expect(Math.abs(g.ndc.y)).toBeLessThan(0.9);
+  }
+  for (const s of far.snaps) expect(s.galaxies.items.map((g) => g.ndc)).toEqual(far.snaps[0].galaxies.items.map((g) => g.ndc));
   const spiral = far.snaps[0].galaxies.items[0]!;
   expect(spiral.type).toBe('spiral');
   expect(spiral.ndc.z).toBeLessThan(1);
@@ -382,6 +395,49 @@ test('after the ship translates with no rotation, far-star pixels stay put while
   await nearPage.close();
   expect(errors).toEqual([]);
   expect(nearErrors).toEqual([]);
+});
+
+test('in the default view the galaxies are on screen from the first frame, and over seconds of cruise and a speed change the camera, the heading and their screen positions never change', async ({ page }) => {
+  const errors = collectErrors(page);
+  await openApp(page);
+  const first = await snapshot(page);
+  // The test default trip: two galaxies, both wholly inside the 16:9 view from the first frame.
+  expect(first.cameraAspect).toBeCloseTo(16 / 9, 2);
+  expect(first.galaxies.visible).toBe(true);
+  expect(first.galaxies.items.map((g) => g.type)).toEqual(['spiral', 'elliptical']);
+  for (const g of first.galaxies.items) {
+    expect(g.ndc.z).toBeLessThan(1);
+    expect(Math.abs(g.ndc.x)).toBeLessThan(0.9);
+    expect(Math.abs(g.ndc.y)).toBeLessThan(0.9);
+  }
+  // Sampled about every half second until 6 s of simulated cruise have passed (SwiftShader draws only
+  // a few frames a second), with the top speed set after 2 s.
+  const snaps: E2EHookSnapshot[] = [first];
+  let changedAt = -1;
+  while (snaps.at(-1)!.ship.time - first.ship.time < 6) {
+    await page.waitForTimeout(500);
+    const s = await snapshot(page);
+    snaps.push(s);
+    if (changedAt < 0 && s.ship.time - first.ship.time >= 2) {
+      await page.evaluate(() => window.__elsewhere!.setSpeed(99));
+      changedAt = snaps.length - 1;
+    }
+  }
+  const last = snaps.at(-1)!;
+  test.info().annotations.push({
+    type: 'cruise',
+    description: JSON.stringify({ seconds: last.ship.time - first.ship.time, distance: last.ship.distance - first.ship.distance, frames: last.frames - first.frames, state: last.autopilot.state }),
+  });
+  // Several seconds of cruise, faster after the speed change, still short of the first encounter.
+  expect(snaps.length).toBeGreaterThan(4);
+  expect(last.ship.speed).toBeGreaterThan(snaps[changedAt]!.ship.speed + 10);
+  for (const s of snaps) {
+    expect(s.autopilot.state).toBe('CRUISE');
+    expect(s.ship.heading).toEqual({ x: 0, y: 0, z: -1 });
+    expect(s.cameraQuaternion).toEqual({ x: 0, y: 0, z: 0, w: 1 });
+    expect(s.galaxies.items.map((g) => g.ndc)).toEqual(first.galaxies.items.map((g) => g.ndc));
+  }
+  expect(errors).toEqual([]);
 });
 
 /** Lit pixels in a PNG, their mean brightest channel (0–255), and pixels above 128 (decoded in the page). */

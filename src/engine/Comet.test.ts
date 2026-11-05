@@ -57,6 +57,14 @@ import { DEFAULT_SHIP_PARAMS, type Vec3 } from './Ship';
 
 const len = (a: Vec3) => Math.hypot(a.x, a.y, a.z);
 
+/** Distance from the origin to the segment from `a` to `b`. */
+function segmentDistance(a: Vec3, b: Vec3): number {
+  const ab = { x: b.x - a.x, y: b.y - a.y, z: b.z - a.z };
+  const l2 = ab.x * ab.x + ab.y * ab.y + ab.z * ab.z;
+  const t = l2 > 0 ? Math.min(1, Math.max(0, -(a.x * ab.x + a.y * ab.y + a.z * ab.z) / l2)) : 0;
+  return Math.hypot(a.x + ab.x * t, a.y + ab.y * t, a.z + ab.z * t);
+}
+
 /** 2,000 seeded comets, as the engine draws them. */
 const SEEDED = Array.from({ length: 2000 }, (_, i) => cometParams(hash(0xc0e7_5eed, i)));
 
@@ -396,16 +404,13 @@ describe('the camera never passes through a comet (docs/PLAN.md section 6, Varie
     expect(checked).toBe(30);
   }, 60_000);
 
-  it('the real pass, flown with the live view at every level, past the end of the encounter: the nucleus stays near the planned distance and the camera out of the coma and the tails', () => {
-    // On a live screen the encounter ends once the comet is off it, short of the closest approach, and
-    // the next cruise eases the heading drift back up from 0 (`cruiseDriftRate`) while the ship is
-    // still short of the nucleus: the heading is no longer held all the way to the closest approach,
-    // so the real pass can be a little nearer than the planned one (issue #62 removes the drift). The
-    // nucleus and the tails are measured from the captured plan until the ship is a coma radius past
-    // the closest approach. Measured (105 comets, 4:3 to 32:9): at level 0 the nucleus at 0.969 × the
-    // planned distance at the nearest, at levels 1 and 2 at 0.990 ×; tail vertices at 0.96 × (closest
-    // − coma radius) at the nearest. This set (54 comets, 6 per level and aspect): at level 0 the
-    // nucleus at 0.974 ×, at levels 1 and 2 at 0.997 ×; tail vertices at 0.978 × at the nearest.
+  it('the real pass, flown with the live view at every level, past the end of the encounter: the nucleus at the planned distance (within 0.5%) and the camera out of the coma and the tails', () => {
+    // On a live screen the encounter ends once the comet is off it, short of the closest approach.
+    // The heading is fixed, so the ship flies on along the planned path all the same, and the real pass
+    // is the planned one. Before issue #62 the next cruise eased a heading drift back up while the ship
+    // was still short of the nucleus, and the real pass came down to 0.969 × the planned distance at
+    // level 0. The nucleus and the tails are measured from the captured plan, over each frame's whole
+    // segment, until the ship is a coma radius past the closest approach.
     const aspects = [4 / 3, 16 / 9, 32 / 9];
     let checked = 0;
     let endedEarly = 0;
@@ -424,7 +429,10 @@ describe('the camera never passes through a comet (docs/PLAN.md section 6, Varie
           let nearestNucleus = Number.POSITIVE_INFINITY;
           let nearestVertex = Number.POSITIVE_INFINITY;
           const rel = { x: 0, y: 0, z: 0 };
+          const prevRel = { x: 0, y: 0, z: 0 };
           for (let i = 0; i < 1e6; i++) {
+            const hasPrev = plan !== null;
+            if (hasPrev) encounterOffset(plan!, travel.ship.position, prevRel);
             stepTravel(travel, 1 / 60);
             const encounter = travel.autopilot.encounter;
             if (plan === null) {
@@ -443,7 +451,8 @@ describe('the camera never passes through a comet (docs/PLAN.md section 6, Varie
             }
             if (remaining < -plan.radius) break;
             encounterOffset(plan, travel.ship.position, rel);
-            nearestNucleus = Math.min(nearestNucleus, len(rel));
+            // Over the frame's whole segment: the nucleus's nearest point to the ship's path.
+            nearestNucleus = Math.min(nearestNucleus, hasPrev ? segmentDistance(prevRel, rel) : len(rel));
             // Every step from the end of the encounter on (and every fourth before it).
             if (ended || i % 4 === 0) for (const v of vertices) nearestVertex = Math.min(nearestVertex, Math.hypot(rel.x + v.x, rel.y + v.y, rel.z + v.z));
           }
@@ -452,9 +461,11 @@ describe('the camera never passes through a comet (docs/PLAN.md section 6, Varie
           expect(plan, label).not.toBeNull();
           expect(encounterRemaining(plan!, travel.ship.position), label).toBeLessThan(-plan!.radius);
           if (ended && remainingAtEnd > 0) endedEarly++;
-          expect(nearestNucleus, label).toBeGreaterThanOrEqual(0.95 * closest);
+          expect(nearestNucleus, label).toBeGreaterThanOrEqual(0.995 * closest);
+          expect(nearestNucleus, label).toBeLessThanOrEqual(1.005 * closest);
           expect(nearestNucleus, label).toBeGreaterThan(p.radius * (1 + ENCOUNTER_CLEARANCE_MARGIN));
-          expect(nearestVertex, label).toBeGreaterThan(0.9 * (closest - p.radius));
+          // As on the planned path (the test above): every tail vertex sampled outside closest − coma radius.
+          expect(nearestVertex, label).toBeGreaterThan(closest - p.radius);
           worstNucleus = Math.min(worstNucleus, nearestNucleus / closest);
           worstVertex = Math.min(worstVertex, nearestVertex / (closest - p.radius));
           checked++;
@@ -464,8 +475,8 @@ describe('the camera never passes through a comet (docs/PLAN.md section 6, Varie
     expect(checked).toBe(SHIP_SPEED_LEVELS.length * aspects.length * 6);
     // Every one of them left the screen, and so ended, short of the closest approach: the case measured.
     expect(endedEarly).toBe(checked);
-    expect(worstNucleus).toBeGreaterThan(0.95);
-    expect(worstVertex).toBeGreaterThan(0.9);
+    expect(worstNucleus).toBeGreaterThanOrEqual(0.995);
+    expect(worstVertex).toBeGreaterThan(1);
   }, 120_000);
 });
 

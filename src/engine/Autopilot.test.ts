@@ -18,7 +18,6 @@ import {
   ENCOUNTER_COMET_SHARE_BOUNDS,
   ENCOUNTER_DESPAWN_DISTANCE,
   ENCOUNTER_DISTANCE,
-  ENCOUNTER_DRIFT_SETTLE_SECONDS,
   ENCOUNTER_FLYBY_DISTANCE,
   ENCOUNTER_INTERVAL_JITTER,
   ENCOUNTER_INTERVAL_SECONDS,
@@ -48,7 +47,7 @@ import {
   PLANET_ROCKY_RANGES,
   REDUCED_MOTION_SPEED_LEVEL,
   SHIP_DEFAULT_SPEED_LEVEL,
-  SHIP_MAX_TURN_RATE_RAD_PER_S,
+  SHIP_HEADING,
   SHIP_SPEED_LEVELS,
   SHIP_SPEED_TAU_SECONDS,
   VIEW_DEFAULT_ASPECT,
@@ -153,7 +152,7 @@ interface Transition {
 
 /**
  * Simulates travel from load, as the engine will run it: the ship steps with the autopilot's last
- * target speed and drift rate, then the autopilot reads the new ship state.
+ * target speed, then the autopilot reads the new ship state.
  */
 function simulate(
   dt: number,
@@ -166,12 +165,8 @@ function simulate(
 ): { transitions: Transition[]; ship: ShipState; autopilot: AutopilotState } {
   const params: AutopilotParams = { ...DEFAULT_AUTOPILOT_PARAMS, ...options.params };
   let autopilot = createAutopilotState(params);
-  const shipParams: ShipParams = {
-    ...DEFAULT_SHIP_PARAMS,
-    targetSpeed: autopilot.targetSpeed,
-    driftRate: autopilot.driftRate,
-  };
-  let ship = createShipState({}, shipParams);
+  const shipParams: ShipParams = { ...DEFAULT_SHIP_PARAMS, targetSpeed: autopilot.targetSpeed };
+  let ship = createShipState();
   const transitions: Transition[] = [];
   const maxSteps = Math.ceil((options.maxSeconds ?? 2000) / dt);
   for (let i = 0; i < maxSteps; i++) {
@@ -180,7 +175,6 @@ function simulate(
     ship = updateShip(prev, dt, shipParams);
     autopilot = updateAutopilot(prevAutopilot, ship, dt, params);
     shipParams.targetSpeed = autopilot.targetSpeed;
-    shipParams.driftRate = autopilot.driftRate;
     if (autopilot.state !== prevAutopilot.state) {
       transitions.push({
         from: prevAutopilot.state,
@@ -258,15 +252,12 @@ function endedOutOfView(
 describe('autopilot config', () => {
   it('the thresholds are consistent', () => {
     expect(ENCOUNTER_INTERVAL_SECONDS).toBeGreaterThan(0);
-    expect(ENCOUNTER_DRIFT_SETTLE_SECONDS).toBeGreaterThan(0);
-    expect(ENCOUNTER_DRIFT_SETTLE_SECONDS).toBeLessThanOrEqual(ENCOUNTER_INTERVAL_SECONDS);
-    // The jitter keeps every cruise long enough for the drift to settle, and the first encounter
-    // inside the 30–60 s after load that docs/PLAN.md section 9 (Phase 2) asks for (it fades in from
-    // the frame after it starts; the 60 s bound leaves well over a second for that).
+    // The jitter keeps the first encounter inside the 30–60 s after load that docs/PLAN.md section 9
+    // (Phase 2) asks for (it fades in from the frame after it starts; the 60 s bound leaves well over
+    // a second for that).
     expect(ENCOUNTER_INTERVAL_JITTER).toBeGreaterThanOrEqual(0);
     expect(ENCOUNTER_INTERVAL_JITTER).toBeLessThan(1);
     expect(ENCOUNTER_INTERVAL_SECONDS * (1 - ENCOUNTER_INTERVAL_JITTER)).toBeGreaterThanOrEqual(30);
-    expect(ENCOUNTER_INTERVAL_SECONDS * (1 - ENCOUNTER_INTERVAL_JITTER)).toBeGreaterThanOrEqual(ENCOUNTER_DRIFT_SETTLE_SECONDS);
     expect(ENCOUNTER_INTERVAL_SECONDS * (1 + ENCOUNTER_INTERVAL_JITTER)).toBeLessThan(59);
     expect(Number.isInteger(ENCOUNTER_MAX_SAME_KIND_RUN)).toBe(true);
     expect(ENCOUNTER_MAX_SAME_KIND_RUN).toBeGreaterThanOrEqual(1);
@@ -728,7 +719,7 @@ describe('encounter schedule', () => {
 });
 
 describe('createAutopilotState', () => {
-  it('starts in CRUISE at cruise speed with full drift and no encounter', () => {
+  it('starts in CRUISE at cruise speed with no encounter', () => {
     const s = createAutopilotState();
     expect(s).toEqual({
       state: 'CRUISE',
@@ -743,14 +734,12 @@ describe('createAutopilotState', () => {
       viewMargin: Number.NEGATIVE_INFINITY,
       outOfViewTime: Number.NEGATIVE_INFINITY,
       entrySpeed: Number.POSITIVE_INFINITY,
-      entryDrift: 1,
       entryQuick: false,
       entryAt: 0,
       entryShipSpeed: 0,
       entryShipAccel: 0,
       fade: 0,
       targetSpeed: DEFAULT_AUTOPILOT_PARAMS.cruiseSpeed,
-      driftRate: 1,
     });
   });
 });
@@ -798,10 +787,9 @@ describe('updateAutopilot', () => {
     expect(encounter.plan.origin).toEqual(ship.position);
     expect(angleBetween(encounter.plan.direction, ship.heading)).toBeLessThan(1e-12);
     expect(next.remaining).toBeCloseTo(ENCOUNTER_DISTANCE, 6);
-    // It appears at opacity 0, at cruise speed, with the drift held.
+    // It appears at opacity 0, at cruise speed.
     expect(next.fade).toBe(0);
     expect(next.targetSpeed).toBe(DEFAULT_AUTOPILOT_PARAMS.cruiseSpeed);
-    expect(next.driftRate).toBe(0);
   });
 
   it('at the top level the cruise chooses the next object once, for its hand-over speed, and the encounter starts with it', () => {
@@ -896,7 +884,6 @@ describe('nebula encounters', () => {
         time: number;
         outOfView: boolean;
         targetStep: number;
-        driftStep: number;
         fade: number;
         entrySpeed: number;
       } | null = null;
@@ -928,7 +915,6 @@ describe('nebula encounters', () => {
               // Against the target the encounter would have had now (the entry speed, the profile at
               // the end), so the profile's own change over the step does not count.
               targetStep: Math.abs(autopilot.targetSpeed - autopilot.entrySpeed),
-              driftStep: Math.abs(autopilot.driftRate - prevAutopilot.driftRate),
               fade: prevAutopilot.fade,
               entrySpeed: autopilot.entrySpeed,
             };
@@ -947,9 +933,8 @@ describe('nebula encounters', () => {
       expect(end).not.toBeNull();
       expect(end!.outOfView).toBe(true);
       expect(end!.fade).toBeGreaterThan(0);
-      // No step in the target speed or the drift rate as the cruise takes over.
+      // No step in the target speed as the cruise takes over.
       expect(end!.targetStep).toBeLessThan(0.01);
-      expect(end!.driftStep).toBeLessThan(0.01);
       expect(end!.entrySpeed).toBeLessThanOrEqual(encounterSpeed);
       // Back at the cruise speed (99%) within the quick warp entry and a second.
       expect(backAtCruise - end!.time).toBeLessThanOrEqual(viewEntryDuration(params, end!.entrySpeed) + 1);
@@ -1170,7 +1155,7 @@ describe('autopilot simulation', () => {
     );
 
     it.each(cases)(
-      'keeps clear of the planet, never jumps and turns smoothly (radius $radius, cruise $cruiseSpeed)',
+      'keeps clear of the planet, never jumps and never turns (radius $radius, cruise $cruiseSpeed)',
       ({ radius, cruiseSpeed }) => {
         let minClearance = Number.POSITIVE_INFINITY;
         let worstJump = 0;
@@ -1205,7 +1190,7 @@ describe('autopilot simulation', () => {
 
             if (holdsHeading(prevAutopilot, autopilot)) expect(ship.heading).toEqual(prev.heading);
             if (autopilot.state === 'APPROACH' || autopilot.state === 'FLYBY') {
-              // The heading is held at the planned direction, so the ship stays on the planned line.
+              // The heading is fixed along the planned direction, so the ship stays on the planned line.
               const { origin, direction } = encounter.plan;
               worstHeldAngle = Math.max(worstHeldAngle, angleBetween(ship.heading, direction));
               const d = sub(ship.position, origin);
@@ -1224,7 +1209,8 @@ describe('autopilot simulation', () => {
         // and the encounter end, before the ship gets there).
         expect(minClearance).toBeGreaterThanOrEqual(radius * ENCOUNTER_SIDE_OFFSET_FACTOR * (1 - 1e-9));
         expect(worstJump).toBeLessThanOrEqual(1 + 1e-9);
-        expect(worstTurnRate).toBeLessThanOrEqual(SHIP_MAX_TURN_RATE_RAD_PER_S);
+        // The heading is fixed: it never turns.
+        expect(worstTurnRate).toBe(0);
         expect(worstHeldAngle).toBeLessThan(HELD_ANGLE_TOLERANCE);
         expect(worstPathDeviation).toBeLessThan(1e-6);
         // Fades in and out gradually while in view: no frame changes the opacity by more than 2%.
@@ -1262,21 +1248,21 @@ describe('autopilot simulation', () => {
     },
   );
 
-  it('the heading resumes from where it was held, with no jump at any state change', () => {
-    const dt = 1 / 60;
-    const headingAtChange: Array<{ before: Vec3; after: Vec3; to: TravelState }> = [];
-    simulate(dt, {
+  it('the heading is the fixed -Z at every step, in every state and at every state change', () => {
+    const states = new Set<TravelState>();
+    const changes: TravelState[] = [];
+    simulate(1 / 60, {
       until: afterEncounters(2),
-      onFrame: ({ prev, ship, prevAutopilot, autopilot }) => {
-        if (autopilot.state !== prevAutopilot.state) {
-          headingAtChange.push({ before: { ...prev.heading }, after: { ...ship.heading }, to: autopilot.state });
-        }
+      onFrame: ({ ship, prevAutopilot, autopilot }) => {
+        states.add(autopilot.state);
+        if (autopilot.state !== prevAutopilot.state) changes.push(autopilot.state);
+        expect(ship.heading).toEqual(SHIP_HEADING);
+        // Every encounter is planned along it.
+        if (autopilot.encounter !== null) expect(autopilot.encounter.plan.direction).toEqual(SHIP_HEADING);
       },
     });
-    expect(headingAtChange.map((c) => c.to)).toEqual([...CYCLE, ...CYCLE]);
-    for (const { before, after } of headingAtChange) {
-      expect(angleBetween(before, after)).toBeLessThanOrEqual(SHIP_MAX_TURN_RATE_RAD_PER_S * dt);
-    }
+    expect(changes).toEqual([...CYCLE, ...CYCLE]);
+    expect(states).toEqual(new Set(CYCLE));
   });
 
   it.each([3, 15])('the timeline matches between dt = 1/60 and dt = 1/120 over %i encounters', (n) => {
@@ -1304,7 +1290,7 @@ describe('autopilot simulation', () => {
 
   it('completes 10 consecutive encounters with distinct indices, each ending out of view and returning to cruise speed', () => {
     const cruiseSpeed = DEFAULT_AUTOPILOT_PARAMS.cruiseSpeed;
-    const ends: Array<{ outOfView: boolean; targetStep: number; driftStep: number; fade: number }> = [];
+    const ends: Array<{ outOfView: boolean; targetStep: number; fade: number }> = [];
     // Highest ship speed in each cruise that follows an encounter, before the next one starts.
     const cruiseMax: number[] = [];
     const indices: number[] = [];
@@ -1322,7 +1308,6 @@ describe('autopilot simulation', () => {
             outOfView: endedOutOfView(prevAutopilot, a, ship),
             // Against the target the encounter would have had now (see the nebula cycle above).
             targetStep: Math.abs(a.targetSpeed - a.entrySpeed),
-            driftStep: Math.abs(a.driftRate - prevAutopilot.driftRate),
             fade: a.fade,
           });
           cruiseMax.push(0);
@@ -1341,11 +1326,10 @@ describe('autopilot simulation', () => {
     expect(ends).toHaveLength(10);
     for (const end of ends) {
       // Ended as soon as the object was out of view (planets and nebulae alike), with no step in the
-      // target speed or the drift rate.
+      // target speed.
       expect(end.outOfView).toBe(true);
       expect(end.fade).toBe(0);
       expect(end.targetStep).toBeLessThan(0.01);
-      expect(end.driftStep).toBeLessThan(0.01);
     }
     // Every cruise but the last (cut short by the end of the run) gets back to the cruise speed.
     for (const max of cruiseMax.slice(0, -1)) expect(Math.abs(max - cruiseSpeed) / cruiseSpeed).toBeLessThan(0.01);
@@ -2231,8 +2215,8 @@ describe('speed driven by visibility: the warp entries', () => {
         expect(cruiseTargetSpeed(0, interval, params, true, entry, true), label).toBeCloseTo(entry, 12);
         expect(cruiseTargetSpeed(duration, interval, params, true, entry, true), label).toBe(cruise);
         // The ship, as stepTravel runs it, from the entry speed at rest in acceleration.
-        const shipParams: ShipParams = { ...DEFAULT_SHIP_PARAMS, driftRate: 0, targetSpeed: entry };
-        let ship = createShipState({ speed: entry }, shipParams);
+        const shipParams: ShipParams = { ...DEFAULT_SHIP_PARAMS, targetSpeed: entry };
+        let ship = createShipState({ speed: entry });
         let worstError = 0;
         let worstAccel = 0;
         let worstJerk = 0;

@@ -17,10 +17,10 @@
  * `e2eEngineOptions` reads e2e-only engine overrides from the page URL (also absent from the
  * production build): `?encounterInterval=<seconds>` shortens (or, with a huge value, effectively
  * disables) the encounter interval so tests run quickly, `?encounterKind=planet|nebula|asteroid|comet` makes
- * every encounter that kind, `?starLayers=far|near` draws only that star layer, `?headingDrift=0`
- * holds the heading at -Z (so the ship only translates), and `?arrivalSpeed=<u/s>` sets the arrival
- * speed (a value at or above the top speed flies encounters from the top speed, without dropping
- * out of warp, so tests that only need encounter cycles pass them about 2.5–3× sooner).
+ * every encounter that kind, `?starLayers=far|near` draws only that star layer, and
+ * `?arrivalSpeed=<u/s>` sets the arrival speed (a value at or above the top speed flies encounters
+ * from the top speed, without dropping out of warp, so tests that only need encounter cycles pass
+ * them about 2.5–3× sooner).
  * `?frameRateCap=<fps>` replaces the frame-rate cap (FRAME_RATE_CAP; 0 for none).
  * `?gpuTiming=1` times each frame's GPU work (`EXT_disjoint_timer_query_webgl2`, where the browser
  * has it), reported in `snapshot().perf.gpuMs`, and `?perfOverlay=1` (which implies it) shows a small
@@ -102,6 +102,8 @@ export interface E2EHookSnapshot {
   cameraAspect: number;
   /** The camera's live vertical field of view, in degrees. */
   cameraFov: number;
+  /** The camera's world rotation (it sits at the origin and looks along the fixed heading, so this never changes). */
+  cameraQuaternion: { x: number; y: number; z: number; w: number };
   ship: {
     time: number;
     speed: number;
@@ -179,7 +181,6 @@ export interface E2EHookSnapshot {
     /** Planet opacity the autopilot asks for, in [0, 1]. */
     fade: number;
     targetSpeed: number;
-    driftRate: number;
     /** Mean encounter interval in use, in seconds (each cruise is jittered around it). */
     interval: number;
     /** Arrival speed in use, in units per second (encounters are flown from min(cruise, this)). */
@@ -369,13 +370,12 @@ declare global {
 /** Reads the e2e-only engine overrides from a URL query string (see the module comment). */
 export function e2eEngineOptions(
   search: string,
-): Pick<EngineOptions, 'encounterInterval' | 'encounterKind' | 'starLayers' | 'headingDrift' | 'arrivalSpeed' | 'gpuTiming' | 'frameRateCap'> {
+): Pick<EngineOptions, 'encounterInterval' | 'encounterKind' | 'starLayers' | 'arrivalSpeed' | 'gpuTiming' | 'frameRateCap'> {
   const query = new URLSearchParams(search);
   const raw = query.get('encounterInterval');
   const interval = raw === null ? Number.NaN : Number(raw);
   const kind = query.get('encounterKind');
   const layers = query.get('starLayers');
-  const drift = query.get('headingDrift');
   const rawArrival = query.get('arrivalSpeed');
   const arrival = rawArrival === null ? Number.NaN : Number(rawArrival);
   const gpuTiming = query.get('gpuTiming') === '1' || query.get('perfOverlay') === '1';
@@ -385,7 +385,6 @@ export function e2eEngineOptions(
     ...(interval >= 0 ? { encounterInterval: interval } : {}),
     ...(kind === 'planet' || kind === 'nebula' || kind === 'asteroid' || kind === 'comet' ? { encounterKind: kind } : {}),
     ...(layers === 'far' || layers === 'near' || layers === 'both' ? { starLayers: layers } : {}),
-    ...(drift === '0' ? { headingDrift: false } : {}),
     ...(arrival > 0 ? { arrivalSpeed: arrival } : {}),
     ...(gpuTiming ? { gpuTiming: true } : {}),
     ...(cap >= 0 ? { frameRateCap: cap } : {}),
@@ -601,6 +600,10 @@ export function installE2EHook(engine: Engine): void {
         frameRateCap: engine.getFrameRateCap(),
         cameraAspect: engine.getCameraAspect(),
         cameraFov: engine.getCameraFov(),
+        cameraQuaternion: (() => {
+          const q = engine.getCamera().quaternion;
+          return { x: q.x, y: q.y, z: q.z, w: q.w };
+        })(),
         ship: {
           time: ship.time,
           speed: ship.speed,
@@ -635,7 +638,6 @@ export function installE2EHook(engine: Engine): void {
           remaining: Number.isFinite(autopilot.remaining) ? autopilot.remaining : null,
           fade: autopilot.fade,
           targetSpeed: autopilot.targetSpeed,
-          driftRate: autopilot.driftRate,
           interval: engine.getEncounterInterval(),
           arrivalSpeed: engine.getArrivalSpeed(),
           closestDistance: autopilot.encounter?.plan.closestDistance ?? null,

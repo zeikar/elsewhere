@@ -66,11 +66,16 @@ import {
 import { Nebula, disposeNebulaGeometry, nebulaGeometry, nebulaGeometryRefs, nebulaParams } from './Nebula';
 import { Planet, disposePlanetGeometry, planetGeometry, planetGeometryRefs, planetParams, ringAxis } from './Planet';
 import { hash, mulberry32 } from './seed';
-import { DEFAULT_SHIP_PARAMS, createShipState, headingAt, updateShip, type Vec3 } from './Ship';
+import { DEFAULT_SHIP_PARAMS, createShipState, updateShip, type Vec3 } from './Ship';
 
 const dot = (a: Vec3, b: Vec3) => a.x * b.x + a.y * b.y + a.z * b.z;
 const len = (a: Vec3) => Math.hypot(a.x, a.y, a.z);
 const dist = (a: Vec3, b: Vec3) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+
+/** A unit heading turned `yaw` about +Y (toward +X) and `pitch` up from -Z: planning is tested at any heading, not only the ship's fixed one. */
+function turnedHeading(yaw: number, pitch: number): Vec3 {
+  return { x: Math.sin(yaw) * Math.cos(pitch), y: Math.sin(pitch), z: -Math.cos(yaw) * Math.cos(pitch) };
+}
 
 const CYCLE: TravelState[] = ['APPROACH', 'FLYBY', 'DEPARTURE', 'CRUISE'];
 
@@ -103,7 +108,7 @@ afterEach(() => {
 describe('planetRenderPosition (floating origin)', () => {
   it('gives small, float32-safe offsets for planets placed at ship positions around 1e12', () => {
     const origin = { x: 1e12 + 0.25, y: -3.7e11, z: -1.1e12 + 0.75 };
-    const heading = headingAt(53, DEFAULT_SHIP_PARAMS, { x: 0, y: 0, z: 0 });
+    const heading = turnedHeading(0.47, 0.13);
     const plan = planEncounter(origin, heading, 120, ENCOUNTER_DISTANCE, ENCOUNTER_SIDE_OFFSET_FACTOR, 1.1);
     const out = new Vector3();
 
@@ -145,8 +150,8 @@ describe('planetRenderPosition (floating origin)', () => {
 describe('encounterLightDirection', () => {
   it('is a unit vector lighting the faces the ship sees on approach and at the closest approach', () => {
     const out = { x: 0, y: 0, z: 0 };
-    for (const t of [0, 31, 77, 140]) {
-      const heading = headingAt(t, DEFAULT_SHIP_PARAMS, { x: 0, y: 0, z: 0 });
+    for (const [yaw, pitch] of [[0, 0], [0.4, 0.2], [-0.6, -0.15], [0.2, -0.2]] as const) {
+      const heading = turnedHeading(yaw, pitch);
       for (const sideAngle of [0, 1, 2.5, 4, 5.9]) {
         const plan = planEncounter({ x: 1e9, y: 0, z: -3e8 }, heading, 90, ENCOUNTER_DISTANCE, 2, sideAngle);
         const light = encounterLightDirection(plan, out);
@@ -614,7 +619,7 @@ describe('the travel step', () => {
     const travel = createTravel(params, DEFAULT_SHIP_PARAMS);
     expect(travel.shipParams.targetSpeed).toBe(params.cruiseSpeed);
     expect(travel.ship.speed).toBe(0);
-    let ship = createShipState({}, travel.shipParams);
+    let ship = createShipState();
     let autopilot = { ...travel.autopilot };
     const shipParams = { ...travel.shipParams };
     for (let i = 0; i < 2000; i++) {
@@ -623,7 +628,6 @@ describe('the travel step', () => {
       ship = updateShip(ship, dt, shipParams);
       autopilot = updateAutopilot(autopilot, ship, dt, params);
       shipParams.targetSpeed = autopilot.targetSpeed;
-      shipParams.driftRate = autopilot.driftRate;
     }
     expect(travel.ship).toEqual(ship);
     expect(travel.autopilot).toEqual(autopilot);

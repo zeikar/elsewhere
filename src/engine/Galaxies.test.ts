@@ -9,10 +9,13 @@ import {
   FAR_STAR_BRIGHTNESS_MAX,
   GALAXY_COUNT_WEIGHTS,
   GALAXY_MIN_SEPARATION_DEG,
+  GALAXY_PLACEMENT_ASPECT,
   GALAXY_SIZE_MAX_DEG,
   GALAXY_SIZE_MIN_DEG,
+  SHIP_HEADING,
   SHIP_SPEED_LEVELS,
   STAR_CUBE_SIZE,
+  VIEW_DEFAULT_ASPECT,
 } from '../config';
 import { DEFAULT_AUTOPILOT_PARAMS, createTravel, setCruiseSpeed, stepTravel } from './Autopilot';
 import { FAR_STARFIELD_RENDER_ORDER, FAR_STAR_NDC_DEPTH } from './FarStarfield';
@@ -56,6 +59,17 @@ function viewCorners(galaxies: readonly Galaxy[], camera: PerspectiveCamera): Ve
   return galaxies.flatMap((g) => CORNERS.map(([cx, cy]) => galaxyViewCorner(g, cx, cy, camera.matrixWorldInverse, { x: 0, y: 0, z: 0 })));
 }
 
+/** The largest |x| and |y|, in normalised device coordinates, of any quad corner of `galaxy` seen by `camera` (Infinity behind it). */
+function ndcExtent(galaxy: Readonly<Galaxy>, camera: PerspectiveCamera): number {
+  let extent = 0;
+  for (const c of viewCorners([galaxy], camera)) {
+    if (!(c.z < 0)) return Number.POSITIVE_INFINITY;
+    const p = new Vector3(c.x, c.y, c.z).applyMatrix4(camera.projectionMatrix);
+    extent = Math.max(extent, Math.abs(p.x), Math.abs(p.y));
+  }
+  return extent;
+}
+
 function dot(a: Readonly<Vec3>, b: Readonly<Vec3>): number {
   return a.x * b.x + a.y * b.y + a.z * b.z;
 }
@@ -81,6 +95,10 @@ describe('galaxy generation', () => {
     expect(a.length).toBeGreaterThanOrEqual(1);
     // The documented test default trip: a 3° tilted spiral and a small elliptical.
     expect(a.map((g) => g.type)).toEqual(['spiral', 'elliptical']);
+    // Both wholly on a 16:9 screen from the first frame, along the fixed heading (e2e/starfield.spec.ts
+    // checks they are drawn there).
+    const camera = engineCamera(SHIP_HEADING, CAMERA_FOV_DEG, VIEW_DEFAULT_ASPECT);
+    for (const g of a) expect(ndcExtent(g, camera)).toBeLessThan(1);
     // Another trip seed gives other galaxies.
     expect(generateGalaxies(ENCOUNTER_BASE_SEED + 1)).not.toEqual(a);
   });
@@ -105,7 +123,13 @@ describe('galaxy generation', () => {
     expect(galaxyCount(1 - 1e-15, GALAXY_COUNT_WEIGHTS)).toBe(3);
   });
 
-  it('keeps every galaxy tiny, faint, apart from the others and where the heading drift sweeps the view', () => {
+  it('keeps every galaxy tiny, faint, apart from the others and wholly inside the view along the fixed heading at 16:9', () => {
+    // The heading never turns, so a galaxy is seen only if it is placed in the view: every quad
+    // corner of every galaxy is on a 16:9 screen (and on a 21:9 one, which only shows more at the
+    // sides), with room to spare.
+    expect(GALAXY_PLACEMENT_ASPECT).toBe(VIEW_DEFAULT_ASPECT);
+    const views = [VIEW_DEFAULT_ASPECT, 21 / 9].map((aspect) => engineCamera(SHIP_HEADING, CAMERA_FOV_DEG, aspect));
+    let widest = 0;
     const galaxies = manySeeds(1000).flatMap((seed) => {
       const set = generateGalaxies(seed);
       for (let i = 0; i < set.length; i++) {
@@ -121,9 +145,15 @@ describe('galaxy generation', () => {
     for (const g of galaxies) {
       const d = g.direction;
       expect(Math.hypot(d.x, d.y, d.z)).toBeCloseTo(1, 12);
-      // Yaw and pitch from -Z (the heading convention) within the placement ranges.
-      expect(Math.abs(Math.asin(d.y))).toBeLessThanOrEqual(DEFAULT_GALAXY_OPTIONS.pitchRange + 1e-12);
-      expect(Math.abs(Math.atan2(d.x, -d.z))).toBeLessThanOrEqual(DEFAULT_GALAXY_OPTIONS.yawRange + 1e-12);
+      // The centre within the placement rectangle one unit ahead of the camera.
+      expect(d.z).toBeLessThan(0);
+      expect(Math.abs(d.x / -d.z)).toBeLessThanOrEqual(DEFAULT_GALAXY_OPTIONS.tanX + 1e-12);
+      expect(Math.abs(d.y / -d.z)).toBeLessThanOrEqual(DEFAULT_GALAXY_OPTIONS.tanY + 1e-12);
+      for (const camera of views) {
+        const extent = ndcExtent(g, camera);
+        expect(extent).toBeLessThan(0.97);
+        widest = Math.max(widest, extent);
+      }
       // A few degrees across at most.
       expect(g.size).toBeGreaterThanOrEqual(GALAXY_SIZE_MIN_DEG * DEG);
       expect(g.size).toBeLessThanOrEqual(GALAXY_SIZE_MAX_DEG * DEG);
@@ -142,6 +172,25 @@ describe('galaxy generation', () => {
     expect(spread(galaxies.map((g) => g.axisRatio))).toBeGreaterThan(0.5);
     expect(spread(galaxies.map((g) => g.rotation))).toBeGreaterThan(2.5);
     expect(spread(galaxies.map((g) => g.coreColor[2] / g.coreColor[0]))).toBeGreaterThan(0.15);
+    // Spread over the screen, out toward its edges (measured: the farthest corner at 0.876).
+    expect(widest).toBeGreaterThan(0.85);
+    // Over the whole screen, left and right, above and below the middle.
+    for (const pick of [(v: Vec3) => v.x, (v: Vec3) => v.y]) {
+      expect(Math.min(...galaxies.map((g) => pick(g.direction)))).toBeLessThan(-0.3);
+      expect(Math.max(...galaxies.map((g) => pick(g.direction)))).toBeGreaterThan(0.3);
+    }
+  });
+
+  it('with a fixed heading, every trip with a galaxy shows one from the first frame on a 16:9 screen', () => {
+    const camera = engineCamera(SHIP_HEADING, CAMERA_FOV_DEG, VIEW_DEFAULT_ASPECT);
+    let trips = 0;
+    for (const seed of manySeeds(2000)) {
+      const set = generateGalaxies(seed);
+      if (set.length === 0) continue;
+      trips++;
+      for (const g of set) expect(ndcExtent(g, camera), `seed ${seed}`).toBeLessThan(1);
+    }
+    expect(trips).toBeGreaterThan(1500);
   });
 });
 
@@ -187,10 +236,10 @@ describe('galaxy quads', () => {
   });
 
   it('do not change under pure translation of the ship', () => {
-    // The engine's simulation with the heading drift off: the ship only translates, at the top speed.
+    // The engine's simulation: the heading is fixed, so the ship only translates, at the top speed.
     const autopilotParams = { ...DEFAULT_AUTOPILOT_PARAMS, interval: 1e9 };
     setCruiseSpeed(autopilotParams, SHIP_SPEED_LEVELS[SHIP_SPEED_LEVELS.length - 1]!);
-    const travel = createTravel(autopilotParams, { ...DEFAULT_SHIP_PARAMS, yawAmplitude: 0, pitchAmplitude: 0 });
+    const travel = createTravel(autopilotParams, DEFAULT_SHIP_PARAMS);
     for (let i = 0; i < 20; i++) stepTravel(travel, DT_CAP_SECONDS);
     const set = generateGalaxies(ENCOUNTER_BASE_SEED);
     const ship = travel.ship;

@@ -9,9 +9,10 @@
  *   logarithmic arms) or an elliptical (a core glow in a smooth oval falloff), with a seeded
  *   direction, size, tilt (the axis ratio of its disc), rotation on the sky, colour and, for a
  *   spiral, arm winding and phase.
- * - Each galaxy's direction is fixed for the trip. They sit where the heading drift sweeps the view
- *   (GALAXY_PLACEMENT_MARGIN_RAD), so each comes into view during a drift cycle, at least
- *   GALAXY_MIN_SEPARATION_DEG apart.
+ * - Each galaxy's direction is fixed for the trip, and so is the heading (SHIP_HEADING), so the sky
+ *   never turns. They sit inside the camera's view on a 16:9 screen (GALAXY_PLACEMENT_ASPECT), their
+ *   centres within the middle GALAXY_PLACEMENT_SCREEN_SHARE of its width and height, so every one is
+ *   wholly on screen from the first frame, at least GALAXY_MIN_SEPARATION_DEG apart.
  * - All galaxies are instances of one quad (InstancedBufferGeometry + ShaderMaterial): one draw call.
  *   Each quad is laid out in direction space, around the galaxy's unit direction, along two tangent
  *   axes whose lengths are the tangents of its half-sizes. Its angular size is therefore a property
@@ -34,20 +35,22 @@
  */
 import { AdditiveBlending, BufferAttribute, InstancedBufferAttribute, InstancedBufferGeometry, Mesh, ShaderMaterial, type Matrix4 } from 'three';
 import {
+  CAMERA_FOV_DEG,
   GALAXY_CORE_BRIGHTNESS_MAX,
   GALAXY_CORE_BRIGHTNESS_MIN,
   GALAXY_COUNT_WEIGHTS,
   GALAXY_DISC_BRIGHTNESS_MAX,
   GALAXY_DISC_BRIGHTNESS_MIN,
   GALAXY_MIN_SEPARATION_DEG,
-  GALAXY_PLACEMENT_MARGIN_RAD,
+  GALAXY_PLACEMENT_ASPECT,
+  GALAXY_PLACEMENT_SCREEN_SHARE,
   GALAXY_SIZE_MAX_DEG,
   GALAXY_SIZE_MIN_DEG,
   GALAXY_SPIRAL_SHARE,
-  SHIP_PITCH_DRIFT_AMPLITUDE_RAD,
-  SHIP_YAW_DRIFT_AMPLITUDE_RAD,
+  VIEW_WIDEST_ASPECT,
 } from '../config';
 import { FAR_STARFIELD_RENDER_ORDER, FAR_STAR_NDC_DEPTH, farStarViewDirection } from './FarStarfield';
+import { cameraFrustum } from './renderSize';
 import { hash, mulberry32 } from './seed';
 import type { Vec3 } from './Ship';
 
@@ -82,9 +85,13 @@ export interface GalaxyOptions {
   sizeMin: number;
   sizeMax: number;
   spiralShare: number;
-  /** Largest |yaw| and |pitch| of a galaxy's direction from -Z, in radians. */
-  yawRange: number;
-  pitchRange: number;
+  /**
+   * Half-extents of the region galaxy centres are drawn from, uniformly: the tangents of the largest
+   * angles off -Z (the fixed heading) to the right or left (`tanX`) and up or down (`tanY`), on the
+   * plane one unit ahead of the camera, so the region is a centred rectangle of the screen.
+   */
+  tanX: number;
+  tanY: number;
   /** Smallest angle between two galaxies, in radians. */
   minSeparation: number;
   coreBrightnessMin: number;
@@ -95,13 +102,17 @@ export interface GalaxyOptions {
 
 const DEG = Math.PI / 180;
 
+/** The view galaxies are placed in: the camera's on a GALAXY_PLACEMENT_ASPECT screen, looking along -Z. */
+const PLACEMENT_VIEW = cameraFrustum(CAMERA_FOV_DEG, GALAXY_PLACEMENT_ASPECT, VIEW_WIDEST_ASPECT);
+const PLACEMENT_TAN_Y = Math.tan(PLACEMENT_VIEW.halfFovY);
+
 export const DEFAULT_GALAXY_OPTIONS: Readonly<GalaxyOptions> = {
   countWeights: GALAXY_COUNT_WEIGHTS,
   sizeMin: GALAXY_SIZE_MIN_DEG * DEG,
   sizeMax: GALAXY_SIZE_MAX_DEG * DEG,
   spiralShare: GALAXY_SPIRAL_SHARE,
-  yawRange: SHIP_YAW_DRIFT_AMPLITUDE_RAD + GALAXY_PLACEMENT_MARGIN_RAD,
-  pitchRange: SHIP_PITCH_DRIFT_AMPLITUDE_RAD + GALAXY_PLACEMENT_MARGIN_RAD,
+  tanX: GALAXY_PLACEMENT_SCREEN_SHARE * PLACEMENT_TAN_Y * PLACEMENT_VIEW.aspect,
+  tanY: GALAXY_PLACEMENT_SCREEN_SHARE * PLACEMENT_TAN_Y,
   minSeparation: GALAXY_MIN_SEPARATION_DEG * DEG,
   coreBrightnessMin: GALAXY_CORE_BRIGHTNESS_MIN,
   coreBrightnessMax: GALAXY_CORE_BRIGHTNESS_MAX,
@@ -163,13 +174,14 @@ export function generateGalaxies(tripSeed: number, options: Readonly<GalaxyOptio
   const galaxies: Galaxy[] = [];
   const cosSeparation = Math.cos(options.minSeparation);
   for (let i = 0; i < count; i++) {
-    // A direction where the heading drift sweeps the view, clear of the galaxies before it.
+    // A direction in the view along the fixed heading (-Z, world +Y up), clear of the galaxies before
+    // it: a point drawn uniformly over the placement rectangle one unit ahead, normalised.
     let direction: Vec3 | null = null;
     for (let t = 0; t < PLACEMENT_TRIES && direction === null; t++) {
-      const yaw = options.yawRange * (2 * random() - 1);
-      const pitch = options.pitchRange * (2 * random() - 1);
-      // The heading convention (Ship.ts headingAt): yaw about +Y, pitch up, from -Z.
-      const d = { x: Math.sin(yaw) * Math.cos(pitch), y: Math.sin(pitch), z: -Math.cos(yaw) * Math.cos(pitch) };
+      const x = options.tanX * (2 * random() - 1);
+      const y = options.tanY * (2 * random() - 1);
+      const l = Math.hypot(x, y, 1);
+      const d = { x: x / l, y: y / l, z: -1 / l };
       const clear = galaxies.every((g) => g.direction.x * d.x + g.direction.y * d.y + g.direction.z * d.z < cosSeparation);
       if (clear) direction = d;
     }
