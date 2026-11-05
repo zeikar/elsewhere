@@ -901,10 +901,16 @@ export const ASTEROID_DETAIL = { main: 8, satellite: 3 } as const;
  * common. Every nebula and every asteroid stays where it was in every trip. Comets are solid bodies
  * for the run cap (ENCOUNTER_MAX_SAME_KIND_RUN). The first encounter of every trip is still a planet.
  *
- * Plan: the encounter radius is the coma's radius, and the nucleus passes at COMET_MIN_PASS_DISTANCE
- * or more (at least the coma radius × (1 + ENCOUNTER_CLEARANCE_MARGIN), far more in practice), so the
- * camera never enters the coma, let alone its core or the nucleus. The off-screen test
- * (`encounterViewMargin`) takes the live view to spheres that hold the coma and every segment of
+ * Plan: the encounter radius is the coma's radius, and the planned path passes the nucleus at
+ * COMET_MIN_PASS_DISTANCE or more (at least the coma radius × (1 + ENCOUNTER_CLEARANCE_MARGIN), far
+ * more in practice), so the camera never enters the coma, let alone its core or the nucleus. The
+ * heading is held while the encounter lasts, but a comet leaves the screen, and its encounter ends,
+ * short of the closest approach, and the next cruise may ease the heading drift back up before the
+ * ship gets there: the real pass can be a little nearer than the planned one (measured with the live
+ * view: at least 0.969 × it at the slowest level and 0.990 × at the others, the nearest tail vertex
+ * at 0.96 × the planned distance less the coma radius, still more than 60 units outside the coma;
+ * Comet.test.ts flies on past the end of the encounter). Issue #62 removes the drift. The off-screen
+ * test (`encounterViewMargin`) takes the live view to spheres that hold the coma and every segment of
  * both tails (`CometParams.bounds`), and the comet is off the screen only once all of them are. The
  * tails trail back along the path and away from it, so they never keep a comet on the screen after
  * its coma has left it (measured: they leave on the same step): a comet leaves the screen to the side

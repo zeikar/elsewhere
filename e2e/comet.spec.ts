@@ -4,7 +4,8 @@
  * - The e2e-only `?encounterKind=comet` override (src/e2eHook.ts; `npm run check:hook` checks that
  *   production reads no such override) makes every encounter a comet: it runs the full state cycle,
  *   draws the coma and tails on the engine canvas, fading in from nothing, never brings the camera
- *   within the minimum pass distance of the nucleus, compiles no program (the nucleus draws with the
+ *   within the minimum pass distance of the nucleus while the encounter lasts (and, measured on past
+ *   its end, keeps the real pass near the planned distance and outside the coma), compiles no program (the nucleus draws with the
  *   rocky planet surface program and the coma and tails with the halo program, both kept compiled by
  *   ProgramWarmup), and leaves every GPU resource at its baseline. The engine canvas is screenshotted
  *   mid-approach and on the frame the comet has left the screen (the first DEPARTURE frame; the
@@ -16,7 +17,7 @@
  */
 import { writeFileSync } from 'node:fs';
 import { expect, test, type Page } from '@playwright/test';
-import { COMET_MIN_PASS_DISTANCE, ENCOUNTER_BASE_SEED } from '../src/config';
+import { COMET_MIN_PASS_DISTANCE, ENCOUNTER_BASE_SEED, ENCOUNTER_CLEARANCE_MARGIN } from '../src/config';
 import type { E2EHookSnapshot } from '../src/e2eHook';
 import { COMET_FAMILY_NAMES, cometParams } from '../src/engine/Comet';
 import { generateGalaxies } from '../src/engine/Galaxies';
@@ -106,6 +107,19 @@ interface CometLog {
   /** Smallest distance from the camera to the nucleus, in world units, and the remaining distance to the closest approach then. */
   minDistance: number;
   remainingAtMin: number | null;
+  /**
+   * The real pass, measured on past the end of the encounter: the nucleus's world position and the
+   * planned path's direction (the heading, held during the encounter), as last seen while the comet
+   * was in the scene; the remaining distance when it left the scene; the smallest distance from the
+   * camera to the nucleus from the spawn until the ship is a coma radius past the closest approach;
+   * and whether it has got that far.
+   */
+  nucleus: { x: number; y: number; z: number } | null;
+  pathDirection: { x: number; y: number; z: number } | null;
+  comaRadius: number | null;
+  remainingAtEnd: number | null;
+  realMinDistance: number;
+  passed: boolean;
   /** The comet's opacity in the first frame it is drawn. */
   firstOpacity: number | null;
   /** Snapshot taken when the watcher paused the engine late in the approach (250 short of the closest approach), the tails stretched past the camera's side. */
@@ -141,6 +155,12 @@ function watch(page: Page): Promise<void> {
       errors: [],
       minDistance: Number.POSITIVE_INFINITY,
       remainingAtMin: null,
+      nucleus: null,
+      pathDirection: null,
+      comaRadius: null,
+      remainingAtEnd: null,
+      realMinDistance: Number.POSITIVE_INFINITY,
+      passed: false,
       firstOpacity: null,
       pausedAt: null,
       pausedAtDeparture: null,
@@ -174,6 +194,14 @@ function watch(page: Page): Promise<void> {
           log.minDistance = comet.distance;
           log.remainingAtMin = a.remaining;
         }
+        if (comet.index === 0) {
+          const ship = s.ship.position;
+          log.nucleus = { x: ship.x + comet.position.x, y: ship.y + comet.position.y, z: ship.z + comet.position.z };
+          log.pathDirection = { ...s.ship.heading };
+          log.comaRadius = comet.radius;
+          log.remainingAtEnd = a.remaining;
+          log.realMinDistance = Math.min(log.realMinDistance, comet.distance);
+        }
         if (log.firstOpacity === null && comet.visible) log.firstOpacity = comet.opacity;
         if (log.pausedAt === null && comet.visible && comet.opacity >= 0.9 && a.remaining !== null && a.remaining <= 250) {
           hook.pause();
@@ -182,6 +210,15 @@ function watch(page: Page): Promise<void> {
           hook.pause();
           log.pausedAtDeparture = hook.snapshot();
         }
+      }
+      if (comet?.index !== 0 && log.nucleus !== null && log.pathDirection !== null && log.comaRadius !== null && !log.passed) {
+        // The first comet has left the scene short of the closest approach: its pass goes on (whether
+        // or not the next encounter has begun).
+        const n = log.nucleus;
+        const d = log.pathDirection;
+        const rel = { x: n.x - s.ship.position.x, y: n.y - s.ship.position.y, z: n.z - s.ship.position.z };
+        log.realMinDistance = Math.min(log.realMinDistance, Math.hypot(rel.x, rel.y, rel.z));
+        if (rel.x * d.x + rel.y * d.y + rel.z * d.z < -log.comaRadius) log.passed = true;
       }
       prev = s;
     };
@@ -261,14 +298,15 @@ test('a forced comet encounter draws its coma and tails, runs the full cycle, co
   expect(approach.bright).toBeLessThan(0.01);
   expect(departed.autopilot.viewMargin).not.toBeNull();
   expect(departed.autopilot.viewMargin!).toBeGreaterThan(0);
-  expect(departure.lit).toBeLessThan(cruise.lit + 0.02);
+  expect(departure.lit).toBeLessThan(cruise.lit + 0.005);
   expect(departure.bright).toBeLessThan(0.005);
 
-  // The encounter carries on to CRUISE.
+  // The encounter carries on to CRUISE, and the ship on past the closest approach.
   await page.evaluate(() => window.__elsewhere!.resume());
   await expect.poll(async () => (await cometLog(page)).afterEncounters.length, { timeout: 300_000, intervals: [2_000] }).toBeGreaterThanOrEqual(1);
+  await expect.poll(async () => (await cometLog(page)).passed, { timeout: 120_000, intervals: [500] }).toBe(true);
   const log = await cometLog(page);
-  test.info().annotations.push({ type: 'comet log', description: JSON.stringify({ ...log, pausedAt: undefined, pausedAtDeparture: undefined }) });
+  test.info().annotations.push({ type: 'comet log', description: JSON.stringify({ ...log, pausedAt: undefined, pausedAtDeparture: undefined, planned: params.radius * params.passFactor }) });
   expect(log.states.slice(0, 5)).toEqual([
     { state: 'CRUISE', index: null, kind: null },
     { state: 'APPROACH', index: 0, kind: 'comet' },
@@ -281,13 +319,22 @@ test('a forced comet encounter draws its coma and tails, runs the full cycle, co
   // Fades in from (nearly) nothing.
   expect(log.firstOpacity).not.toBeNull();
   expect(log.firstOpacity!).toBeLessThan(0.1);
-  // The camera never comes within the minimum pass distance of the nucleus (nor, with it, into the coma).
+  // While the encounter lasts, the camera never comes within the minimum pass distance of the nucleus
+  // (nor, with it, into the coma).
   expect(log.minDistance).toBeGreaterThanOrEqual(COMET_MIN_PASS_DISTANCE * (1 - 1e-6));
   // The ship flies the planned path: its distance from the nucleus is the planned one for where it
   // is along the path (the encounter ends a little short of the closest approach, once the comet is
   // off the screen).
   expect(log.remainingAtMin).not.toBeNull();
   expect(log.minDistance).toBeLessThan(Math.hypot(params.radius * params.passFactor, log.remainingAtMin!) * 1.01);
+  // The real pass, measured on until the ship is a coma radius past the closest approach: the comet
+  // left the scene short of it, and the next cruise eases the heading drift back up while the ship is
+  // still short of the nucleus, so the real pass can be a little nearer than the planned one (at least
+  // 0.969 × it at the slowest level, Comet.test.ts; issue #62 removes the drift), and well outside the coma.
+  expect(log.remainingAtEnd).not.toBeNull();
+  expect(log.remainingAtEnd!).toBeGreaterThan(0);
+  expect(log.realMinDistance).toBeGreaterThanOrEqual(0.95 * params.radius * params.passFactor);
+  expect(log.realMinDistance).toBeGreaterThan(params.radius * (1 + ENCOUNTER_CLEARANCE_MARGIN));
   // While it lasts: two geometries (the nucleus and the glow), at most two draw calls more, no program.
   expect(log.peak.geometries).toBe(log.baseline.geometries + 2);
   expect(log.peak.calls).toBeLessThanOrEqual(log.baseline.calls + 2);

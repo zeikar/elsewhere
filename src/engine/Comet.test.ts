@@ -369,6 +369,77 @@ describe('the camera never passes through a comet (docs/PLAN.md section 6, Varie
     }
     expect(checked).toBe(30);
   }, 60_000);
+
+  it('the real pass, flown with the live view at every level, past the end of the encounter: the nucleus stays near the planned distance and the camera out of the coma and the tails', () => {
+    // On a live screen the encounter ends once the comet is off it, short of the closest approach, and
+    // the next cruise eases the heading drift back up from 0 (`cruiseDriftRate`) while the ship is
+    // still short of the nucleus: the heading is no longer held all the way to the closest approach,
+    // so the real pass can be a little nearer than the planned one (issue #62 removes the drift). The
+    // nucleus and the tails are measured from the captured plan until the ship is a coma radius past
+    // the closest approach. Measured (105 comets, 4:3 to 32:9): at level 0 the nucleus at 0.969 × the
+    // planned distance at the nearest, at levels 1 and 2 at 0.990 ×; tail vertices at 0.96 × (closest
+    // − coma radius) at the nearest.
+    const aspects = [4 / 3, 16 / 9, 32 / 9];
+    let checked = 0;
+    let endedEarly = 0;
+    let worstNucleus = Number.POSITIVE_INFINITY;
+    let worstVertex = Number.POSITIVE_INFINITY;
+    for (let level = 0; level < SHIP_SPEED_LEVELS.length; level++) {
+      for (const aspect of aspects) {
+        for (let n = 0; n < 6; n++) {
+          const p = SEEDED[101 * n + 7 * level + aspects.indexOf(aspect)]!;
+          const view = cameraFrustum(CAMERA_FOV_DEG, aspect, VIEW_WIDEST_ASPECT);
+          const travel = createTravel(cometsOnly(level, { cometFor: () => p, baseSeed: 0x9a55 + 17 * n + level, view }), DEFAULT_SHIP_PARAMS);
+          let plan: Encounter | null = null;
+          let vertices: Vec3[] = [];
+          let ended = false;
+          let remainingAtEnd = Number.NaN;
+          let nearestNucleus = Number.POSITIVE_INFINITY;
+          let nearestVertex = Number.POSITIVE_INFINITY;
+          const rel = { x: 0, y: 0, z: 0 };
+          for (let i = 0; i < 1e6; i++) {
+            stepTravel(travel, 1 / 60);
+            const encounter = travel.autopilot.encounter;
+            if (plan === null) {
+              if (encounter === null) continue;
+              // A copy: the measurement goes on after the autopilot has let go of the encounter.
+              plan = structuredClone(encounter.plan);
+              const geometry = cometGlowGeometry(p, encounter.plan);
+              const position = geometry.getAttribute('position');
+              vertices = Array.from({ length: Math.ceil(position.count / 4) }, (_, k) => ({ x: position.getX(4 * k), y: position.getY(4 * k), z: position.getZ(4 * k) }));
+              geometry.dispose();
+            }
+            const remaining = encounterRemaining(plan, travel.ship.position);
+            if (!ended && encounter === null) {
+              ended = true;
+              remainingAtEnd = remaining;
+            }
+            if (remaining < -plan.radius) break;
+            encounterOffset(plan, travel.ship.position, rel);
+            nearestNucleus = Math.min(nearestNucleus, len(rel));
+            // Every step from the end of the encounter on (and every fourth before it).
+            if (ended || i % 4 === 0) for (const v of vertices) nearestVertex = Math.min(nearestVertex, Math.hypot(rel.x + v.x, rel.y + v.y, rel.z + v.z));
+          }
+          const closest = p.radius * p.passFactor;
+          const label = `level ${level}, aspect ${aspect.toFixed(2)}, seed ${p.seed}`;
+          expect(plan, label).not.toBeNull();
+          expect(encounterRemaining(plan!, travel.ship.position), label).toBeLessThan(-plan!.radius);
+          if (ended && remainingAtEnd > 0) endedEarly++;
+          expect(nearestNucleus, label).toBeGreaterThanOrEqual(0.95 * closest);
+          expect(nearestNucleus, label).toBeGreaterThan(p.radius * (1 + ENCOUNTER_CLEARANCE_MARGIN));
+          expect(nearestVertex, label).toBeGreaterThan(0.9 * (closest - p.radius));
+          worstNucleus = Math.min(worstNucleus, nearestNucleus / closest);
+          worstVertex = Math.min(worstVertex, nearestVertex / (closest - p.radius));
+          checked++;
+        }
+      }
+    }
+    expect(checked).toBe(SHIP_SPEED_LEVELS.length * aspects.length * 6);
+    // Every one of them left the screen, and so ended, short of the closest approach: the case measured.
+    expect(endedEarly).toBe(checked);
+    expect(worstNucleus).toBeGreaterThan(0.95);
+    expect(worstVertex).toBeGreaterThan(0.9);
+  }, 120_000);
 });
 
 describe('comet flybys never whip by', () => {
