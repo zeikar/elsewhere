@@ -542,6 +542,12 @@ export const PLANET_SPHERE_SEGMENTS = [96, 64] as const;
  * Segments around a ring's annulus geometry (one per ringed planet, freed with it). Its edges are
  * chords, so its outer edge lies within the outer radius (the planet's extent) and the fragment
  * shader trims the inner edge to the true circle.
+ *
+ * Encounter-time resources: a ringed planet holds one geometry and one material more than a plain
+ * one (this annulus, 322 vertices and 640 triangles with both windings, and the ring material), and
+ * no program more (the ring draws with the atmosphere's program, kept compiled by ProgramWarmup), so
+ * a planet encounter holds at most 2 geometries and 3 materials of its own; all are freed with the planet,
+ * and the counts at cruise are unchanged (longRun.test.ts, e2e/rings.spec.ts).
  */
 export const PLANET_RING_SEGMENTS = 160;
 
