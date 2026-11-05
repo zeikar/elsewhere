@@ -2,7 +2,7 @@
  * The app URL for e2e specs. Every load without `?seed=` is a new random trip (src/tripSeed.ts), so
  * specs load the app through `appUrl`, which pins the documented test default trip seed
  * (ENCOUNTER_BASE_SEED: an oceanic planet first, then a nebula, then a planet and a nebula, then an
- * asteroid) unless the query already sets one. That keeps the suite deterministic.
+ * asteroid, then a comet) unless the query already sets one. That keeps the suite deterministic.
  * e2e/tripSeed.spec.ts loads the bare APP_PATH on purpose, to check the random seed.
  */
 import { ENCOUNTER_BASE_SEED } from '../src/config';

@@ -1,8 +1,9 @@
 // Long-run stability at the simulation level (docs/PLAN.md sections 5, 6 Performance and 9 Phase 3):
 // 100 accelerated encounters through the engine's own frame sequence (stepTravel, then the
 // encounter view's sync and place) leave every encounter resource freed, with the scene and the
-// shared geometries back at their baseline after each one. Asteroids (Phase 4) own their rocks'
-// geometries, so those are checked to be freed too, over a long run of asteroids alone.
+// shared geometries back at their baseline after each one. Asteroids and comets (Phase 4) own their
+// geometries (the rocks', the nucleus's and the glow's), so those are checked to be freed too, over
+// long runs of asteroids alone and of comets alone.
 import { Scene, type BufferGeometry, type Material, type Object3D } from 'three';
 import { afterEach, describe, expect, it } from 'vitest';
 import { DT_CAP_SECONDS, SHIP_SPEED_LEVELS } from '../config';
@@ -17,6 +18,7 @@ import {
   type Travel,
 } from './Autopilot';
 import { asteroidParams } from './Asteroid';
+import { cometParams } from './Comet';
 import { EncounterView } from './EncounterView';
 import { disposeNebulaGeometry, nebulaGeometryRefs, nebulaParams } from './Nebula';
 import { disposePlanetGeometry, planetGeometryRefs, planetParams, planetProgramMaterials } from './Planet';
@@ -28,7 +30,7 @@ afterEach(() => {
   disposeNebulaGeometry();
 });
 
-/** Engine-like params: seeded planets, nebulae and asteroids in the default mix (or `overrides`), a short interval, top speed. */
+/** Engine-like params: seeded planets, nebulae, asteroids and comets in the default mix (or `overrides`), a short interval, top speed. */
 function longRunParams(interval: number, overrides: Partial<AutopilotParams> = {}): AutopilotParams {
   const params: AutopilotParams = {
     ...DEFAULT_AUTOPILOT_PARAMS,
@@ -36,6 +38,7 @@ function longRunParams(interval: number, overrides: Partial<AutopilotParams> = {
     planetFor: planetParams,
     nebulaFor: nebulaParams,
     asteroidFor: asteroidParams,
+    cometFor: cometParams,
     ...overrides,
   };
   setCruiseSpeed(params, SHIP_SPEED_LEVELS[SHIP_SPEED_LEVELS.length - 1]!);
@@ -100,6 +103,9 @@ interface LongRunResult {
   mostRocks: number;
   /** The program keys asteroid rocks drew with. */
   asteroidPrograms: Set<string>;
+  /** The program keys comets drew with, and comet encounters drawn without their tails. */
+  cometPrograms: Set<string>;
+  tailless: number;
   frames: number;
 }
 
@@ -109,7 +115,7 @@ function runEncounters(travel: Travel, count: number, dt: (frame: number) => num
   const view = new EncounterView(scene);
   const ledger = new ResourceLedger();
   const result: LongRunResult = {
-    kinds: { planet: 0, nebula: 0, asteroid: 0 },
+    kinds: { planet: 0, nebula: 0, asteroid: 0, comet: 0 },
     ringed: 0,
     leaks: [],
     worstJump: Number.NEGATIVE_INFINITY,
@@ -117,10 +123,13 @@ function runEncounters(travel: Travel, count: number, dt: (frame: number) => num
       planet: { geometries: 0, materials: 0, programs: 0 },
       nebula: { geometries: 0, materials: 0, programs: 0 },
       asteroid: { geometries: 0, materials: 0, programs: 0 },
+      comet: { geometries: 0, materials: 0, programs: 0 },
     },
     fields: 0,
     mostRocks: 0,
     asteroidPrograms: new Set(),
+    cometPrograms: new Set(),
+    tailless: 0,
     frames: 0,
   };
   let tracked: object | null = null;
@@ -158,6 +167,13 @@ function runEncounters(travel: Travel, count: number, dt: (frame: number) => num
         // One geometry and one material per rock.
         if (ledger.geometries.size !== asteroid.rocks.length) result.leaks.push(`asteroid with ${asteroid.rocks.length} rocks holds ${ledger.geometries.size} geometries`);
         for (const key of ledger.programKeys()) result.asteroidPrograms.add(key);
+      }
+      const comet = view.getComet();
+      if (comet !== null) {
+        // The nucleus and the glow: one geometry and one material each.
+        if (ledger.geometries.size !== 2) result.leaks.push(`comet holds ${ledger.geometries.size} geometries`);
+        if (!comet.params.tails) result.tailless++;
+        for (const key of ledger.programKeys()) result.cometPrograms.add(key);
       }
       const peak = result.peak[kind];
       peak.geometries = Math.max(peak.geometries, ledger.geometries.size);
@@ -202,7 +218,7 @@ describe('long run (simulation level)', () => {
     expect(ledger.materials.size).toBe(0);
   });
 
-  it('100 accelerated encounters, planets, nebulae and asteroids, each return every resource to baseline', () => {
+  it('100 accelerated encounters, planets, nebulae, asteroids and comets, each return every resource to baseline', () => {
     // Top speed, a 1 s interval and the capped 0.1 s step: the fastest the engine can run them.
     const travel = createTravel(longRunParams(1), DEFAULT_SHIP_PARAMS);
     const result = runEncounters(travel, 100, () => DT_CAP_SECONDS);
@@ -211,10 +227,11 @@ describe('long run (simulation level)', () => {
     expect(travel.autopilot.state).toBe('CRUISE');
     expect(result.leaks).toEqual([]);
     // The default mix: every kind, many times.
-    expect(result.kinds.planet + result.kinds.nebula + result.kinds.asteroid).toBe(100);
-    expect(result.kinds.planet).toBeGreaterThan(30);
+    expect(result.kinds.planet + result.kinds.nebula + result.kinds.asteroid + result.kinds.comet).toBe(100);
+    expect(result.kinds.planet).toBeGreaterThan(25);
     expect(result.kinds.nebula).toBeGreaterThan(20);
     expect(result.kinds.asteroid).toBeGreaterThan(5);
+    expect(result.kinds.comet).toBeGreaterThan(3);
     // A planet encounter holds one shared geometry (a ringed planet its own ring geometry too) and a
     // handful of materials, never more. A ring draws with the atmosphere's (halo) program.
     expect(result.ringed).toBeGreaterThan(0);
@@ -231,6 +248,13 @@ describe('long run (simulation level)', () => {
     expect(result.peak.asteroid.materials).toBeLessThanOrEqual(7);
     expect(result.peak.asteroid.programs).toBe(1);
     expect(result.asteroidPrograms).toEqual(new Set([programKey(planetProgramMaterials()[0]!)]));
+    // A comet: the nucleus and the glow, a geometry and a material each, drawn with the rocky surface
+    // program and the halo program (the atmosphere's and the ring's).
+    expect(result.peak.comet.geometries).toBe(2);
+    expect(result.peak.comet.materials).toBe(2);
+    expect(result.peak.comet.programs).toBe(2);
+    const [rocky, , halo] = planetProgramMaterials();
+    expect(result.cometPrograms).toEqual(new Set([programKey(rocky!), programKey(halo!)]));
     // No frame moves the ship further than its speed allows.
     expect(result.worstJump).toBeLessThanOrEqual(1e-6);
     // Positions stay finite (float64 on the CPU) after the long run.
@@ -243,7 +267,7 @@ describe('long run (simulation level)', () => {
     const travel = createTravel(longRunParams(1, { nebulaShare: 0, asteroidShare: 1 }), DEFAULT_SHIP_PARAMS);
     const result = runEncounters(travel, 120, () => DT_CAP_SECONDS);
     expect(travel.autopilot.encounterCount).toBe(120);
-    expect(result.kinds).toEqual({ planet: 0, nebula: 0, asteroid: 120 });
+    expect(result.kinds).toEqual({ planet: 0, nebula: 0, asteroid: 120, comet: 0 });
     // Nothing left after any of them (no growth over the run), with every encounter's rocks counted.
     expect(result.leaks).toEqual([]);
     expect(result.fields).toBeGreaterThan(30);
@@ -252,6 +276,21 @@ describe('long run (simulation level)', () => {
     expect(result.peak.asteroid.geometries).toBe(7);
     expect(result.peak.asteroid.materials).toBe(7);
     expect(result.peak.asteroid.programs).toBe(1);
+    expect(result.worstJump).toBeLessThanOrEqual(1e-6);
+  }, 60_000);
+
+  it('120 accelerated comet encounters each free the nucleus and the glow, with no growth over the run', () => {
+    const travel = createTravel(longRunParams(1, { nebulaShare: 0, asteroidShare: 0, cometShare: 1 }), DEFAULT_SHIP_PARAMS);
+    const result = runEncounters(travel, 120, () => DT_CAP_SECONDS);
+    expect(travel.autopilot.encounterCount).toBe(120);
+    expect(result.kinds).toEqual({ planet: 0, nebula: 0, asteroid: 0, comet: 120 });
+    // Nothing left after any of them, every comet drawn with its tails, and the same two programs.
+    expect(result.leaks).toEqual([]);
+    expect(result.tailless).toBe(0);
+    expect(result.peak.comet.geometries).toBe(2);
+    expect(result.peak.comet.materials).toBe(2);
+    expect(result.peak.comet.programs).toBe(2);
+    expect(result.cometPrograms.size).toBe(2);
     expect(result.worstJump).toBeLessThanOrEqual(1e-6);
   }, 60_000);
 

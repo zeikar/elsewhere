@@ -34,6 +34,7 @@ import {
   updateAutopilot,
   viewEntryDuration,
   type AsteroidEncounter,
+  type CometEncounter,
   type AutopilotParams,
   type PlanetEncounter,
   type PlanetSpec,
@@ -50,9 +51,11 @@ import {
   viewConeHalfAngle,
 } from './encounter';
 import { Asteroid, asteroidParams } from './Asteroid';
+import { Comet, cometParams } from './Comet';
 import {
   EncounterView,
   encounterAsteroidParams,
+  encounterCometParams,
   encounterLightDirection,
   encounterNebulaParams,
   encounterPlanetParams,
@@ -70,19 +73,21 @@ const dist = (a: Vec3, b: Vec3) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 const CYCLE: TravelState[] = ['APPROACH', 'FLYBY', 'DEPARTURE', 'CRUISE'];
 
 /**
- * Engine-like autopilot params: seeded planets, nebulae and asteroids, a short interval, cruise at
- * speed level `level`. Planets only unless `nebulaShare` is given (and with it no asteroids unless
- * `asteroidShare` is).
+ * Engine-like autopilot params: seeded planets, nebulae, asteroids and comets, a short interval,
+ * cruise at speed level `level`. Planets only unless `nebulaShare` is given (and with it no asteroids
+ * or comets unless `asteroidShare` and `cometShare` are).
  */
-function engineParams(level = SHIP_DEFAULT_SPEED_LEVEL, interval = 2, nebulaShare = 0, asteroidShare = 0): AutopilotParams {
+function engineParams(level = SHIP_DEFAULT_SPEED_LEVEL, interval = 2, nebulaShare = 0, asteroidShare = 0, cometShare = 0): AutopilotParams {
   const params: AutopilotParams = {
     ...DEFAULT_AUTOPILOT_PARAMS,
     interval,
     planetFor: planetParams,
     nebulaFor: nebulaParams,
     asteroidFor: asteroidParams,
+    cometFor: cometParams,
     nebulaShare,
     asteroidShare,
+    cometShare,
   };
   setCruiseSpeed(params, SHIP_SPEED_LEVELS[level]!);
   return params;
@@ -344,23 +349,31 @@ describe('EncounterView with nebulae', () => {
   it('with the default shares, each encounter gets the object of its kind, and all are freed', () => {
     const scene = new Scene();
     const view = new EncounterView(scene);
-    const travel = createTravel(engineParams(2, 1, DEFAULT_AUTOPILOT_PARAMS.nebulaShare, DEFAULT_AUTOPILOT_PARAMS.asteroidShare), DEFAULT_SHIP_PARAMS);
+    const travel = createTravel(
+      engineParams(2, 1, DEFAULT_AUTOPILOT_PARAMS.nebulaShare, DEFAULT_AUTOPILOT_PARAMS.asteroidShare, DEFAULT_AUTOPILOT_PARAMS.cometShare),
+      DEFAULT_SHIP_PARAMS,
+    );
     const kinds: string[] = [];
     let last: unknown = null;
-    for (let i = 0; i < 200_000 && (travel.autopilot.encounterCount < 5 || travel.autopilot.encounter !== null); i++) {
+    for (let i = 0; i < 200_000 && (travel.autopilot.encounterCount < 6 || travel.autopilot.encounter !== null); i++) {
       frame(travel, view, 1 / 20);
       const current = view.getObject();
       const encounter = travel.autopilot.encounter;
       if (current !== null && current !== last) {
         last = current;
-        kinds.push(current instanceof Nebula ? 'nebula' : current instanceof Asteroid ? 'asteroid' : 'planet');
+        kinds.push(current instanceof Nebula ? 'nebula' : current instanceof Asteroid ? 'asteroid' : current instanceof Comet ? 'comet' : 'planet');
         expect(kinds.at(-1)).toBe(encounter!.kind);
         if (current instanceof Asteroid) expect(current.params).toEqual(encounterAsteroidParams(encounter as AsteroidEncounter));
+        if (current instanceof Comet) {
+          expect(current.params).toEqual(encounterCometParams(encounter as CometEncounter));
+          // Drawn with its tails: the engine's chooser bounds them.
+          expect(current.params.tails).toBe(true);
+        }
       }
     }
-    // The test default trip: a planet, a nebula, a planet, a nebula, then an asteroid.
-    expect(kinds.slice(0, 5)).toEqual(encounterSchedule(travel.autopilotParams, 5).map((e) => e.kind));
-    expect(new Set(kinds)).toEqual(new Set(['planet', 'nebula', 'asteroid']));
+    // The test default trip: a planet, a nebula, a planet, a nebula, an asteroid, then a comet.
+    expect(kinds.slice(0, 6)).toEqual(encounterSchedule(travel.autopilotParams, 6).map((e) => e.kind));
+    expect(new Set(kinds)).toEqual(new Set(['planet', 'nebula', 'asteroid', 'comet']));
     view.dispose();
     expect(planetGeometryRefs()).toBe(0);
     expect(nebulaGeometryRefs()).toBe(0);
@@ -531,7 +544,7 @@ function onSomeScreen(closest: number, remaining: number, viewRadius: number): b
 function medianPlanetFlyby(level: number, planet: PlanetSpec = { radius: medianPlanetRadius() }, view: AutopilotParams['view'] = null) {
   const radius = planet.radius;
   const viewRadius = radius * planetViewRadiusFactor(planet);
-  const params: AutopilotParams = { ...DEFAULT_AUTOPILOT_PARAMS, nebulaShare: 0, asteroidShare: 0, planetFor: () => planet, view };
+  const params: AutopilotParams = { ...DEFAULT_AUTOPILOT_PARAMS, nebulaShare: 0, asteroidShare: 0, cometShare: 0, planetFor: () => planet, view };
   setCruiseSpeed(params, SHIP_SPEED_LEVELS[level]!);
   const travel = createTravel(params, DEFAULT_SHIP_PARAMS);
   const dt = 1 / 60;
@@ -790,7 +803,7 @@ describe('the travel step', () => {
       // rate, exactly as `medianPlanetFlyby` measures it.
       const dt = 1 / 60;
       // Flown to the despawn distance (no view): the profile any planet is flown with while on screen.
-      const travel = createTravel({ ...DEFAULT_AUTOPILOT_PARAMS, nebulaShare: 0, asteroidShare: 0, planetFor: () => ({ radius: 50 }), view: null }, DEFAULT_SHIP_PARAMS);
+      const travel = createTravel({ ...DEFAULT_AUTOPILOT_PARAMS, nebulaShare: 0, asteroidShare: 0, cometShare: 0, planetFor: () => ({ radius: 50 }), view: null }, DEFAULT_SHIP_PARAMS);
       setCruiseSpeed(travel.autopilotParams, SHIP_SPEED_LEVELS[level]!);
       const trace: number[] = [];
       for (let i = 0; i < 1e6 && !(trace.length > 0 && travel.autopilot.encounter === null); i++) {

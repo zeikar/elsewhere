@@ -1,14 +1,14 @@
 /**
- * Encounter view: puts the Autopilot's encounter object, a planet, a nebula or an asteroid, into the
- * scene (docs/PLAN.md section 6, floating origin, Planets, Nebulae, Variety and Performance).
+ * Encounter view: puts the Autopilot's encounter object, a planet, a nebula, an asteroid or a comet,
+ * into the scene (docs/PLAN.md section 6, floating origin, Planets, Nebulae, Variety and Performance).
  *
  * - Every kind sits behind one small interface (`EncounterObject`: a root object, fade, size scale,
  *   per-frame update and dispose), so the lifecycle, warm-up and placement below are shared.
  * - Lifecycle: the object is created when an encounter starts (the step that enters APPROACH) and
  *   disposed once it ends (DEPARTURE back to CRUISE). The shared planet sphere and nebula plane are
  *   reference-counted by `Planet` and `Nebula`, so each is freed with the last live object holding it,
- *   and an asteroid frees its rocks' own geometries, so GPU memory returns to its pre-encounter
- *   baseline.
+ *   and an asteroid frees its rocks' own geometries and a comet its nucleus and glow, so GPU memory
+ *   returns to its pre-encounter baseline.
  * - Shader warm-up: the view hands each new object to a `compile` function (the engine passes
  *   `renderer.compileAsync`, which compiles in parallel where `KHR_parallel_shader_compile` is
  *   available) and keeps it hidden, at fade 0, until that settles, so the first frame that draws it
@@ -19,7 +19,8 @@
  *   in float64 on the CPU from the encounter plan and written into its preallocated
  *   `object.position`. Large absolute coordinates never reach the GPU.
  * - Opacity and size follow the encounter fade curves; `update` takes the simulation time (the
- *   planet's rotation, the nebula's churn and per-layer near fade, the rocks' tumble), so it freezes
+ *   planet's rotation, the nebula's churn and per-layer near fade, the rocks' and the nucleus's
+ *   tumble), so it freezes
  *   while paused.
  *
  * Nothing is allocated per frame; creating an object (once per encounter) allocates its materials.
@@ -31,9 +32,11 @@ import {
   planetViewRadiusFactor,
   type AsteroidEncounter,
   type AutopilotState,
+  type CometEncounter,
   type NebulaEncounter,
   type PlanetEncounter,
 } from './Autopilot';
+import { Comet, cometParams, type CometParams } from './Comet';
 import { encounterOffset, encounterScale, type Encounter, type EncounterProfile } from './encounter';
 import { Nebula, nebulaParams, type NebulaParams } from './Nebula';
 import { Planet, planetParams, type PlanetParams } from './Planet';
@@ -41,7 +44,7 @@ import type { ShipState, Vec3 } from './Ship';
 
 /**
  * Writes the encounter object's render position, `centre - ship position`, into `out` and returns
- * it (planets, nebulae and asteroids alike).
+ * it (planets, nebulae, asteroids and comets alike).
  *
  * The difference is taken in float64 from the encounter plan (see `encounterOffset`), so it stays
  * small (within the encounter distances) and exact even with ship positions around 1e12, and the
@@ -146,7 +149,45 @@ export function encounterAsteroidParams(encounter: Readonly<AsteroidEncounter>):
   };
 }
 
-/** What the view needs from an encounter object; `Planet`, `Nebula` and `Asteroid` all provide it. */
+/**
+ * Seeded comet parameters for an encounter, with the planned coma radius (as for the other kinds, so
+ * the planned clearance holds whatever chose the comet): a different radius scales the whole comet,
+ * its nucleus, coma, tails and bounds alike, and the pass factor is the plan's. The tails are drawn
+ * only if the encounter's spec bounds them as drawn (`CometSpec.bounds`, which the out-of-view test
+ * uses), so they leave the view with the encounter; with the engine's chooser (`cometParams`) they
+ * always are, and a comet chosen otherwise (a bare `{ radius }`, as in tests) is drawn without them,
+ * as a ring that does not fit its plan is (`encounterPlanetParams`).
+ */
+export function encounterCometParams(encounter: Readonly<CometEncounter>): CometParams {
+  const params = cometParams(encounter.seed);
+  const { radius, closestDistance } = encounter.plan;
+  const k = radius / params.radius;
+  const scaled = (v: readonly [number, number, number]) => [v[0] * k, v[1] * k, v[2] * k] as const;
+  const scaledParams: CometParams =
+    k === 1
+      ? params
+      : {
+          ...params,
+          radius,
+          bounds: params.bounds.map((b) => ({ offset: scaled(b.offset), radius: b.radius * k })),
+          nucleus: { ...params.nucleus, radius: params.nucleus.radius * k },
+          ion: { ...params.ion, length: params.ion.length * k, headWidth: params.ion.headWidth * k, endWidth: params.ion.endWidth * k },
+          dust: { ...params.dust, length: params.dust.length * k, headWidth: params.dust.headWidth * k, endWidth: params.dust.endWidth * k },
+        };
+  const spec = encounter.comet.bounds;
+  const close = (a: number, b: number) => Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(a), Math.abs(b));
+  const fits =
+    spec !== undefined &&
+    spec.length === scaledParams.bounds.length &&
+    scaledParams.bounds.every(
+      (b, i) => close(b.radius, spec[i]!.radius) && b.offset.every((x, j) => close(x, spec[i]!.offset[j]!)),
+    );
+  const passFactor = closestDistance / radius;
+  if (fits && scaledParams === params && params.passFactor === passFactor) return params;
+  return { ...scaledParams, passFactor, tails: fits };
+}
+
+/** What the view needs from an encounter object; `Planet`, `Nebula`, `Asteroid` and `Comet` all provide it. */
 export interface EncounterObject {
   /** Root object in the scene; its position is the object's centre relative to the ship. */
   readonly object: Object3D;
@@ -182,7 +223,7 @@ export class EncounterView {
     this.compile = compile;
   }
 
-  /** The current encounter object, planet, nebula or asteroid, or `null` (read-only view; do not modify). */
+  /** The current encounter object, planet, nebula, asteroid or comet, or `null` (read-only view; do not modify). */
   getObject(): EncounterObject | null {
     return this.current;
   }
@@ -202,8 +243,13 @@ export class EncounterView {
     return this.current instanceof Asteroid ? this.current : null;
   }
 
+  /** The comet of the current encounter, or `null` (read-only view; do not modify). */
+  getComet(): Comet | null {
+    return this.current instanceof Comet ? this.current : null;
+  }
+
   /**
-   * Creates the planet, nebula or asteroid when an encounter starts and disposes it once the
+   * Creates the planet, nebula, asteroid or comet when an encounter starts and disposes it once the
    * encounter ends (or is replaced by another). Call after each simulation step.
    */
   sync(autopilot: Readonly<AutopilotState>): void {
@@ -215,7 +261,9 @@ export class EncounterView {
         ? new Nebula(encounterNebulaParams(encounter), encounter.plan)
         : encounter.kind === 'asteroid'
           ? new Asteroid(encounterAsteroidParams(encounter), encounterLightDirection(encounter.plan, this.light), encounter.plan)
-          : new Planet(encounterPlanetParams(encounter), encounterLightDirection(encounter.plan, this.light), encounter.plan);
+          : encounter.kind === 'comet'
+            ? new Comet(encounterCometParams(encounter), encounter.plan)
+            : new Planet(encounterPlanetParams(encounter), encounterLightDirection(encounter.plan, this.light), encounter.plan);
     created.setFade(0);
     this.current = created;
     this.index = encounter.index;

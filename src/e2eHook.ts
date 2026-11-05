@@ -5,7 +5,7 @@
  *
  * The hook is read-only toward the engine: getters expose engine state, and the only engine
  * methods are its own public API, which the UI will call anyway. `showPlanet` / `showEncounter` /
- * `hidePlanet` draw a planet, a nebula or an asteroid on a separate e2e-only canvas (src/e2ePlanetPreview.ts) and
+ * `hidePlanet` draw a planet, a nebula, an asteroid or a comet on a separate e2e-only canvas (src/e2ePlanetPreview.ts) and
  * never touch the engine.
  *
  * Performance instrumentation: `snapshot().perf` reports the engine's rolling frame-time statistics
@@ -16,7 +16,7 @@
  *
  * `e2eEngineOptions` reads e2e-only engine overrides from the page URL (also absent from the
  * production build): `?encounterInterval=<seconds>` shortens (or, with a huge value, effectively
- * disables) the encounter interval so tests run quickly, `?encounterKind=planet|nebula|asteroid` makes
+ * disables) the encounter interval so tests run quickly, `?encounterKind=planet|nebula|asteroid|comet` makes
  * every encounter that kind, `?starLayers=far|near` draws only that star layer, `?headingDrift=0`
  * holds the heading at -Z (so the ship only translates), and `?arrivalSpeed=<u/s>` sets the arrival
  * speed (a value at or above the top speed flies encounters from the top speed, without dropping
@@ -63,7 +63,7 @@ export interface E2EProbe {
   state: TravelState;
   /** Index of the encounter in progress, or -1 in CRUISE. */
   encounterIndex: number;
-  /** Whether the encounter object (planet, nebula or asteroid) is drawn this frame. */
+  /** Whether the encounter object (planet, nebula, asteroid or comet) is drawn this frame. */
   visible: boolean;
   /** Interval from the previous frame to the latest one, in ms (NaN when it had none, e.g. after a resume). */
   frameMs: number;
@@ -181,7 +181,7 @@ export interface E2EHookSnapshot {
     /** Whether the latest encounter ended off screen, so this cruise returns to warp with the quick entry. */
     entryQuick: boolean;
   };
-  /** Objects in the scene besides the two star layers and the galaxies (the encounter planet, nebula or asteroid). */
+  /** Objects in the scene besides the two star layers and the galaxies (the encounter planet, nebula, asteroid or comet). */
   planets: number;
   /** The encounter planet as last placed for rendering, or `null`. */
   planet: {
@@ -247,6 +247,30 @@ export interface E2EHookSnapshot {
      */
     rocks: { radius: number; position: { x: number; y: number; z: number }; ndc: { x: number; y: number; z: number } }[];
   } | null;
+  /** The encounter comet as last placed for rendering, or `null`. */
+  comet: {
+    index: number;
+    seed: number;
+    family: string;
+    /** Coma radius, and the nucleus's bounding radius, in world units. */
+    radius: number;
+    nucleusRadius: number;
+    /** Whether the tails are drawn. */
+    tails: boolean;
+    /** Encounter opacity uniform. */
+    opacity: number;
+    visible: boolean;
+    /** Render position: the nucleus relative to the ship (camera at the origin). */
+    position: { x: number; y: number; z: number };
+    /** Distance from the camera to the nucleus. */
+    distance: number;
+    /** The nucleus in normalised device coordinates. */
+    ndc: { x: number; y: number; z: number };
+    /** Unit direction toward the comet's sun, and the ion and dust tails' unit directions at the head, in world space. */
+    sun: { x: number; y: number; z: number };
+    ion: { x: number; y: number; z: number };
+    dust: { x: number; y: number; z: number };
+  } | null;
 }
 
 export interface E2EHook {
@@ -267,9 +291,9 @@ export interface E2EHook {
    */
   showPlanet(type: PlanetType, nth?: number, options?: PlanetPreviewOptions): PlanetPreviewInfo;
   /**
-   * Draws the planet, nebula or asteroid for appearance seed `seed` on the same overlay canvas,
-   * replacing anything shown: a planet framed as `showPlanet` frames it, a nebula as seen
-   * mid-APPROACH, an asteroid framed by its bounding radius.
+   * Draws the planet, nebula, asteroid or comet for appearance seed `seed` on the same overlay
+   * canvas, replacing anything shown: a planet framed as `showPlanet` frames it, a nebula and a comet
+   * as seen mid-APPROACH, an asteroid framed by its bounding radius.
    */
   showEncounter(kind: EncounterKind, seed: number): EncounterPreviewInfo;
   /**
@@ -303,7 +327,7 @@ export function e2eEngineOptions(
   const arrival = rawArrival === null ? Number.NaN : Number(rawArrival);
   return {
     ...(interval >= 0 ? { encounterInterval: interval } : {}),
-    ...(kind === 'planet' || kind === 'nebula' || kind === 'asteroid' ? { encounterKind: kind } : {}),
+    ...(kind === 'planet' || kind === 'nebula' || kind === 'asteroid' || kind === 'comet' ? { encounterKind: kind } : {}),
     ...(layers === 'far' || layers === 'near' || layers === 'both' ? { starLayers: layers } : {}),
     ...(drift === '0' ? { headingDrift: false } : {}),
     ...(arrival > 0 ? { arrivalSpeed: arrival } : {}),
@@ -423,6 +447,29 @@ export function installE2EHook(engine: Engine): void {
           }),
         };
       }
+      const comet = engine.getComet();
+      let cometView: E2EHookSnapshot['comet'] = null;
+      if (comet !== null && autopilot.encounter !== null) {
+        const p = comet.object.position;
+        ndc.copy(p).project(engine.getCamera());
+        const v = (x: Vector3) => ({ x: x.x, y: x.y, z: x.z });
+        cometView = {
+          index: autopilot.encounter.index,
+          seed: comet.params.seed,
+          family: comet.params.family,
+          radius: comet.params.radius,
+          nucleusRadius: comet.params.nucleus.radius,
+          tails: comet.params.tails,
+          opacity: comet.uniforms.uOpacity.value,
+          visible: comet.object.visible,
+          position: { x: p.x, y: p.y, z: p.z },
+          distance: p.length(),
+          ndc: { x: ndc.x, y: ndc.y, z: ndc.z },
+          sun: v(comet.uniforms.uLightDir.value),
+          ion: v(comet.tailDirections.ion),
+          dust: v(comet.tailDirections.dust),
+        };
+      }
       const galaxyInfo = engine.getGalaxyInfo();
       const galaxies: E2EHookSnapshot['galaxies'] = {
         visible: galaxyInfo.visible,
@@ -490,6 +537,7 @@ export function installE2EHook(engine: Engine): void {
         planet: planetView,
         nebula: nebulaView,
         asteroid: asteroidView,
+        comet: cometView,
       };
     },
     probe(out = newProbe()) {

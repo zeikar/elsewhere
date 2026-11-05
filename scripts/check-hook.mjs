@@ -1,6 +1,6 @@
 // Asserts that the production build in dist/ does not contain the e2e test hook
 // (window.__elsewhere, installed only in `vite build --mode e2e`), nor the e2e-only URL overrides it
-// reads (`e2eEngineOptions`: `?encounterKind=planet|nebula|asteroid`, `?encounterInterval=`, …).
+// reads (`e2eEngineOptions`: `?encounterKind=planet|nebula|asteroid|comet`, `?encounterInterval=`, …).
 // Run after `npm run build`.
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';

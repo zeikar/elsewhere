@@ -222,9 +222,9 @@ export const ENCOUNTER_INTERVAL_SECONDS = 40;
 export const ENCOUNTER_INTERVAL_JITTER = 0.2;
 
 /**
- * Most encounters of one kind in a row. Planets and asteroids are both solid bodies and count as one
- * run here, so this caps runs of nebulae and runs of solid bodies, and with them runs of every kind
- * (planet, nebula or asteroid). When the seeded draw would make one more, the encounter is the other
+ * Most encounters of one kind in a row. Planets, asteroids and comets are all solid bodies and count
+ * as one run here, so this caps runs of nebulae and runs of solid bodies, and with them runs of every
+ * kind (planet, nebula, asteroid or comet). When the seeded draw would make one more, the encounter is the other
  * class instead; the draw is biased to compensate, so the long-run share of nebulae is still
  * ENCOUNTER_NEBULA_SHARE. Ignored when every encounter is forced to one kind.
  */
@@ -293,6 +293,8 @@ export const ENCOUNTER_WARP_ENTRY_SECONDS = 8;
  *   ring's sphere, lies wholly outside the view (`frustumSphereMargin`, exact past the corners too).
  *   A planet passed far to the side or above often leaves before its closest approach.
  * - An asteroid, once the sphere that bounds its field does.
+ * - A comet, once the spheres that hold its coma and every stretch of both tails (`CometSpec.bounds`)
+ *   all do; its tails trail back and away from the path, so it leaves with its coma (see Comets).
  * - A nebula is large and soft, and its layers reach across the path, so it is off the screen only
  *   once every layer lies behind the camera: the ship is past the farthest any layer reaches along the
  *   path (`nebulaViewExtent`, a bound drawn from NEBULA_RANGES in core radii), and the heading has not
@@ -342,9 +344,10 @@ export const ENCOUNTER_PLANET_RADIUS = 48;
  * and the e2e suite passes it as `?seed=91b3a5ba`, so tests stay deterministic. It is chosen for its
  * opening: an oceanic planet first, then a nebula, then another planet and another nebula (and an
  * asteroid fifth, at index 4: the asteroid draw, ENCOUNTER_ASTEROID_SHARE, leaves the first four as
- * they were). Every
- * trip seed starts with a planet (`encounterKindAt`) within the 30–60 s of docs/PLAN.md section 9,
- * Phase 2 (see ENCOUNTER_INTERVAL_JITTER).
+ * they were; and a comet sixth, at index 5: the comet draw, ENCOUNTER_COMET_SHARE, leaves the first
+ * five as they were). Its first 50 encounters hold a ringed planet, an icy dwarf, asteroids and
+ * comets (docs/PLAN.md section 9, Phase 4). Every trip seed starts with a planet (`encounterKindAt`)
+ * within the 30–60 s of docs/PLAN.md section 9, Phase 2 (see ENCOUNTER_INTERVAL_JITTER).
  */
 export const ENCOUNTER_BASE_SEED = 0x91b3_a5ba;
 
@@ -613,7 +616,8 @@ export const PLANET_RING_SEGMENTS = 160;
 
 /*
  * Nebulae (docs/PLAN.md section 6, Nebulae (Phase 3)): layered, soft-blended planes shaded with a
- * cheap fBm fragment shader. An encounter is a planet, a nebula or an asteroid (see Asteroids below), chosen from the encounter's
+ * cheap fBm fragment shader. An encounter is a planet, a nebula, an asteroid or a comet (see Asteroids
+ * and Comets below), chosen from the encounter's
  * appearance seed `hash(tripSeed, index)` (see ENCOUNTER_BASE_SEED). Nebula encounters use the same planned-path
  * maths as planets (`planEncounter`), with their own distance, side offset, speed and fade curves.
  *
@@ -625,7 +629,7 @@ export const PLANET_RING_SEGMENTS = 160;
  * camera nears its plane (NEBULA_NEAR_FADE_*), so passing through never pops.
  */
 
-/** Share of encounters that are nebulae; the rest are planets. */
+/** Share of encounters that are nebulae; the rest are solid bodies (planets, asteroids and comets). */
 export const ENCOUNTER_NEBULA_SHARE = 0.35;
 
 /** Bounds the nebula share over any 1,000 consecutive encounter indices must stay within. */
@@ -745,7 +749,7 @@ export const NEBULA_NOISE_OFFSET_RANGE = [-100, 100] as const;
  * unchanged, and a second seeded draw, from a stream of its own, turns some of the planets into
  * asteroids, so ENCOUNTER_ASTEROID_SHARE of all encounters are asteroids in the long run: the nebula
  * share stays 0.35, and the planet share goes from 0.65 to 0.5 (planets to nebulae from 65:35 to
- * 50:35). Every nebula stays where it was in every trip, and every planet that stays a planet keeps
+ * 50:35; comets then take it to 0.4, see Comets below). Every nebula stays where it was in every trip, and every planet that stays a planet keeps
  * its look. The first encounter of every trip is still a planet.
  *
  * Plan: the encounter radius is the field's bounding radius (a sphere about the field centre holding
@@ -868,6 +872,226 @@ export const ASTEROID_RANGES = {
  * cruise are unchanged (longRun.test.ts, e2e/asteroid.spec.ts).
  */
 export const ASTEROID_DETAIL = { main: 8, satellite: 3 } as const;
+
+/*
+ * Comets (docs/PLAN.md section 6, Variety, and section 9, Phase 4): a small, dark, irregular nucleus
+ * in a soft glowing coma, with a straight bluish ion tail and a broader, curved, yellowish dust tail,
+ * both pointing away from the comet's "sun". `cometParams(seed)` in engine/Comet.ts draws every value
+ * below from an encounter's appearance seed.
+ *
+ * - The nucleus is an irregular body (`irregularBodyGeometry`, shared with asteroid rocks, with
+ *   broader lobes and fewer, shallower pits) shaded with the rocky planet surface program in dark,
+ *   sooty tones, tumbling slowly.
+ * - The coma and the tails are one additive mesh drawn with the planets' halo program (the
+ *   atmosphere's and the ring's, `cometGlowMaterial` in engine/Planet.ts): a sphere for the coma and
+ *   an open tube along each tail's axis, whose fragments add the glow of the gas along the view ray
+ *   (from how close the ray passes to the coma centre or the tail's axis), so the glow is soft from
+ *   every side and costs one fragment per covered pixel per piece. Comets add no shader program.
+ * - The sun of a comet encounter is ahead of the comet, toward the path and a little up, in the
+ *   encounter's own frame (COMET_ENCOUNTER_LIGHT), so both tails point away from the path and back
+ *   along it: the ship flies in alongside the tails toward the head, both tails' axes only move away
+ *   from the path from the nucleus on, no part of either comes nearer the path than the coma's edge
+ *   (the camera never meets a tail, checked in Comet.test.ts), and from the camera both lie farther
+ *   out to the comet's side than the coma, so they leave the screen with it (Autopilot.test.ts).
+ *
+ * Schedule: the planet-or-nebula draw and the asteroid draw are unchanged, and a third seeded draw,
+ * from a stream of its own, turns some of the remaining planets into comets, so
+ * ENCOUNTER_COMET_SHARE of all encounters are comets in the long run: nebulae 0.35, asteroids 0.15,
+ * comets 0.10 and planets 0.40 (from 0.5), so comets are the rarest kind and planets stay the most
+ * common. Every nebula and every asteroid stays where it was in every trip. Comets are solid bodies
+ * for the run cap (ENCOUNTER_MAX_SAME_KIND_RUN). The first encounter of every trip is still a planet.
+ *
+ * Plan: the encounter radius is the coma's radius, and the planned path passes the nucleus at
+ * COMET_MIN_PASS_DISTANCE or more (at least the coma radius × (1 + ENCOUNTER_CLEARANCE_MARGIN), far
+ * more in practice), so the camera never enters the coma, let alone its core or the nucleus. The
+ * heading is held while the encounter lasts, but a comet leaves the screen, and its encounter ends,
+ * short of the closest approach, and the next cruise may ease the heading drift back up before the
+ * ship gets there: the real pass can be a little nearer than the planned one (measured with the live
+ * view: at least 0.969 × it at the slowest level and 0.990 × at the others, the nearest tail vertex
+ * at 0.96 × the planned distance less the coma radius, still more than 60 units outside the coma;
+ * Comet.test.ts flies on past the end of the encounter). Issue #62 removes the drift. The off-screen
+ * test (`encounterViewMargin`) takes the live view to spheres that hold the coma and every segment of
+ * both tails (`CometParams.bounds`), and the comet is off the screen only once all of them are. The
+ * tails trail back along the path and away from it, so they never keep a comet on the screen after
+ * its coma has left it (measured: they leave on the same step): a comet leaves the screen to the side
+ * with its coma, a few seconds before the closest approach on every screen from 4:3 to 32:9.
+ *
+ * Measured over 2,000 seeds (Comet.test.ts checks the bounds): the nucleus 2.5–5 in radius, the
+ * coma radius 26–42, the closest approach to the nucleus 110–165 (p10/p50/p90 about 110/122/155),
+ * no vertex of either tail's tube nearer the path than 99, the ion tail 800–1,200 long and the dust
+ * tail 450–750. With its longer slowdown (COMET_SLOWDOWN_DISTANCE), a comet is about 72 s from its
+ * spawn to its closest approach at the default level and above (180 s at the slowest level); on a
+ * 16:9 screen it leaves the screen, and the encounter ends, 2–4 s before that (3.3–7.5 s at the
+ * slowest level), and the ship is at 50% of the cruise speed within 1.9 s of it leaving the screen
+ * and at 90% within 3 s (3.4 s and 5.1 s at the top level; Autopilot.test.ts).
+ *
+ * GPU cost (Comet.test.ts rasterises the glow mesh as the GPU does, front faces only, over 40 seeded
+ * comets at 4:3, 16:9 and 21:9 from the spawn to the end of the encounter; the path, and so the
+ * view, is the same at every speed level): the glow covers under 2% of the view at the spawn, at
+ * most about 12% at 16:9 (median comet about 8%) and 16% at 21:9 late in the approach, as the tails
+ * stretch past the camera's side, and nothing once the comet has left the screen (nor at the closest
+ * approach, on a screen wide enough to keep it until then). Fill, the fragments shaded for it per
+ * pixel of the view, is at most about 0.19 (COMET_MAX_FILL bounds it): each piece covers a pixel
+ * about once. Outside the coma's core the glow adds at most the tails' peak brightness (0.32 or less,
+ * linear) to a pixel, so the stars and the sky stay visible through it; in the browser
+ * (e2e/comet.spec.ts, 640×360, 250 short of the closest approach) about 0.06% of the view is washed
+ * out, against 0.04% for the stars alone at cruise: the comet adds about 0.02%, the coma's core.
+ */
+
+/** Share of all encounters that are comets, in the long run (see the section comment). */
+export const ENCOUNTER_COMET_SHARE = 0.1;
+
+/** Bounds the comet share over any 1,000 consecutive encounter indices must stay within. */
+export const ENCOUNTER_COMET_SHARE_BOUNDS = [0.06, 0.14] as const;
+
+/**
+ * `D` for comets: the nucleus is placed this far ahead, which is also the spawn distance. As for
+ * planets: the coma (at most 80 across) starts under 2° across, and the tails reach back toward the
+ * ship to at most about 1,600 ahead of it, so the whole comet starts small and fades in from 0.
+ */
+export const COMET_ENCOUNTER_DISTANCE = 2400;
+
+/**
+ * `k` for a comet that brings no pass factor of its own (`CometSpec.passFactor`); every seeded comet
+ * does. 4 coma radii, as a seeded comet passes.
+ */
+export const COMET_SIDE_OFFSET_FACTOR = 4;
+
+/**
+ * Smallest distance between the path and the nucleus, in world units: beyond any coma (its radius
+ * is at most 40), and beyond the planets' floor (PLANET_MIN_PASS_DISTANCE), so a comet flown with the
+ * planets' speed profile never sweeps past faster in angle than a planet does.
+ */
+export const COMET_MIN_PASS_DISTANCE = 110;
+
+/**
+ * The closest approach to the nucleus is COMET_MIN_PASS_DISTANCE times `1 + COMET_PASS_EXTRA × u²`
+ * for a uniform roll `u`, so most pass close.
+ */
+export const COMET_PASS_EXTRA = 0.5;
+
+/**
+ * Comet speed profile: the planets' minimum speed, floor, band and speed-up distance (see
+ * ENCOUNTER_MIN_SPEED), but a longer slowdown, COMET_SLOWDOWN_DISTANCE = 1,000 against the planets'
+ * 520 (ENCOUNTER_SLOWDOWN_DISTANCE). That is what keeps the tails under the 5.1°/s bearing-rate guard:
+ * the ship passes the tails' far parts several hundred units short of the closest approach, and with
+ * the planets' slowdown it would still be fast there (the tails measured up to 7.5°/s; no aim of the
+ * comet's sun fixes that). Slowing from 1,000 out, the nucleus, at least COMET_MIN_PASS_DISTANCE off,
+ * peaks at about 3.1°/s and the tails at about 4.3°/s at the default and top levels (Comet.test.ts).
+ * The cost is a longer approach, a deliberate choice for a passively watched view: about 72 s from the
+ * spawn to the closest approach at the default level and above (a planet takes about 54 s), 180 s at
+ * the slowest. Like the other kinds, a comet encounter is flown from the arrival speed at the faster
+ * levels.
+ */
+export const COMET_MIN_SPEED = 6;
+/** Lowest comet minimum speed at any speed level (see ENCOUNTER_MIN_SPEED_FLOOR). */
+export const COMET_MIN_SPEED_FLOOR = 4;
+export const COMET_SLOWDOWN_DISTANCE = 1000;
+export const COMET_MIN_SPEED_DISTANCE = 16;
+export const COMET_SPEEDUP_DISTANCE = 800;
+
+/**
+ * Comet fade (see the planet one). A comet encounter ends once the coma and both tails are off the
+ * screen, a few seconds before the closest approach, so the fade-out is not seen.
+ */
+export const COMET_FADE_IN_DISTANCE = 1200;
+export const COMET_FADE_OUT_DISTANCE = 1000;
+export const COMET_DESPAWN_DISTANCE = 1200;
+
+/**
+ * Direction toward a comet's sun, in the encounter's own frame (see PLANET_ENCOUNTER_LIGHT for the
+ * axes): `ahead` along the planned direction, `inward` from the comet toward the path, `up`. The tails
+ * point the opposite way: mostly away from the path, back along it and a little down, about 66° off
+ * the line of sight from the spawn, so they show at length on the approach. Mostly sideways, so a
+ * tail's far part, which the ship passes while it is still slowing down, stays well off the path. It
+ * still sweeps past faster in angle than the nucleus does (measured up to about 4.3°/s against
+ * 3.1°/s), and aiming the sun otherwise barely changes that: the longer comet slowdown
+ * (COMET_SLOWDOWN_DISTANCE) is what keeps it under the guard (Comet.test.ts). Normalised when applied.
+ */
+export const COMET_ENCOUNTER_LIGHT = { ahead: 0.35, inward: 0.75, up: 0.3 } as const;
+
+/**
+ * Parameter ranges for `cometParams(seed)` in engine/Comet.ts (inclusive `[min, max]` pairs). Lengths
+ * are in world units unless given in coma radii; a tail's half-width grows linearly from its head to
+ * its end.
+ */
+export const COMET_RANGES = {
+  /** Nucleus bounding radius (every vertex lies within it). */
+  nucleusRadius: [2.5, 5],
+  /** The nucleus's shorter axes, as fractions of its longest. */
+  axisB: [0.5, 0.8],
+  axisC: [0.4, 0.65],
+  /** Its lumps (broad lobes, `lumpFrequency` below) and pits. */
+  lumpiness: [0.3, 0.45],
+  craterCount: [1, 3],
+  craterSize: [0.25, 0.5],
+  /** Tumble speed, in radians per second. */
+  tumbleSpeed: [0.02, 0.06],
+  /** Surface shading (the rocky planet shader's terrain, see PLANET_ROCKY_RANGES). */
+  noiseScale: [1.4, 2.4],
+  octaves: [4, 5],
+  warp: [0.3, 0.7],
+  relief: [0.6, 1.1],
+  craters: [0.1, 0.3],
+  /** Coma radius: the glow fades to nothing there. The encounter radius. */
+  comaRadius: [26, 42],
+  /** Brightness of the coma's centre (linear, before the encounter fade). */
+  comaIntensity: [0.75, 1.0],
+  /** Ion tail: length, and half-width at the head and at the end, in coma radii. */
+  ionLength: [800, 1200],
+  ionHeadWidth: [0.12, 0.2],
+  ionEndWidth: [0.45, 0.8],
+  /** Peak brightness of the ion tail's axis. */
+  ionIntensity: [0.2, 0.32],
+  /** Dust tail: length, and half-width at the head and at the end, in coma radii. */
+  dustLength: [450, 750],
+  dustHeadWidth: [0.35, 0.5],
+  dustEndWidth: [2.2, 3.4],
+  /** Peak brightness of the dust tail's axis. */
+  dustIntensity: [0.2, 0.32],
+  /**
+   * The dust tail's curve: its axis is `length × (t × anti-sun + (angle × t + curvature × t²) ×
+   * bend)` for t from 0 to 1, with `bend` a unit vector at right angles to the anti-sun direction:
+   * the trailing side (at right angles to the path's side too, and back along the path), turned
+   * toward the outward side by `bendTilt` radians, so the dust tail lags behind the ion tail and never
+   * curves toward the path or ahead.
+   */
+  dustAngle: [0.15, 0.35],
+  dustCurvature: [0.15, 0.3],
+  dustBendTilt: [0, 0.6],
+} as const;
+
+/** The nucleus's lump frequency band, `[lowest, spread]` (`IrregularBodyShape.lumpFrequency`): broader lobes than a rock's. */
+export const COMET_NUCLEUS_LUMP_FREQUENCY = [0.9, 1.4] as const;
+/** The nucleus's crater depth and rim (`IrregularBodyShape.craterDepth`, `craterRim`): shallow, soft pits. */
+export const COMET_NUCLEUS_CRATER_DEPTH = 0.3;
+export const COMET_NUCLEUS_CRATER_RIM = 0.12;
+
+/**
+ * Mesh resolution: the nucleus's icosphere detail (492 vertices, 980 triangles); the coma sphere's
+ * width and height segments; each tail tube's rings along its length (segments) and vertices around
+ * it (sides). The glow mesh is then 561 + 2 × 41 × 16 = 1,873 vertices and 960 + 2 × 1,280 = 3,520 triangles.
+ *
+ * Encounter-time resources: two geometries (the nucleus and the glow), two materials and two draw
+ * calls, all freed with the encounter, and no program of their own (the rocky surface program and
+ * the halo program, both kept compiled by ProgramWarmup), so the counts at cruise are unchanged
+ * (longRun.test.ts, e2e/comet.spec.ts).
+ */
+export const COMET_NUCLEUS_DETAIL = 6;
+export const COMET_COMA_SEGMENTS = [32, 16] as const;
+export const COMET_TAIL_SEGMENTS = 40;
+export const COMET_TAIL_SIDES = 16;
+
+/** Tail rings per out-of-view bounding sphere (`CometParams.bounds`): COMET_TAIL_SEGMENTS / this spheres per tail. */
+export const COMET_BOUND_RINGS = 5;
+
+/**
+ * Largest fill of the comet glow: fragments shaded for it per pixel of the view, at any moment of a
+ * comet encounter, at any aspect ratio from 4:3 to 21:9 (checked in Comet.test.ts over seeded
+ * comets). Each piece (the coma, each tail) covers a pixel at most about once, so this is about the
+ * screen coverage plus the overlaps near the head.
+ */
+export const COMET_MAX_FILL = 0.3;
 
 /*
  * Reduced motion (docs/PLAN.md section 7): under `prefers-reduced-motion: reduce`, travel starts at a

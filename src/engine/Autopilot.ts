@@ -41,16 +41,18 @@
  * restarts the clock gradually in DEPARTURE. The heading continues from where it stopped, so it
  * never jumps, and the ship flies the planned straight line past the planet.
  *
- * Kinds (docs/PLAN.md section 6, Nebulae and Variety): each encounter is a planet, a nebula or an
- * asteroid, chosen from its appearance seed `hash(baseSeed, index)` (`encounterKindAt`), except that
- * the first encounter of every trip is a planet (docs/PLAN.md section 9, Phase 2: within about
- * 30–60 s a planet appears), whatever the base seed (the trip seed, random on each load in
+ * Kinds (docs/PLAN.md section 6, Nebulae and Variety): each encounter is a planet, a nebula, an
+ * asteroid or a comet, chosen from its appearance seed `hash(baseSeed, index)` (`encounterKindAt`),
+ * except that the first encounter of every trip is a planet (docs/PLAN.md section 9, Phase 2: within
+ * about 30–60 s a planet appears), whatever the base seed (the trip seed, random on each load in
  * production). The planet-or-nebula draw comes first; a second draw, from a stream of its own, then
- * makes some of the planets asteroids (`bodyKind`), so the nebulae are where they were before
- * asteroids. All are planned with `planEncounter` and held the same way; a nebula uses its own `D`,
- * side offset and speed and fade profile (`AutopilotParams.nebula`), and its encounter radius is its
- * core radius (see config.ts, Nebulae); an asteroid likewise (`AutopilotParams.asteroid`), with the
- * bounding radius of its field (config.ts, Asteroids).
+ * makes some of the planets asteroids, and a third, from another, some of the rest comets
+ * (`bodyKind`), so the nebulae are where they were before asteroids and the asteroids where they
+ * were before comets. All are planned with `planEncounter` and held the same way; a nebula uses its
+ * own `D`, side offset and speed and fade profile (`AutopilotParams.nebula`), and its encounter
+ * radius is its core radius (see config.ts, Nebulae); an asteroid likewise (`AutopilotParams.asteroid`),
+ * with the bounding radius of its field (config.ts, Asteroids), and a comet
+ * (`AutopilotParams.comet`) with its coma's radius (config.ts, Comets).
  *
  * Variety (docs/PLAN.md section 9, Phase 3), all drawn from the appearance seed by pure functions:
  * the cruise before each encounter is the interval with a seeded jitter (`cruiseInterval`, whose
@@ -75,10 +77,21 @@ import {
   ASTEROID_SLOWDOWN_DISTANCE,
   ASTEROID_SPEEDUP_DISTANCE,
   CAMERA_FOV_DEG,
+  COMET_DESPAWN_DISTANCE,
+  COMET_ENCOUNTER_DISTANCE,
+  COMET_FADE_IN_DISTANCE,
+  COMET_FADE_OUT_DISTANCE,
+  COMET_MIN_SPEED,
+  COMET_MIN_SPEED_DISTANCE,
+  COMET_MIN_SPEED_FLOOR,
+  COMET_SIDE_OFFSET_FACTOR,
+  COMET_SLOWDOWN_DISTANCE,
+  COMET_SPEEDUP_DISTANCE,
   ENCOUNTER_ARRIVAL_SPEED,
   ENCOUNTER_ASTEROID_SHARE,
   ENCOUNTER_BASE_SEED,
   ENCOUNTER_CLEARANCE_MARGIN,
+  ENCOUNTER_COMET_SHARE,
   ENCOUNTER_DISTANCE,
   ENCOUNTER_DRIFT_SETTLE_SECONDS,
   ENCOUNTER_FLYBY_DISTANCE,
@@ -133,7 +146,7 @@ import { clampDt, createShipState, updateShip, type ShipParams, type ShipState, 
 export type TravelState = 'CRUISE' | 'APPROACH' | 'FLYBY' | 'DEPARTURE';
 
 /** What an encounter meets. */
-export type EncounterKind = 'planet' | 'nebula' | 'asteroid';
+export type EncounterKind = 'planet' | 'nebula' | 'asteroid' | 'comet';
 
 /** Which side of the planned path the encounter object sits on, seen along the path. */
 export type EncounterSide = 'left' | 'right';
@@ -199,6 +212,43 @@ export function defaultAsteroid(_seed: number): AsteroidSpec {
   return { radius: 10 };
 }
 
+/**
+ * A sphere holding part of what is drawn for a comet (its coma, or a stretch of a tail), for the
+ * out-of-view test: its centre relative to the nucleus in the encounter's frame (along the planned
+ * path, toward the side the comet sits on, and up: `side × direction`, as for asteroid rocks), and
+ * its radius, in world units.
+ */
+export interface CometBound {
+  offset: readonly [number, number, number];
+  radius: number;
+}
+
+/**
+ * The comet met in an encounter (docs/PLAN.md section 9, Phase 4). `cometParams` in Comet.ts extends
+ * it and plugs in through `AutopilotParams.cometFor`.
+ */
+export interface CometSpec {
+  /** Coma radius in world units (the encounter radius): the nucleus and the coma lie within it. */
+  radius: number;
+  /**
+   * `k` for this comet: the closest approach to the nucleus is `radius × k`. Without it the comet
+   * passes at `AutopilotParams.comet.sideOffsetFactor`; raised to keep the path out of the coma
+   * (`cometPassFactor`).
+   */
+  passFactor?: number;
+  /**
+   * Spheres that together hold everything drawn for the comet, the coma and both tails
+   * (`encounterViewMargin`). Without them the coma's sphere (`radius`) bounds the comet, and the view
+   * draws it without tails (`encounterCometParams` in EncounterView.ts).
+   */
+  bounds?: readonly CometBound[];
+}
+
+/** Placeholder comet choice: a coma of radius 30, passed at the default `k`, and no tails. */
+export function defaultComet(_seed: number): CometSpec {
+  return { radius: 30 };
+}
+
 interface ActiveEncounterBase {
   /** Encounter index, counted from 0 since load. */
   index: number;
@@ -228,7 +278,13 @@ export interface AsteroidEncounter extends ActiveEncounterBase {
   asteroid: AsteroidSpec;
 }
 
-export type ActiveEncounter = PlanetEncounter | NebulaEncounter | AsteroidEncounter;
+export interface CometEncounter extends ActiveEncounterBase {
+  kind: 'comet';
+  /** The comet chosen for this seed. */
+  comet: CometSpec;
+}
+
+export type ActiveEncounter = PlanetEncounter | NebulaEncounter | AsteroidEncounter | CometEncounter;
 
 /** How a kind of encounter is planned and flown. */
 export interface EncounterKindParams {
@@ -264,6 +320,19 @@ export const ASTEROID_ENCOUNTER_PROFILE: Readonly<EncounterProfile> = {
   spawnScale: 1,
   fadeOutDistance: ASTEROID_FADE_OUT_DISTANCE,
   despawnDistance: ASTEROID_DESPAWN_DISTANCE,
+};
+
+/** The comet speed and fade profile, tuned for the default cruise speed. */
+export const COMET_ENCOUNTER_PROFILE: Readonly<EncounterProfile> = {
+  minSpeed: COMET_MIN_SPEED,
+  minSpeedFloor: COMET_MIN_SPEED_FLOOR,
+  slowdownDistance: COMET_SLOWDOWN_DISTANCE,
+  minSpeedDistance: COMET_MIN_SPEED_DISTANCE,
+  speedupDistance: COMET_SPEEDUP_DISTANCE,
+  fadeInDistance: COMET_FADE_IN_DISTANCE,
+  spawnScale: 1,
+  fadeOutDistance: COMET_FADE_OUT_DISTANCE,
+  despawnDistance: COMET_DESPAWN_DISTANCE,
 };
 
 export interface AutopilotParams {
@@ -343,7 +412,7 @@ export interface AutopilotParams {
   baseSeed: number;
   /** Chooses the planet for an encounter seed. Called once when each planet encounter starts. */
   planetFor: (seed: number) => PlanetSpec;
-  /** Share of encounters that are nebulae, in [0, 1] (0: planets and asteroids only, 1: nebulae only). */
+  /** Share of encounters that are nebulae, in [0, 1] (0: solid bodies only, 1: nebulae only). */
   nebulaShare: number;
   /**
    * Share of all encounters that are asteroids, in [0, 1]: drawn among the encounters that are not
@@ -352,8 +421,15 @@ export interface AutopilotParams {
    */
   asteroidShare: number;
   /**
-   * Most encounters of one kind in a row (an integer ≥ 1; `Infinity` for no limit). Planets and
-   * asteroids, the solid bodies, count as one run (`runClass`).
+   * Share of all encounters that are comets, in [0, 1]: drawn among the encounters that are neither
+   * nebulae nor asteroids, which become comets with probability `cometShare / (1 - nebulaShare -
+   * asteroidShare)` (capped at 1; `cometFraction`). 0 gives no comets; with the other shares 0, 1
+   * gives comets only.
+   */
+  cometShare: number;
+  /**
+   * Most encounters of one kind in a row (an integer ≥ 1; `Infinity` for no limit). Planets,
+   * asteroids and comets, the solid bodies, count as one run (`runClass`).
    */
   maxSameKindRun: number;
   /** Range of the object's elevation above or below the path, in radians (see `encounterSide`). */
@@ -366,6 +442,10 @@ export interface AutopilotParams {
   asteroid: Readonly<EncounterKindParams>;
   /** Chooses the asteroid for an encounter seed. Called once when each asteroid encounter starts. */
   asteroidFor: (seed: number) => AsteroidSpec;
+  /** How comet encounters are planned and flown (`sideOffsetFactor` for comets with no pass factor). */
+  comet: Readonly<EncounterKindParams>;
+  /** Chooses the comet for an encounter seed. Called once when each comet encounter starts. */
+  cometFor: (seed: number) => CometSpec;
 }
 
 export const DEFAULT_AUTOPILOT_PARAMS: Readonly<AutopilotParams> = {
@@ -390,6 +470,7 @@ export const DEFAULT_AUTOPILOT_PARAMS: Readonly<AutopilotParams> = {
   planetFor: defaultPlanet,
   nebulaShare: ENCOUNTER_NEBULA_SHARE,
   asteroidShare: ENCOUNTER_ASTEROID_SHARE,
+  cometShare: ENCOUNTER_COMET_SHARE,
   maxSameKindRun: ENCOUNTER_MAX_SAME_KIND_RUN,
   sideElevation: ENCOUNTER_SIDE_ELEVATION_RANGE,
   nebula: {
@@ -404,6 +485,12 @@ export const DEFAULT_AUTOPILOT_PARAMS: Readonly<AutopilotParams> = {
     profile: ASTEROID_ENCOUNTER_PROFILE,
   },
   asteroidFor: defaultAsteroid,
+  comet: {
+    encounterDistance: COMET_ENCOUNTER_DISTANCE,
+    sideOffsetFactor: COMET_SIDE_OFFSET_FACTOR,
+    profile: COMET_ENCOUNTER_PROFILE,
+  },
+  cometFor: defaultComet,
 };
 
 export interface AutopilotState {
@@ -418,8 +505,8 @@ export interface AutopilotState {
   /** Kind of the latest encounter started, or `null` before the first. */
   lastKind: EncounterKind | null;
   /**
-   * How many encounters of `lastKind`'s run class (`runClass`: planets and asteroids are one) in a
-   * row ended with the latest one (0 before the first).
+   * How many encounters of `lastKind`'s run class (`runClass`: planets, asteroids and comets are one)
+   * in a row ended with the latest one (0 before the first).
    */
   kindRun: number;
   /** The encounter in progress, or `null` in CRUISE. */
@@ -475,13 +562,20 @@ const INTERVAL_SALT = 0x1e7a;
  * trip's opening as it was (config.ts, ENCOUNTER_BASE_SEED) and still meets an asteroid early on.
  */
 const ASTEROID_KIND_SALT = 0xa577;
+/**
+ * Salt of the comet draw (`bodyKind`), a stream of its own, so the nebulae and the asteroids are
+ * exactly where they were before comets. Among the salts tried it is one that leaves the test default
+ * trip's opening and its fifth encounter, the asteroid, as they were, keeps its ringed planets and its
+ * icy dwarf among the first 50 encounters (config.ts, ENCOUNTER_BASE_SEED), and meets a comet sixth.
+ */
+const COMET_KIND_SALT = 0x0c0e;
 
-/** Kinds as the run cap counts them: a solid body (`'planet'`, planets and asteroids) or a nebula. */
+/** Kinds as the run cap counts them: a solid body (`'planet'`: planets, asteroids and comets) or a nebula. */
 export type RunClass = 'planet' | 'nebula';
 
 /**
- * The run class of `kind` (`'planet'` for planets and asteroids alike), or `null` for `null`. The
- * same-kind cap (`AutopilotParams.maxSameKindRun`) counts runs of these.
+ * The run class of `kind` (`'planet'` for planets, asteroids and comets alike), or `null` for `null`.
+ * The same-kind cap (`AutopilotParams.maxSameKindRun`) counts runs of these.
  */
 export function runClass(kind: EncounterKind | null): RunClass | null {
   return kind === null ? null : kind === 'nebula' ? 'nebula' : 'planet';
@@ -489,8 +583,8 @@ export function runClass(kind: EncounterKind | null): RunClass | null {
 
 /**
  * The seeded first-stage draw for appearance seed `seed` (`hash(baseSeed, index)`): a nebula with
- * probability `nebulaShare`, otherwise a solid body (`'planet'`, which the asteroid draw,
- * `bodyKind`, may turn into an asteroid). Pure and deterministic. The autopilot draws with the share
+ * probability `nebulaShare`, otherwise a solid body (`'planet'`, which the asteroid and comet draws,
+ * `bodyKind`, may turn into an asteroid or a comet). Pure and deterministic. The autopilot draws with the share
  * `kindDrawShare` gives and caps same-class runs (`nextEncounterKind`).
  */
 export function encounterKind(seed: number, nebulaShare: number): RunClass {
@@ -509,12 +603,37 @@ export function asteroidFraction(params: Readonly<Pick<AutopilotParams, 'nebulaS
 }
 
 /**
- * The second-stage draw for a solid body with appearance seed `seed`: an asteroid with probability
- * `fraction` (`asteroidFraction`), otherwise a planet. From its own salted stream, so it never
- * changes which encounters are nebulae.
+ * Probability that an encounter which is neither a nebula nor an asteroid is a comet: `cometShare /
+ * (1 - nebulaShare - asteroidShare)`, in [0, 1], so `cometShare` of all encounters are comets (0 when
+ * nothing is left for them, as when every encounter is a nebula or an asteroid, or when the share is
+ * 0 or missing).
  */
-export function bodyKind(seed: number, fraction: number): 'planet' | 'asteroid' {
-  return hashUnit(seed, ASTEROID_KIND_SALT) < fraction ? 'asteroid' : 'planet';
+export function cometFraction(
+  params: Readonly<Pick<AutopilotParams, 'nebulaShare'> & Partial<Pick<AutopilotParams, 'asteroidShare' | 'cometShare'>>>,
+): number {
+  const share = params.cometShare ?? 0;
+  if (!(share > 0) || asteroidFraction(params) >= 1 || !(params.nebulaShare < 1)) return 0;
+  const rest = 1 - Math.max(0, params.nebulaShare) - Math.max(0, params.asteroidShare ?? 0);
+  return rest > 0 ? Math.min(1, share / rest) : 0;
+}
+
+/**
+ * The later draws for a solid body with appearance seed `seed`: an asteroid with probability
+ * `asteroid` (`asteroidFraction`); otherwise a comet with probability `comet` (`cometFraction`);
+ * otherwise a planet. Each from its own salted stream, so neither changes which encounters are
+ * nebulae, and comets never change which are asteroids.
+ */
+export function bodyKind(seed: number, asteroid: number, comet = 0): 'planet' | 'asteroid' | 'comet' {
+  if (hashUnit(seed, ASTEROID_KIND_SALT) < asteroid) return 'asteroid';
+  return hashUnit(seed, COMET_KIND_SALT) < comet ? 'comet' : 'planet';
+}
+
+/**
+ * Whether `params`' mix has any planets: some encounters are not nebulae, and of those not all are
+ * asteroids or comets. Only then does a trip open with a planet (`encounterKindAt`).
+ */
+export function mixHasPlanets(params: KindParams): boolean {
+  return params.nebulaShare < 1 && asteroidFraction(params) < 1 && cometFraction(params) < 1;
 }
 
 /** Whether `maxRun` caps runs at all (a finite count of at least 1). */
@@ -557,16 +676,18 @@ export function kindDrawShare(nebulaShare: number, maxRun: number): number {
   return (low + high) / 2;
 }
 
-/** What the kind draw needs of the params; a missing `asteroidShare` means no asteroids. */
-export type KindParams = Pick<AutopilotParams, 'nebulaShare' | 'maxSameKindRun'> & Partial<Pick<AutopilotParams, 'asteroidShare'>>;
+/** What the kind draw needs of the params; a missing `asteroidShare` or `cometShare` means none of that kind. */
+export type KindParams = Pick<AutopilotParams, 'nebulaShare' | 'maxSameKindRun'> &
+  Partial<Pick<AutopilotParams, 'asteroidShare' | 'cometShare'>>;
 
 /**
  * The kind of the encounter with appearance seed `seed`, given the kind of the latest encounter and
  * how many of its run class came in a row (`run`; `runClass`). First the planet-or-nebula draw
  * (`encounterKind` with `kindDrawShare`), except that it is the other class when the draw would make
  * the run longer than `params.maxSameKindRun`; a nebula share of 0 or 1 forces one class and ignores
- * the cap. Then a solid body is an asteroid by the second draw (`bodyKind` with `asteroidFraction`),
- * a planet otherwise. Planets and asteroids share one run, so no kind ever runs longer than the cap.
+ * the cap. Then a solid body is an asteroid or a comet by the later draws (`bodyKind` with
+ * `asteroidFraction` and `cometFraction`), a planet otherwise. Planets, asteroids and comets share
+ * one run, so no kind ever runs longer than the cap.
  */
 export function nextEncounterKind(seed: number, params: KindParams, lastKind: EncounterKind | null, run: number): EncounterKind {
   const { nebulaShare, maxSameKindRun } = params;
@@ -576,17 +697,18 @@ export function nextEncounterKind(seed: number, params: KindParams, lastKind: En
     const capped = drawn === runClass(lastKind) && capsRuns(maxSameKindRun) && run >= Math.floor(maxSameKindRun);
     if ((drawn === 'nebula') !== capped) return 'nebula';
   }
-  return bodyKind(seed, asteroidFraction(params));
+  return bodyKind(seed, asteroidFraction(params), cometFraction(params));
 }
 
 /**
  * The kind of encounter `index` (appearance seed `seed`): a planet for the first encounter of the
  * trip (index 0), so a planet comes first for every base seed, and `nextEncounterKind` after that.
- * Only a forced kind (a nebula share of 1, or an asteroid fraction of 1: every encounter a nebula, or
- * an asteroid) overrides the planet first.
+ * Only a mix with no planets at all (`mixHasPlanets` false: a nebula share of 1, or every solid body
+ * an asteroid or a comet, as a forced kind is) draws the first encounter like any other, since a
+ * planet there would be one the mix never otherwise has.
  */
 export function encounterKindAt(index: number, seed: number, params: KindParams, lastKind: EncounterKind | null, run: number): EncounterKind {
-  if (index === 0 && params.nebulaShare < 1 && asteroidFraction(params) < 1) return 'planet';
+  if (index === 0 && mixHasPlanets(params)) return 'planet';
   return nextEncounterKind(seed, params, lastKind, run);
 }
 
@@ -654,7 +776,9 @@ export function encounterSchedule(params: Readonly<AutopilotParams>, count: numb
 
 /** The speed and fade profile in use for an encounter of `kind`. */
 export function encounterProfile(params: Readonly<AutopilotParams>, kind: EncounterKind): Readonly<EncounterProfile> {
-  return kind === 'nebula' ? params.nebula.profile : kind === 'asteroid' ? params.asteroid.profile : params.profile;
+  if (kind === 'nebula') return params.nebula.profile;
+  if (kind === 'asteroid') return params.asteroid.profile;
+  return kind === 'comet' ? params.comet.profile : params.profile;
 }
 
 /**
@@ -854,6 +978,16 @@ export function asteroidPassFactor(asteroid: Readonly<AsteroidSpec>, sideOffsetF
 }
 
 /**
+ * The `k` an encounter with `comet` is planned with: the comet's own pass factor, or
+ * `sideOffsetFactor` without one, raised to at least `1 + ENCOUNTER_CLEARANCE_MARGIN`, so the path
+ * never comes within `radius × (1 + margin)` of the nucleus and never enters the coma (docs/PLAN.md
+ * section 6, Variety: the camera never passes through a comet nucleus).
+ */
+export function cometPassFactor(comet: Readonly<CometSpec>, sideOffsetFactor: number): number {
+  return Math.max(comet.passFactor ?? sideOffsetFactor, 1 + ENCOUNTER_CLEARANCE_MARGIN);
+}
+
+/**
  * Bounds on where a nebula's layers reach, in world units, for a nebula of core radius `radius`
  * planned `closestDistance` from the path (`radius × k`), from NEBULA_RANGES (so they hold for every
  * seed): `depth`, how far past the nebula centre along the path any point of any layer lies (the
@@ -887,6 +1021,9 @@ const viewScratch: Vec3 = { x: 0, y: 0, z: 0 };
  *   atmosphere, or the ring), in world units.
  * - Asteroid: `frustumSphereMargin` of the field's bounding sphere (`radius`, which holds every rock
  *   whatever its tumble), in world units.
+ * - Comet: the smallest `frustumSphereMargin` of its bounds (`CometSpec.bounds`: the coma and every
+ *   stretch of both tails), in world units, or of the coma's sphere (`radius`) for a comet without
+ *   them: it is out of view only once every one of those spheres is.
  * - Nebula: its layers reach across the path, so every layer is on screen until the ship is past it.
  *   In world units, how far the ship is past every layer (`-(remaining + depth)`, from
  *   `nebulaViewExtent`), and only once the heading has not turned so far from the planned direction
@@ -913,11 +1050,44 @@ export function encounterViewMargin(
   if (encounter.kind === 'asteroid') {
     return frustumSphereMargin(encounterOffset(plan, ship.position, viewScratch), ship.heading, plan.radius, view);
   }
-  const { depth, lateral } = nebulaViewExtent(plan.radius, plan.closestDistance);
-  const past = -(remaining + depth);
-  if (!(past > 0)) return past;
-  const nearest = Math.PI / 2 + Math.atan(past / lateral);
-  return nearest - angleBetween(ship.heading, plan.direction) > frustumConeHalfAngle(view) ? past : 0;
+  if (encounter.kind === 'comet') return cometViewMargin(encounter, ship, view);
+  if (encounter.kind === 'nebula') {
+    const { depth, lateral } = nebulaViewExtent(plan.radius, plan.closestDistance);
+    const past = -(remaining + depth);
+    if (!(past > 0)) return past;
+    const nearest = Math.PI / 2 + Math.atan(past / lateral);
+    return nearest - angleBetween(ship.heading, plan.direction) > frustumConeHalfAngle(view) ? past : 0;
+  }
+  // Every kind is handled above: a new kind fails to compile here until it names its bounds.
+  const unhandled: never = encounter;
+  return unhandled;
+}
+
+const boundScratch: Vec3 = { x: 0, y: 0, z: 0 };
+
+/**
+ * `encounterViewMargin` for a comet: the smallest `frustumSphereMargin` of its bounds, so it is out of
+ * view only once the coma and every stretch of both tails are. Allocation-free.
+ */
+function cometViewMargin(encounter: Readonly<CometEncounter>, ship: Readonly<ShipState>, view: Readonly<ViewFrustum>): number {
+  const { plan } = encounter;
+  const nucleus = encounterOffset(plan, ship.position, viewScratch);
+  const bounds = encounter.comet.bounds;
+  if (bounds === undefined || bounds.length === 0) return frustumSphereMargin(nucleus, ship.heading, plan.radius, view);
+  const { direction: d, side: s } = plan;
+  // up = side × direction, the encounter frame's third axis.
+  const ux = s.y * d.z - s.z * d.y;
+  const uy = s.z * d.x - s.x * d.z;
+  const uz = s.x * d.y - s.y * d.x;
+  let margin = Number.POSITIVE_INFINITY;
+  for (const bound of bounds) {
+    const [a, b, c] = bound.offset;
+    boundScratch.x = nucleus.x + a * d.x + b * s.x + c * ux;
+    boundScratch.y = nucleus.y + a * d.y + b * s.y + c * uy;
+    boundScratch.z = nucleus.z + a * d.z + b * s.z + c * uz;
+    margin = Math.min(margin, frustumSphereMargin(boundScratch, ship.heading, bound.radius, view));
+  }
+  return margin;
 }
 
 /** Starting autopilot state: CRUISE from the beginning, with no encounter yet. */
@@ -1019,6 +1189,11 @@ export function updateAutopilot(
         const k = asteroidPassFactor(asteroid, params.asteroid.sideOffsetFactor);
         const plan = planEncounter(ship.position, ship.heading, asteroid.radius, params.asteroid.encounterDistance, k, sideAngle);
         encounter = { kind: 'asteroid', index, seed, side, asteroid, plan };
+      } else if (kind === 'comet') {
+        const comet = params.cometFor(seed);
+        const k = cometPassFactor(comet, params.comet.sideOffsetFactor);
+        const plan = planEncounter(ship.position, ship.heading, comet.radius, params.comet.encounterDistance, k, sideAngle);
+        encounter = { kind: 'comet', index, seed, side, comet, plan };
       } else {
         const planet = params.planetFor(seed);
         const k = planetPassFactor(planet, params.sideOffsetFactor);
@@ -1133,10 +1308,11 @@ export function updateAutopilot(
  * change in the middle of an encounter never makes it skip a state. Allocates the new profile.
  *
  * The scaled minimum speed is floored at the profile's `minSpeedFloor` (ENCOUNTER_MIN_SPEED_FLOOR
- * for planets, NEBULA_MIN_SPEED_FLOOR for nebulae, ASTEROID_MIN_SPEED_FLOOR for asteroids), so the
+ * for planets, NEBULA_MIN_SPEED_FLOOR for nebulae, ASTEROID_MIN_SPEED_FLOOR for asteroids,
+ * COMET_MIN_SPEED_FLOOR for comets), so the
  * slowest levels (the reduced-motion start) slow down proportionally less instead of crawling
  * through the flyby; it is also capped at the encounter speed, so an encounter never speeds the ship
- * up. Planet, nebula and asteroid profiles are all scaled this way.
+ * up. Planet, nebula, asteroid and comet profiles are all scaled this way.
  */
 export function setCruiseSpeed(
   params: AutopilotParams,
@@ -1153,6 +1329,7 @@ export function setCruiseSpeed(
   params.profile = scaled(base.profile);
   params.nebula = { ...params.nebula, profile: scaled(base.nebula.profile) };
   params.asteroid = { ...params.asteroid, profile: scaled(base.asteroid.profile) };
+  params.comet = { ...params.comet, profile: scaled(base.comet.profile) };
 }
 
 /** Everything the simulation step advances: the ship, the autopilot and the params they feed each other. */
