@@ -87,7 +87,7 @@ npm run check:hook   # the e2e test hook is not in the production build
 - **Nebulae are the main GPU cost:** During a nebula encounter, large soft-blended layers cover much of the screen, so a weak GPU may drop frames there. Quality presets and adaptive resolution are an Optional item in PLAN.md section 5, and are not built.
 - **Screen Wake Lock:** Where the browser doesn't support it, the screen follows the device's own sleep settings. A failed request is logged to the console.
 - **Soak length:** CI runs the soak for 3 minutes, under SwiftShader (software rendering), so its frame times say nothing absolute about real hardware. The 30-minute run is started by hand from the Soak workflow ([.github/workflows/soak.yml](.github/workflows/soak.yml)).
-- **Not built yet:** The rest of the Optional list in PLAN.md section 5: ringed and icy planets, quality presets, and sound. Ideas that came up while building it are in [IDEAS.md](IDEAS.md).
+- **Not built yet:** The open items in PLAN.md section 5: more planet variety (ringed and icy planets, in the Phase 4 list), and the Optional quality presets and sound. Ideas that came up while building it are in [IDEAS.md](IDEAS.md).
 
 ## Deployment
 

@@ -66,7 +66,9 @@ export function resolveTripSeed(search: string, random: RandomUint32 = cryptoRan
 
 /**
  * `href` with its `seed` query parameter set to `seed` (formatted), keeping the path, the other
- * parameters and the hash. Replaces any existing `seed` value, valid or not.
+ * parameters and the hash. Replaces any existing `seed` value, valid or not. The query is
+ * re-serialised by URLSearchParams, so the other parameters keep their meaning but not always their
+ * spelling: `%20` becomes `+`, and a bare `flag` becomes `flag=`.
  */
 export function urlWithTripSeed(href: string, seed: number): string {
   const url = new URL(href);
