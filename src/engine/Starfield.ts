@@ -4,8 +4,9 @@
  *
  * The sky has two layers. This one is fine dust and near stars in a cube around the camera: they
  * stream past with the ship's travel and carry the sense of speed ("stars rush toward the camera",
- * docs/PLAN.md section 4), so they are kept small and dim. The other, FarStarfield.ts, is stars at
- * infinity that only turn with the camera: the fixed backdrop.
+ * docs/PLAN.md section 4), so they are kept small and mostly dim, with a few bright ones whose
+ * streaks carry the warp feel. The other, FarStarfield.ts, is stars at infinity that only turn with
+ * the camera: the fixed backdrop.
  *
  * - Each star is an instance of one quad (InstancedBufferGeometry + ShaderMaterial); no Points or
  *   Lines. The vertex shader projects the head and the tail (head + ship velocity × streak time) and

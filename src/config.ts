@@ -115,9 +115,9 @@ export const STAR_SEED = 0x5eed_57a2;
 /**
  * Far stars: directions on the unit sphere, drawn at infinity, so they have no parallax and never
  * move with the ship's travel, only with the camera's rotation. Always round dots (no streaks). About
- * 12% of them are in view at once (a 60° vertical field of view at 16:9), about 700.
+ * 12% of them are in view at once (a 60° vertical field of view at 16:9), about 470.
  */
-export const FAR_STAR_COUNT = 6000;
+export const FAR_STAR_COUNT = 4000;
 
 /** Far star width in CSS pixels before the per-star size factor. */
 export const FAR_STAR_BASE_SIZE_PX = 1.4;
