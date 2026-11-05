@@ -139,6 +139,9 @@ Travelling forward forever makes positions grow until float32 precision on the G
 - **Trip seed:** Each load picks a random base seed unless the URL already carries one, and writes the seed in use to the URL, so a trip can be shared and replayed. Encounter seeds stay `hash(base seed, encounter index)`.
 - **New encounters:** Ringed planets, icy dwarfs, asteroids and comets follow the planet rule: the path is planned first and the object is placed beside it, so the closest approach is fixed and the camera never passes through a solid part (planet, ring, asteroid or comet nucleus). A comet's tail may reach the camera, but it must never cover the view so that the scene is hidden; check its screen coverage at the closest approach.
 - **Distant galaxies:** Part of the far layer, not encounters. They are fixed, seeded directions turned by the camera's rotation only, drawn with the far stars and never writing depth, so they never move with travel and never hide anything.
+  - A trip has 0–3 of them, generated from the trip seed, so a shared seed replays them. Each is a small spiral (a core glow and two faint arms) or elliptical (a core glow in an oval falloff), with a seeded size of 1.2–3.5° across, tilt, rotation and colour. They sit where the heading drift sweeps the view, so each comes into view during a drift cycle.
+  - Their sizes are angles in the sky, so they stay right whatever the field of view or aspect.
+  - Cost: one instanced draw call for all of them. At cruise they add one geometry, one program and one draw call (3, 7 and 3 with galaxies, against 2, 6 and 2 without). A trip without galaxies hides the layer, so it is never drawn or compiled. The galaxy program, like the star programs, compiles on the first frame and stays for the whole run.
 
 ### Performance
 

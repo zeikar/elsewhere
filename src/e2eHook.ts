@@ -170,7 +170,7 @@ export interface E2EHookSnapshot {
     /** Side of the path the encounter object sits on, or `null` in CRUISE. */
     side: EncounterSide | null;
   };
-  /** Objects in the scene besides the two star layers (the encounter planet or nebula). */
+  /** Objects in the scene besides the two star layers and the galaxies (the encounter planet or nebula). */
   planets: number;
   /** The encounter planet as last placed for rendering, or `null`. */
   planet: {
