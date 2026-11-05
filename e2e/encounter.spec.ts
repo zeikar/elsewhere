@@ -4,8 +4,10 @@ import type { E2EHookSnapshot } from '../src/e2eHook';
 import {
   CAMERA_FOV_DEG,
   DT_CAP_SECONDS,
+  ENCOUNTER_ARRIVAL_SPEED,
   ENCOUNTER_DISTANCE,
-  ENCOUNTER_FADE_IN_DISTANCE,
+  ENCOUNTER_FADE_IN_SECONDS,
+  ENCOUNTER_FAR_SPEED,
   ENCOUNTER_INTERVAL_SECONDS,
   PLANET_GAS_RANGES,
   PLANET_ROCKY_RANGES,
@@ -26,9 +28,10 @@ import { appUrl } from './app';
 /** A pixel counts as lit when its brightest channel is above this (0–255). */
 const LIT_THRESHOLD = 16;
 
-// A full encounter is about 40–115 s of simulated travel, and SwiftShader renders well under 10 fps,
-// where the dt cap makes simulated time run slower than real time. Each test sets its own, long
-// timeout; this is the floor for the file.
+// A full encounter is about 75–155 s of simulated travel at the default level since its object spawns
+// 8,000 out (issue #64; about 40–115 s before), 2.5× less with FAST_ENCOUNTERS_ARRIVAL_SPEED, and
+// SwiftShader renders well under 10 fps, where the dt cap makes simulated time run slower than real
+// time. Each test sets its own, long timeout; this is the floor for the file.
 test.describe.configure({ timeout: 300_000 });
 
 function collectErrors(page: Page): string[] {
@@ -97,7 +100,8 @@ declare global {
 /**
  * Installs the watcher. It runs in the page on every animation frame, so it sees every state the
  * engine renders. With `pauseOnScreen`, it pauses the engine at the first APPROACH frame where the
- * planet is at least half faded in and its centre is well inside the view.
+ * planet is at least half faded in, past its far stretch and within 2,000 of its closest approach,
+ * and its centre is well inside the view.
  */
 function watchTravel(page: Page, options: { pauseOnScreen?: boolean } = {}): Promise<void> {
   return page.evaluate(
@@ -183,6 +187,9 @@ function watchTravel(page: Page, options: { pauseOnScreen?: boolean } = {}): Pro
           a.state === 'APPROACH' &&
           s.planet !== null &&
           a.fade >= 0.5 &&
+          // Past the far stretch, and near enough to show a disc: the planet first appears as a dot.
+          a.remaining !== null &&
+          a.remaining <= Math.min(a.farEnd ?? Number.POSITIVE_INFINITY, 2000) &&
           Math.abs(s.planet.ndc.x) < 0.7 &&
           Math.abs(s.planet.ndc.y) < 0.7
         ) {
@@ -259,6 +266,103 @@ async function engineShot(page: Page): Promise<{ png: Buffer; pixels: number[]; 
   return { png, ...decoded };
 }
 
+declare global {
+  interface Window {
+    __firstFull?: E2EHookSnapshot;
+  }
+}
+
+test('at first appearance, fully faded in, the planet is a small dot at 1080p, over the sky', async ({ page }) => {
+  test.setTimeout(300_000);
+  const errors = collectErrors(page);
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  // Planets only, the test default trip: its first planet, an oceanic world of about median size.
+  await openApp(page, 1, 'planet');
+  // Pause on the first frame the planet is fully faded in: ENCOUNTER_FADE_IN_SECONDS after its spawn.
+  await page.evaluate(() => {
+    const hook = window.__elsewhere!;
+    const tick = () => {
+      const s = hook.snapshot();
+      if (s.autopilot.fade >= 1 && s.planet !== null && s.planet.visible) {
+        hook.pause();
+        window.__firstFull = hook.snapshot();
+        return;
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+  await expect.poll(() => page.evaluate(() => window.__firstFull !== undefined), { timeout: 240_000, intervals: [1_000] }).toBe(true);
+  const at = (await page.evaluate(() => window.__firstFull!))!;
+  const planet = at.planet!;
+  expect(at.paused).toBe(true);
+  expect(at.autopilot.state).toBe('APPROACH');
+  // Still out by about the spawn distance: the fade-in takes seconds, not most of the approach.
+  expect(at.autopilot.remaining!).toBeGreaterThan(ENCOUNTER_DISTANCE - 600);
+  const full = await page.locator('#scene').screenshot();
+  writeFileSync(test.info().outputPath('first-appearance-1080p.png'), full);
+  await test.info().attach('engine canvas at first appearance (1080p)', { body: full, contentType: 'image/png' });
+  const cssX = ((planet.ndc.x + 1) / 2) * 1920;
+  const cssY = ((1 - planet.ndc.y) / 2) * 1080;
+  const half = 48;
+  const clip = { x: Math.round(cssX) - half, y: Math.round(cssY) - half, width: 2 * half, height: 2 * half };
+  expect(clip.x).toBeGreaterThanOrEqual(0);
+  expect(clip.y).toBeGreaterThanOrEqual(0);
+  const crop = await page.screenshot({ clip });
+  writeFileSync(test.info().outputPath('first-appearance-crop.png'), crop);
+  await test.info().attach('the planet at first appearance (96 × 96 crop)', { body: crop, contentType: 'image/png' });
+  const shot = await page.evaluate(async (b64) => {
+    const bitmap = await createImageBitmap(await (await fetch(`data:image/png;base64,${b64}`)).blob());
+    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+    const ctx = canvas.getContext('2d')!;
+    ctx.drawImage(bitmap, 0, 0);
+    return { pixels: Array.from(ctx.getImageData(0, 0, bitmap.width, bitmap.height).data), width: bitmap.width, height: bitmap.height };
+  }, crop.toString('base64'));
+
+  // Its disc (the surface; the atmosphere adds a few percent), as drawn: a dozen pixels across at most.
+  const expectedPx = ((2 * Math.tan(Math.asin(planet.drawnRadius / planet.distance))) / (2 * Math.tan(((CAMERA_FOV_DEG / 2) * Math.PI) / 180))) * 1080;
+  // The lit pixels connected to the planet's centre (a flood fill), so the stars around it are left out.
+  const scale = shot.width / clip.width;
+  const cx = Math.round((cssX - clip.x) * scale);
+  const cy = Math.round((cssY - clip.y) * scale);
+  const lit = (x: number, y: number) => {
+    const i = (y * shot.width + x) * 4;
+    return Math.max(shot.pixels[i]!, shot.pixels[i + 1]!, shot.pixels[i + 2]!) > LIT_THRESHOLD;
+  };
+  let seed: [number, number] | null = null;
+  for (let r = 0; r <= 3 && seed === null; r++) {
+    for (let y = cy - r; y <= cy + r && seed === null; y++) for (let x = cx - r; x <= cx + r && seed === null; x++) if (lit(x, y)) seed = [x, y];
+  }
+  expect(seed).not.toBeNull();
+  const seen = new Set<number>();
+  const queue = [seed!];
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  while (queue.length > 0 && seen.size < 10_000) {
+    const [x, y] = queue.pop()!;
+    const key = y * shot.width + x;
+    if (seen.has(key) || x < 0 || y < 0 || x >= shot.width || y >= shot.height || !lit(x, y)) continue;
+    seen.add(key);
+    minX = Math.min(minX, x);
+    maxX = Math.max(maxX, x);
+    minY = Math.min(minY, y);
+    maxY = Math.max(maxY, y);
+    queue.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]);
+  }
+  const measured = Math.max(maxX - minX + 1, maxY - minY + 1) / scale;
+  test.info().annotations.push({
+    type: 'first appearance',
+    description: JSON.stringify({ expectedPx, measuredPx: measured, litPixels: seen.size, remaining: at.autopilot.remaining, family: planet.family, radius: planet.radius }),
+  });
+  expect(expectedPx).toBeLessThanOrEqual(15);
+  // Antialiasing and the atmosphere's faint edge add a pixel or two either side.
+  expect(measured).toBeLessThanOrEqual(expectedPx + 4);
+  expect(measured).toBeGreaterThanOrEqual(2);
+  expect(errors).toEqual([]);
+});
+
 test('three encounters run CRUISE → APPROACH → FLYBY → DEPARTURE → CRUISE and free their GPU resources', async ({
   page,
 }) => {
@@ -298,10 +402,13 @@ test('three encounters run CRUISE → APPROACH → FLYBY → DEPARTURE → CRUIS
   // One planet in the scene during each encounter and none between them.
   expect(log.planetCountErrors).toEqual([]);
   // The planet starts as a faint, distant dot (no pop-in). Opacity below 0.1 is within the first
-  // quarter of the fade-in (its smoothstep is 0.156 there), so the planet is at least
-  // D − ENCOUNTER_FADE_IN_DISTANCE / 4 away, and no configured radius looks bigger than this from there.
-  const maxRadius = Math.max(PLANET_ROCKY_RANGES.radius[1], PLANET_GAS_RANGES.radius[1]);
-  const maxFirstAngularRadiusDeg = (Math.asin(maxRadius / (ENCOUNTER_DISTANCE - ENCOUNTER_FADE_IN_DISTANCE / 4)) * 180) / Math.PI;
+  // quarter of the fade-in time (its smoothstep is 0.156 there), when the ship has flown at most the
+  // far speed (scaled for the arrival speed in use) for that long, so the planet is at least that much
+  // short of D away, and no configured radius looks bigger than this from there.
+  const maxRadius = Math.max(PLANET_ROCKY_RANGES.radius[1], PLANET_GAS_RANGES.radius[1]) * (1 + PLANET_GAS_RANGES.atmosphereThickness[1]);
+  const fastest = (ENCOUNTER_FAR_SPEED * FAST_ENCOUNTERS_ARRIVAL_SPEED) / ENCOUNTER_ARRIVAL_SPEED;
+  const maxFirstAngularRadiusDeg = (Math.asin(maxRadius / (ENCOUNTER_DISTANCE - (fastest * ENCOUNTER_FADE_IN_SECONDS) / 4)) * 180) / Math.PI;
+  expect(maxFirstAngularRadiusDeg).toBeLessThan(1);
   expect(log.firstPlanet).not.toBeNull();
   expect(log.firstPlanet!.opacity).toBeLessThan(0.1);
   expect(log.firstPlanet!.angularRadiusDeg).toBeLessThan(maxFirstAngularRadiusDeg);
@@ -342,7 +449,8 @@ test('mid-APPROACH the planet is lit on the engine canvas, and pause → resume 
   await openApp(page, 2, 'planet');
   await watchTravel(page, { pauseOnScreen: true });
 
-  // The watcher pauses the engine once the planet is half faded in and well inside the view.
+  // The watcher pauses the engine once the planet, past its far stretch and within 2,000 of its
+  // closest approach, shows as a disc well inside the view.
   await expect
     .poll(async () => (await travelLog(page)).pausedAt !== null, { timeout: 300_000, intervals: [1_000] })
     .toBe(true);

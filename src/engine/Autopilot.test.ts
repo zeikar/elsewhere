@@ -60,6 +60,7 @@ import {
   COMET_ENCOUNTER_PROFILE,
   DEFAULT_AUTOPILOT_PARAMS,
   NEBULA_ENCOUNTER_PROFILE,
+  activeEncounterTargetSpeed,
   PLANET_VIEW_RADIUS_FACTOR,
   asteroidFraction,
   bodyKind,
@@ -106,6 +107,7 @@ import {
   encounterOffset,
   encounterRemaining,
   encounterTargetSpeed,
+  farHandoverSpeed,
   frustumConeHalfAngle,
   frustumSphereMargin,
   planEncounter,
@@ -735,6 +737,8 @@ describe('createAutopilotState', () => {
       lastKind: null,
       kindRun: 0,
       encounter: null,
+      encounterTime: 0,
+      next: null,
       remaining: Number.POSITIVE_INFINITY,
       viewMargin: Number.NEGATIVE_INFINITY,
       outOfViewTime: Number.NEGATIVE_INFINITY,
@@ -798,6 +802,36 @@ describe('updateAutopilot', () => {
     expect(next.fade).toBe(0);
     expect(next.targetSpeed).toBe(DEFAULT_AUTOPILOT_PARAMS.cruiseSpeed);
     expect(next.driftRate).toBe(0);
+  });
+
+  it('at the top level the cruise chooses the next object once, for its hand-over speed, and the encounter starts with it', () => {
+    const seen: number[] = [];
+    const params: AutopilotParams = {
+      ...PLANETS_ONLY,
+      planetFor: (seed) => {
+        seen.push(seed);
+        return planetParams(seed);
+      },
+    };
+    setCruiseSpeed(params, SHIP_SPEED_LEVELS[SHIP_SPEED_LEVELS.length - 1]!);
+    const starts: number[] = [];
+    simulate(1 / 60, {
+      params,
+      until: afterEncounters(3),
+      maxSeconds: 4000,
+      onFrame: ({ prevAutopilot, autopilot }) => {
+        if (prevAutopilot.state !== 'CRUISE' || autopilot.encounter === null) return;
+        starts.push(autopilot.encounter.seed);
+        // Planned with the choice the cruise made: its far stretch, and no choice left over.
+        expect(prevAutopilot.next?.seed).toBe(autopilot.encounter.seed);
+        expect(autopilot.encounter.farRoom).toBe(prevAutopilot.next!.farRoom);
+        expect(autopilot.next).toBeNull();
+      },
+    });
+    expect(starts).toEqual([0, 1, 2].map((i) => hash(ENCOUNTER_BASE_SEED, i)));
+    // Once per encounter (and once for the next one, chosen in the cruise that followed the third).
+    expect(seen.slice(0, 3)).toEqual(starts);
+    expect(new Set(seen).size).toBe(seen.length);
   });
 
   it('uses the planet chosen for the seed (hook for seeded planets)', () => {
@@ -1398,7 +1432,7 @@ describe('dropping out of warp', () => {
     const cases = (['planet', 'nebula', 'asteroid', 'comet'] as const).flatMap((kind) => [1 / 60, 1 / 120].map((dt) => ({ kind, dt })));
 
     it.each(cases)(
-      'the ship is out of warp when the $kind reaches opacity 0.1, and flies the profile for its encounter speed from the spawn (dt $dt)',
+      'the ship is out of warp when the $kind leaves its far stretch (a nebula: reaches opacity 0.1), and flies the profile for its encounter speed from there (dt $dt)',
       ({ kind, dt }) => {
         const params = atSpeed(cruiseSpeed, onlyKind(kind));
         // At or above the arrival speed, the profile is the default level's itself.
@@ -1413,40 +1447,60 @@ describe('dropping out of warp', () => {
         // out of it) are checked as well as the first one from load.
         const encounters = 3;
         const speedsAtSpawn: number[] = [];
+        const handovers: number[] = [];
         const speedsAtVisible: number[] = [];
         let visible = false;
         let encounterFrames = 0;
+        let farFrames = 0;
         simulate(dt, {
           params,
           until: afterEncounters(encounters),
           maxSeconds: 4000,
           onFrame: ({ ship, prevAutopilot, autopilot }) => {
-            if (autopilot.encounter === null) return;
+            const encounter = autopilot.encounter;
+            if (encounter === null) return;
+            const room = encounter.farRoom ?? 0;
+            const far = room > 0 && encounter.plan.spawnDistance - autopilot.remaining < room;
             if (prevAutopilot.state === 'CRUISE') {
               speedsAtSpawn.push(ship.speed);
+              handovers.push(farHandoverSpeed(room, cruiseSpeed, encounterSpeed, profile));
               visible = false;
             }
-            if (!visible && autopilot.fade >= 0.1) {
+            // A nebula: once it is noticeably visible. A planet, an asteroid or a comet: as it leaves
+            // its far stretch, at the far-stretch threshold angle or the start of the slowdown.
+            if (!visible && (kind === 'nebula' ? autopilot.fade >= 0.1 : !far)) {
               speedsAtVisible.push(ship.speed);
               visible = true;
             }
-            // Exactly the encounter speed's profile, from the spawn to the end.
-            expect(autopilot.targetSpeed).toBe(encounterTargetSpeed(autopilot.remaining, encounterSpeed, profile));
+            // Exactly the encounter speed's profile from the end of the far stretch to the end of the
+            // encounter, and the far stretch before it (a nebula has none).
+            if (far) {
+              expect(kind).not.toBe('nebula');
+              expect(autopilot.targetSpeed).toBe(activeEncounterTargetSpeed(encounter, autopilot.remaining, params));
+              farFrames++;
+            } else {
+              expect(autopilot.targetSpeed).toBe(encounterTargetSpeed(autopilot.remaining, encounterSpeed, profile));
+            }
             encounterFrames++;
           },
         });
         expect(encounterFrames).toBeGreaterThan(1000 * encounters);
+        if (kind !== 'nebula') expect(farFrames).toBeGreaterThan(100 * encounters);
         expect(speedsAtSpawn).toHaveLength(encounters);
         expect(speedsAtVisible).toHaveLength(encounters);
-        // From the top speed the lag is about 3 units per second at the spawn and under 0.5 by the
-        // time the object is noticeably visible, in every encounter; at or below the arrival speed
-        // there is none.
-        expect(Math.max(...speedsAtSpawn)).toBeLessThanOrEqual(encounterSpeed + 3.5);
+        // At the spawn the ship is at the hand-over speed (the arrival speed before a nebula), within
+        // the drop out of warp's lag of about 3 units per second from the top speed; under 0.5 above
+        // the encounter speed by the time a nebula is noticeably visible or a solid body leaves its far
+        // stretch, in every encounter; at or below the arrival speed there is no lag.
+        for (const [i, speed] of speedsAtSpawn.entries()) expect(speed).toBeLessThanOrEqual(handovers[i]! + 3.5);
+        if (kind === 'nebula') expect(Math.max(...handovers)).toBe(encounterSpeed);
         expect(Math.max(...speedsAtVisible)).toBeLessThanOrEqual(encounterSpeed + 0.5);
-        // At or below the arrival speed, the ship has long reached its cruise speed (from rest at
-        // load, or back from the previous encounter's departure, which ends near the minimum speed).
+        // At or below the arrival speed, the ship has long reached its cruise speed at the spawn (from
+        // rest at load, or back from the previous encounter's departure, which ends near the minimum
+        // speed), and is back at it as a solid body leaves its far stretch.
         if (cruiseSpeed <= ENCOUNTER_ARRIVAL_SPEED) {
-          for (const speed of speedsAtVisible) expect(speed).toBeCloseTo(cruiseSpeed, 4);
+          for (const speed of speedsAtSpawn) expect(speed).toBeCloseTo(cruiseSpeed, 4);
+          for (const speed of speedsAtVisible) expect(speed).toBeCloseTo(cruiseSpeed, kind === 'nebula' ? 4 : 1);
         }
       },
     );
@@ -1787,8 +1841,9 @@ const MEDIAN_PLANET_RADIUS = (() => {
  * Runs `params` from load twice in lockstep at step `dt`, until the first encounter of the second run
  * has ended: as now, and with the out-of-view exit off (`view` null), which is the departure before
  * Phase 4, flown to the despawn distance. That reference is checked to follow the distance-based
- * target speed throughout its encounter, so it is main's speed profile for as long as the object can
- * be on any screen (main ended the encounter only after the closest approach, out of a cone that
+ * target speed throughout its encounter (after its far stretch, which both runs fly alike:
+ * `activeEncounterTargetSpeed`), so it is main's speed profile for as long as the object can be on
+ * any screen (main ended the encounter only after the closest approach, out of a cone that
  * holds every view).
  *
  * `inView` tells whether the encounter's object shows in the live view (`params.view`) for a ship
@@ -1816,8 +1871,7 @@ function againstMain(
     stepTravel(main, dt);
     const m = main.autopilot;
     if (m.encounter !== null) {
-      const profile = encounterProfile(main.autopilotParams, m.encounter.kind);
-      const expected = encounterTargetSpeed(m.remaining, encounterCruiseSpeed(main.autopilotParams), profile);
+      const expected = activeEncounterTargetSpeed(m.encounter, m.remaining, main.autopilotParams);
       worstProfileError = Math.max(worstProfileError, Math.abs(m.targetSpeed - expected));
     }
     const a = now.autopilot;

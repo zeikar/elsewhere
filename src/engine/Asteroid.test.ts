@@ -10,7 +10,9 @@ import {
   ASTEROID_RANGES,
   DT_CAP_SECONDS,
   ENCOUNTER_ARRIVAL_SPEED,
+  ENCOUNTER_BASE_SEED,
   ENCOUNTER_CLEARANCE_MARGIN,
+  ENCOUNTER_DISTANCE,
   PLANET_GAS_RANGES,
   PLANET_ICY_RADIUS,
   PLANET_MIN_PASS_DISTANCE,
@@ -85,6 +87,19 @@ function asteroidsOnly(level: number, overrides: Partial<AutopilotParams> = {}):
   const params: AutopilotParams = { ...DEFAULT_AUTOPILOT_PARAMS, nebulaShare: 0, asteroidShare: 1, asteroidFor: asteroidParams, ...overrides };
   setCruiseSpeed(params, SHIP_SPEED_LEVELS[level]!);
   return params;
+}
+
+/**
+ * Projected diameter, in pixels at 1080p, of a sphere of radius `r` whose centre is `D` ahead and
+ * `offset` to the side, with the offset taken as vertical, the worst case for the height (as for
+ * planets, Planet.test.ts).
+ */
+function spawnPx(r: number, offset: number, D: number): number {
+  const centre = Math.hypot(D, offset);
+  const half = Math.asin(r / centre);
+  const offAxis = Math.atan2(offset, D);
+  const tanHalfFov = Math.tan(((CAMERA_FOV_DEG / 2) * Math.PI) / 180);
+  return (1080 * (Math.tan(offAxis + half) - Math.tan(offAxis - half))) / (2 * tanHalfFov);
 }
 
 describe('irregularBodyGeometry', () => {
@@ -260,6 +275,19 @@ describe('asteroidParams', () => {
     // Every rock is smaller than the smallest planet.
     const smallestPlanet = Math.min(PLANET_ROCKY_RANGES.radius[0], PLANET_GAS_RANGES.radius[0], PLANET_ICY_RADIUS[0]);
     expect(Math.max(...SEEDED.map((p) => p.rocks[0]!.radius))).toBeLessThan(smallestPlanet);
+  });
+
+  it('at first appearance (the spawn) the field, its bounding sphere, is at most 12 px across at 1080p for the median asteroid and 30 px for the largest', () => {
+    // Measured over 20,000 seeds (px at 1080p, p10/p50/p90/max) with the spawn at 8,000: the field's
+    // bounding sphere 1.3/2.8/7.9/12.3 and the main rock 1.1/1.9/2.6/2.8, a faint, star-like dot (at
+    // 1,600 before #64: 6.5/13.9/39.3/61.7 and 5.6/9.3/13.1/14.1).
+    const seeded = Array.from({ length: 20_000 }, (_, i) => asteroidParams(hash(ENCOUNTER_BASE_SEED, i)));
+    const fields = seeded.map((p) => spawnPx(p.radius, p.radius * p.passFactor, ASTEROID_ENCOUNTER_DISTANCE)).sort((a, b) => a - b);
+    expect(fields[fields.length >> 1]!).toBeLessThanOrEqual(12);
+    expect(fields.at(-1)!).toBeLessThanOrEqual(30);
+    const rocks = seeded.map((p) => spawnPx(p.rocks[0]!.radius, p.radius * p.passFactor, ASTEROID_ENCOUNTER_DISTANCE));
+    expect(Math.max(...rocks)).toBeLessThan(4);
+    expect(ASTEROID_ENCOUNTER_DISTANCE).toBe(ENCOUNTER_DISTANCE);
   });
 
   it('plugs into the autopilot as asteroidFor: the encounter is planned with the field radius and its own pass factor', () => {

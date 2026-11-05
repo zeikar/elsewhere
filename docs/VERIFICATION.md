@@ -52,6 +52,10 @@ Each automated check is written as `file` — `test title`, using the title as i
 - `src/engine/Autopilot.test.ts` — `%s: clearance ≥ radius × (1 + margin) and no frame jumps`
 - `src/engine/Autopilot.test.ts` — `the drop out of warp and the return to it are smooth around $kind encounters: no step in the target speed or the speed at any frame (dt $dt)`
 - `src/engine/Autopilot.test.ts` — `the quick entry (after an object left the screen): the ship itself follows a smootherstep to the cruise speed, no steeper than its max rate, with no step and a bounded jerk`
+- `src/engine/encounter.test.ts` — `the ship follows it ($label): smooth, accelerating at about the far acceleration at most, with a bounded jerk, and at the cruise speed with no acceleration at its end`
+- `src/engine/Autopilot.test.ts` — `the ship is out of warp when the $kind leaves its far stretch (a nebula: reaches opacity 0.1), and flies the profile for its encounter speed from there (dt $dt)`
+- `src/engine/EncounterView.test.ts` — `at speed level $level ($cruiseSpeed u/s) a median planet sweeps past no faster in angle than before #36, and is reached within 2× the time it was before #64`
+- `e2e/warp.spec.ts` — `at the top speed the ship stays in warp into a planet encounter, is out of it by the end of the far stretch, and returns to warp after it`
 - `src/engine/Autopilot.test.ts` — `level %i: over the default trip’s first 20 planets the ship is at 50% and 90% of the cruise speed within the limits of leaving the screen`
 - `e2e/warp.spec.ts` — `at the default speed the ship is at 50% and 90% of the cruise speed within 2.5 s and 5 s of the planet leaving the screen`
 - `src/engine/Planet.test.ts` — `the atmosphere shell stays inside the guaranteed clearance, so the camera never enters it`
@@ -81,6 +85,15 @@ Each automated check is written as `file` — `test title`, using the title as i
 - `src/engine/encounter.test.ts` — `starts at opacity 0 and at full size for a non-default D (no pop-in)`
 - `src/engine/encounter.test.ts` — `opacity is 0 at the spawn and despawn distances, and 1 around the closest approach`
 - `src/engine/encounter.test.ts` — `changes by less than ${FADE_EPSILON} over a 0.1 s capped frame at the top speed`
+- `src/engine/encounter.test.ts` — `fades in over ${ENCOUNTER_FADE_IN_SECONDS} s: under 0.7% a frame at 60 FPS and under 3.8% in a 0.1 s capped frame, at every speed`
+- `src/engine/Planet.test.ts` — `at first appearance (the spawn) a median planet, atmosphere included, is at most 12 px across at 1080p and the largest at most 30 px`
+- `src/engine/Asteroid.test.ts` — `at first appearance (the spawn) the field, its bounding sphere, is at most 12 px across at 1080p for the median asteroid and 30 px for the largest`
+- `src/engine/Comet.test.ts` — `at first appearance (the spawn) the coma is at most 10 px across at 1080p, and the whole comet is inside the far plane`
+- `e2e/encounter.spec.ts` — `at first appearance, fully faded in, the planet is a small dot at 1080p, over the sky`
+- `src/engine/Planet.test.ts` — `at the spawn the 24-bit depth buffer keeps a ring behind the disc at least two steps behind it, so it never shows through (CAMERA_NEAR)`
+- `src/engine/Planet.test.ts` — `the far stars and galaxies stay behind it: the whole planet, ring and side offset included, is inside CAMERA_FAR at the spawn`
+- `e2e/planet.spec.ts` — `a planet hides the far stars behind its disc, and they show all around it${name}`
+- `e2e/planet.spec.ts` — `a planet hides a distant galaxy behind its disc, and one beside it shows${name}`
 - `src/engine/Nebula.test.ts` — `is 0 up to the minimum distance, 1 from the end of the fade, monotonic and continuous`
 - `src/engine/Nebula.test.ts` — `every layer fades out continuously and is 0 before the camera is within the minimum of its plane (dt $dt, level $level)`
 - `src/engine/EncounterView.test.ts` — `keeps a new planet hidden until its compile settles, then follows the fade`
@@ -98,7 +111,7 @@ Each automated check is written as `file` — `test title`, using the title as i
 - `src/engine/Autopilot.test.ts` — `at $name, with the heading held, an object once off screen would stay off screen for the rest of its pass`
 - `src/engine/renderSize.test.ts` — `is the camera view the engine sets up: the aspect, and half the vertical field of view of cameraFovDeg`
 - `e2e/encounter.spec.ts` — `three encounters run CRUISE → APPROACH → FLYBY → DEPARTURE → CRUISE and free their GPU resources`
-- Manual: watch a few encounters, either on the live site (the first planet appears within about a minute) or on the e2e build with a short interval (`npm run build:e2e && npx vite preview --outDir dist-e2e`, then open `/elsewhere/?encounterInterval=5`, adding `&encounterKind=asteroid` or `&encounterKind=comet` for asteroids or comets alone). Stars, planets, nebulae, asteroids and comets should fade in and out with no visible pop. Smoothness on screen is a visual judgement. The `Starfield.test.ts` checks above test `starFade` in `src/engine/Starfield.ts`, the TypeScript mirror of the shader's star fade, so the GLSL that actually runs on the GPU is covered only by this manual step.
+- Manual: watch a few encounters, either on the live site (the first planet appears within about a minute) or on the e2e build with a short interval (`npm run build:e2e && npx vite preview --outDir dist-e2e`, then open `/elsewhere/?encounterInterval=5`, adding `&encounterKind=asteroid` or `&encounterKind=comet` for asteroids or comets alone). Stars, planets, nebulae, asteroids and comets should fade in and out with no visible pop. A planet, an asteroid or a comet should first appear far off as a small, star-like dot within a few seconds and then grow, never as a large disc brightening from dark, and the dust streaks should lengthen and shorten smoothly over its far stretch. Smoothness on screen is a visual judgement. The `Starfield.test.ts` checks above test `starFade` in `src/engine/Starfield.ts`, the TypeScript mirror of the shader's star fade, so the GLSL that actually runs on the GPU is covered only by this manual step.
 
 ## 7. Fullscreen, pause, speed change and keyboard shortcuts work.
 

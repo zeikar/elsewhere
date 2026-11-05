@@ -1,6 +1,18 @@
 import { writeFileSync } from 'node:fs';
 import { expect, test, type Page } from '@playwright/test';
+import { ENCOUNTER_DISTANCE } from '../src/config';
+import type { PlanetPreviewOptions } from '../src/e2ePlanetPreview';
 import { appUrl } from './app';
+
+/**
+ * Where the occlusion tests draw the planet: at its usual framing distance, and out at its spawn
+ * distance (ENCOUNTER_DISTANCE), grown by the factor it moved out so it is framed the same against
+ * the far layers while its depth is the spawn's (inside CAMERA_FAR, so it still paints over them).
+ */
+const OCCLUSION_PLACES: readonly { name: string; at: PlanetPreviewOptions }[] = [
+  { name: '', at: {} },
+  { name: ' (at its spawn distance)', at: { distance: ENCOUNTER_DISTANCE, farFraming: 'grow' } },
+];
 
 /** A pixel counts as lit when its brightest channel is above this (0–255). */
 const LIT_THRESHOLD = 16;
@@ -133,17 +145,17 @@ test('draws a rocky and a gas planet that are non-blank and clearly differ, with
 /** Hides everything but the canvases while a screenshot is taken (the controls overlay the view). */
 const CANVAS_ONLY = 'body > :not(canvas) { display: none !important; }';
 
-test('a planet hides the far stars behind its disc, and they show all around it', async ({ page }) => {
+for (const { name, at } of OCCLUSION_PLACES) test(`a planet hides the far stars behind its disc, and they show all around it${name}`, async ({ page }) => {
   const errors = collectErrors(page);
   await page.goto(appUrl());
   await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 0);
   await page.evaluate(() => window.__elsewhere!.pause());
 
   // The same planet, framed the same, drawn without and then with the far-star layer behind it.
-  const plainInfo = await page.evaluate(() => window.__elsewhere!.showPlanet('rocky'));
+  const plainInfo = await page.evaluate((o) => window.__elsewhere!.showPlanet('rocky', 0, o), at);
   expect(plainInfo.farStarsBehindDisc).toBeNull();
   const plain = await page.locator('#planet-preview').screenshot({ style: CANVAS_ONLY });
-  const info = await page.evaluate(() => window.__elsewhere!.showPlanet('rocky', 0, { farStars: true }));
+  const info = await page.evaluate((o) => window.__elsewhere!.showPlanet('rocky', 0, { ...o, farStars: true }), at);
   const starry = await page.locator('#planet-preview').screenshot({ style: CANVAS_ONLY });
   await test.info().attach('planet with far stars', { body: starry, contentType: 'image/png' });
   // Plenty of far stars lie behind the disc, so hiding them is a real check.
@@ -195,7 +207,7 @@ test('a planet hides the far stars behind its disc, and they show all around it'
   expect(errors).toEqual([]);
 });
 
-test('a planet hides a distant galaxy behind its disc, and one beside it shows', async ({ page }) => {
+for (const { name, at } of OCCLUSION_PLACES) test(`a planet hides a distant galaxy behind its disc, and one beside it shows${name}`, async ({ page }) => {
   const errors = collectErrors(page);
   await page.goto(appUrl());
   await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 0);
@@ -203,10 +215,10 @@ test('a planet hides a distant galaxy behind its disc, and one beside it shows',
 
   // The same planet, framed the same, drawn without and then with the galaxy layer: the test
   // default trip's first galaxy straight behind the disc's centre and beside the disc.
-  const plainInfo = await page.evaluate(() => window.__elsewhere!.showPlanet('rocky'));
+  const plainInfo = await page.evaluate((o) => window.__elsewhere!.showPlanet('rocky', 0, o), at);
   expect(plainInfo.galaxies).toBeNull();
   const plain = await page.locator('#planet-preview').screenshot({ style: CANVAS_ONLY });
-  const info = await page.evaluate(() => window.__elsewhere!.showPlanet('rocky', 0, { galaxies: true }));
+  const info = await page.evaluate((o) => window.__elsewhere!.showPlanet('rocky', 0, { ...o, galaxies: true }), at);
   const withGalaxies = await page.locator('#planet-preview').screenshot({ style: CANVAS_ONLY });
   await test.info().attach('planet with galaxies', { body: withGalaxies, contentType: 'image/png' });
   expect(info.galaxies).not.toBeNull();

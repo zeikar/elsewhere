@@ -8,7 +8,10 @@
  * the window since the previous sample. A sample is due SOAK_SAMPLE_SECONDS (default 30) after the
  * previous one, but is taken at the first CRUISE from then on, so samples are spaced by the later
  * of SOAK_SAMPLE_SECONDS and the end of the encounter in progress: in practice about one per
- * encounter cycle (about 70–80 s under SwiftShader). The run fails on
+ * encounter cycle. Since issue #64 (objects spawn 8,000 out, with a far stretch) a cycle is about 40 s
+ * of simulated travel with these settings, against about 24 s before; under SwiftShader at about
+ * 5 FPS (capped frames, so about half real time) a 3-minute run then met 2–3 encounters and took 3–4
+ * samples (the CI runner took 5 before #64). The run fails on
  *
  * - heap growth: last sample minus first above SOAK_HEAP_GROWTH_LIMIT_BYTES;
  * - frame-time degradation: the p95 frame interval at CRUISE late in the run (every CRUISE frame of

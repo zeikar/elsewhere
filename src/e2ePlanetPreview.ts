@@ -96,6 +96,22 @@ export interface PlanetPreviewOptions {
   farStars?: boolean;
   /** Draw a galaxy straight behind the planet's disc and one beside it, on the galaxy layer. Default: false. */
   galaxies?: boolean;
+  /**
+   * Distance from the camera to the planet's centre, in world units (ENCOUNTER_DISTANCE: as at its
+   * spawn): the planet keeps its direction and moves out to it, so the depth buffer, with the camera's
+   * CAMERA_NEAR and CAMERA_FAR, works as it does there. How it is framed is `farFraming`'s. Default:
+   * the usual framing distance, a few radii.
+   */
+  distance?: number;
+  /**
+   * With `distance`: `'zoom'` (the default) moves the planet out along the view axis and narrows the
+   * camera's field of view by the same factor, so it is framed as at its usual distance, at its true
+   * size and depth (for the ring's depth order); `'grow'` moves it out along its direction, keeps the
+   * field of view and grows the planet by that factor, so it is framed the same against the far
+   * layers, at that depth (for the far stars and galaxies behind it); `'none'` moves it out along its
+   * direction and changes nothing else, so the planet is as small as it is at that distance.
+   */
+  farFraming?: 'zoom' | 'grow' | 'none';
 }
 
 export interface EncounterPreviewInfo {
@@ -151,6 +167,7 @@ function prepare(): { renderer: WebGLRenderer; scene: Scene; camera: Perspective
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, DPR_CAP));
   renderer.setSize(width, height, false);
   camera.aspect = width / height;
+  camera.fov = CAMERA_FOV_DEG;
   camera.updateProjectionMatrix();
   shown?.dispose();
   shown = null;
@@ -196,6 +213,24 @@ function drawPlanet(
   const radius = params.radius;
   const back = params.ring === null ? 1 : Math.max(1, params.extent / PREVIEW_RING_EXTENT);
   planet.object.position.set(PREVIEW_OFFSET_RADII.x * radius, PREVIEW_OFFSET_RADII.y * radius, PREVIEW_OFFSET_RADII.z * radius * back);
+  if (options.distance !== undefined) {
+    // Out to that distance, framed as asked (see PlanetPreviewOptions).
+    const position = planet.object.position;
+    const framing = options.farFraming ?? 'zoom';
+    if (framing === 'zoom') {
+      // Only further along the view axis: a field of view narrower by the same factor then projects
+      // the centre where it was, and the planet at the size it was.
+      const factor = Math.sqrt(options.distance ** 2 - position.x ** 2 - position.y ** 2) / -position.z;
+      position.z *= factor;
+      c.fov = (2 * Math.atan(Math.tan((CAMERA_FOV_DEG * Math.PI) / 360) / factor) * 180) / Math.PI;
+      c.updateProjectionMatrix();
+    } else {
+      // Along the same direction, so the centre projects where it was.
+      const factor = options.distance / position.length();
+      position.multiplyScalar(factor);
+      if (framing === 'grow') planet.object.scale.multiplyScalar(factor);
+    }
+  }
   planet.update(PREVIEW_TIME);
   s.add(planet.object);
   const stars = options.farStars === true ? addFarStars(s) : null;
@@ -412,9 +447,9 @@ export interface RingDepthInfo {
  * for the glow where the ring crosses the halo (`haloFront`, `haloBehind`). Leaves the planet shown, with its
  * ring and atmosphere.
  */
-export function checkRingDepth(seed: number): RingDepthInfo {
+export function checkRingDepth(seed: number, distance?: number): RingDepthInfo {
   const s = seed >>> 0;
-  const { planet } = drawPlanet(s);
+  const { planet } = drawPlanet(s, distance === undefined ? {} : { distance, farFraming: 'zoom' });
   const ring = planet.ring;
   if (ring === null) throw new Error(`seed ${s}: no ring`);
   if (planet.atmosphere === null) throw new Error(`seed ${s}: no atmosphere`);

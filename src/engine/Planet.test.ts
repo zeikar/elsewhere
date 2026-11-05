@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CAMERA_FAR,
   CAMERA_FOV_DEG,
+  CAMERA_NEAR,
   ENCOUNTER_BASE_SEED,
   ENCOUNTER_CLEARANCE_MARGIN,
   ENCOUNTER_DISTANCE,
@@ -110,29 +111,79 @@ describe('planet config', () => {
     expect(ENCOUNTER_PLANET_RADIUS).toBeLessThanOrEqual(maxRadius);
   });
 
-  it('at spawn, at full size, a median planet spans at most 3.5% of the view height, the largest at most 9% and the widest ring at most 23%', () => {
-    /**
-     * Projected diameter, as a fraction of the view height, of a sphere of radius `r` at spawn whose
-     * centre is D ahead and `offset` to the side, drawn at its full size (the size scale is 1
-     * throughout), with the side offset taken as vertical, the worst case for the height.
-     */
-    const spawnDiameter = (r: number, offset: number) => {
-      const centre = Math.hypot(ENCOUNTER_DISTANCE, offset);
-      const half = Math.asin(r / centre);
-      const offAxis = Math.atan2(offset, ENCOUNTER_DISTANCE);
-      const tanHalfFov = Math.tan(((CAMERA_FOV_DEG / 2) * Math.PI) / 180);
-      return (Math.tan(offAxis + half) - Math.tan(offAxis - half)) / (2 * tanHalfFov);
-    };
-    // The seeded planets, each at its own k: about 37 px at 1080p for the median one.
-    const drawn = SEEDS.map((seed) => planetParams(seed));
-    const discs = drawn.map((p) => spawnDiameter(p.radius, p.radius * p.passFactor)).sort((a, b) => a - b);
-    expect(discs[discs.length / 2]!).toBeLessThanOrEqual(0.035);
-    // Any configured planet: the largest radius at the largest k, about 89 px.
+  /**
+   * Projected diameter, in pixels at 1080p (a 1,080-pixel view height), of a sphere of radius `r` at
+   * spawn whose centre is `D` ahead and `offset` to the side, drawn at its full size (the size scale
+   * is 1 throughout), with the side offset taken as vertical, the worst case for the height.
+   */
+  const spawnPx = (r: number, offset: number, D = ENCOUNTER_DISTANCE) => {
+    const centre = Math.hypot(D, offset);
+    const half = Math.asin(r / centre);
+    const offAxis = Math.atan2(offset, D);
+    const tanHalfFov = Math.tan(((CAMERA_FOV_DEG / 2) * Math.PI) / 180);
+    return (1080 * (Math.tan(offAxis + half) - Math.tan(offAxis - half))) / (2 * tanHalfFov);
+  };
+  const quantile = (values: readonly number[], q: number) => [...values].sort((a, b) => a - b)[Math.floor(q * (values.length - 1))]!;
+
+  it('at first appearance (the spawn) a median planet, atmosphere included, is at most 12 px across at 1080p and the largest at most 30 px', () => {
+    // 20,000 seeded planets, each at its own k. Measured (px at 1080p, p10/p50/p90/max), with the
+    // spawn at 8,000 (at 2,400 before #64: 15.6/37.7/81.5/99.0 for the disc, 15.8/38.5/104.8/226.3
+    // with the ring):
+    //   disc with its atmosphere  4.7/11.3/24.3/28.8
+    //   with the ring, if any     4.7/11.5/31.2/66.7 (the 16% that are ringed: 16.1/36.3/53.3/66.7)
+    const drawn = Array.from({ length: 20_000 }, (_, i) => planetParams(hash(ENCOUNTER_BASE_SEED, i)));
+    const discs = drawn.map((p) => spawnPx(p.radius * (1 + p.atmosphereThickness), p.radius * p.passFactor));
+    const whole = drawn.map((p) => spawnPx(p.radius * p.extent, p.radius * p.passFactor));
+    const rings = drawn.filter((p) => p.ring !== null).map((p) => spawnPx(p.radius * p.extent, p.radius * p.passFactor));
+    const stats = (v: number[]) => [quantile(v, 0.1), quantile(v, 0.5), quantile(v, 0.9), Math.max(...v)];
+    const [, discMedian, , discMax] = stats(discs);
+    expect(discMedian).toBeLessThanOrEqual(12);
+    expect(discMax).toBeLessThanOrEqual(30);
+    // Ring included, the median planet is still under 12 px (most have no ring).
+    const [, wholeMedian, wholeP90] = stats(whole);
+    expect(wholeMedian).toBeLessThanOrEqual(12);
+    expect(wholeP90).toBeLessThanOrEqual(32);
+    // Any configured planet: the largest radius, the thickest atmosphere, at the largest k, about 29 px.
     const kMax = PLANET_PASS_FACTOR_RANGE[1];
-    expect(spawnDiameter(maxRadius, maxRadius * kMax)).toBeLessThanOrEqual(0.09);
-    for (const disc of discs) expect(disc).toBeLessThanOrEqual(spawnDiameter(maxRadius, maxRadius * kMax) + 1e-12);
-    // The widest ring around the largest planet spans its outer diameter at most (seen face-on).
-    expect(spawnDiameter(maxRadius * maxOuter, maxRadius * kMax)).toBeLessThanOrEqual(0.23);
+    const largest = spawnPx(maxRadius * (1 + PLANET_GAS_RANGES.atmosphereThickness[1]), maxRadius * kMax);
+    expect(largest).toBeLessThanOrEqual(30);
+    for (const disc of discs) expect(disc).toBeLessThanOrEqual(largest + 1e-9);
+    // A ring is thin and translucent, and the widest is more than twice the largest disc across: the
+    // widest ring around the largest planet spans at most its outer diameter (seen face-on), about
+    // 70 px. Under 30 px it would need a spawn about 18,500 out, past CAMERA_FAR.
+    const widest = spawnPx(maxRadius * maxOuter, maxRadius * kMax);
+    expect(widest).toBeLessThanOrEqual(72);
+    for (const ring of rings) expect(ring).toBeLessThanOrEqual(widest + 1e-9);
+    expect(quantile(rings, 0.5)).toBeLessThanOrEqual(40);
+    expect(spawnPx(maxRadius * maxOuter, maxRadius * kMax, 18_600)).toBeLessThanOrEqual(30);
+    expect(spawnPx(maxRadius * maxOuter, maxRadius * kMax, 18_400)).toBeGreaterThan(30);
+    expect(18_400).toBeGreaterThan(CAMERA_FAR);
+  });
+
+  it('the far stars and galaxies stay behind it: the whole planet, ring and side offset included, is inside CAMERA_FAR at the spawn', () => {
+    // The far layers are drawn at infinity before anything else and write no depth, so whatever is
+    // inside the far plane paints over them (e2e/planet.spec.ts checks it at the spawn distance).
+    const kMax = PLANET_PASS_FACTOR_RANGE[1];
+    expect(Math.hypot(ENCOUNTER_DISTANCE, maxRadius * kMax) + maxRadius * maxOuter).toBeLessThan(CAMERA_FAR * 0.95);
+  });
+
+  it('at the spawn the 24-bit depth buffer keeps a ring behind the disc at least two steps behind it, so it never shows through (CAMERA_NEAR)', () => {
+    // Window depth of a point at view distance z (standard perspective, [0, 1]), in steps of a 24-bit
+    // depth buffer. The ring lies at least `inner` radii from the centre and the disc in front of it
+    // within 1, so where the ring passes behind the disc it is at least sqrt(inner² - 1) radii behind
+    // the disc's front, which is at most at the centre's depth (at the limb). The atmosphere shell
+    // and the ring's near side are always in front of the disc, so their order is kept anyway.
+    const step = (z: number, near: number, far: number) => Math.floor((((far + near) / (far - near) - (2 * far * near) / ((far - near) * z)) * 0.5 + 0.5) * (2 ** 24 - 1));
+    const smallest = Math.min(PLANET_ROCKY_RANGES.radius[0], PLANET_ICY_RADIUS[0], PLANET_GAS_RANGES.radius[0]);
+    const gap = smallest * Math.sqrt(PLANET_RING_RANGES.inner[0] ** 2 - 1);
+    expect(gap).toBeGreaterThan(10);
+    const farthest = Math.hypot(ENCOUNTER_DISTANCE, maxRadius * PLANET_PASS_FACTOR_RANGE[1]);
+    for (let z = ENCOUNTER_DISTANCE - 500; z <= farthest; z += 0.37) {
+      expect(step(z + gap, CAMERA_NEAR, CAMERA_FAR) - step(z, CAMERA_NEAR, CAMERA_FAR)).toBeGreaterThanOrEqual(2);
+    }
+    // With the near plane at 0.1, as before #64, the steps there were about 38 units: the same gap
+    // would often share a step with the disc, and the ring behind it would show through.
+    expect(step(farthest + gap, 0.1, CAMERA_FAR) - step(farthest, 0.1, CAMERA_FAR)).toBeLessThanOrEqual(1);
   });
 
   it('the atmosphere shell stays inside the guaranteed clearance, so the camera never enters it', () => {

@@ -34,6 +34,17 @@
  * changes: the target speed is the distance-based profile throughout the encounter. Encounter timing
  * therefore depends on the screen's shape; the schedule (kinds, sides, cruise lengths) does not.
  *
+ * The far stretch (config.ts, ENCOUNTER_FAR_SPEED): planets, asteroids and comets spawn far out, and
+ * the first part of their approach, while the object is still small, is flown faster
+ * (`farStretchTargetSpeed`); the ship is back at the encounter's cruise speed, with no acceleration
+ * left, by the time the object's angular diameter reaches the threshold or the slowdown starts,
+ * after which the speed profile is exactly what it was. Its length (`farStretchRoom`) and the ship's
+ * speed at the spawn (`farStart`) are fixed when the encounter starts. Above the arrival speed the
+ * cruise before it drops out of warp only to the speed the far stretch can fall from
+ * (`farHandoverSpeed`), so it needs to know the next object before it is planned: the cruise chooses
+ * it once (`chooseEncounter`, kept in `AutopilotState.next`), and the encounter starts with that
+ * choice.
+ *
  * Heading: `planEncounter` assumes the ship holds the planned heading. Shrinking the drift
  * amplitudes would turn the heading back toward -Z and move the path sideways, eating into the
  * clearance. Instead the autopilot slows the ship's drift clock to a stop over the end of the
@@ -68,7 +79,6 @@
 import {
   ASTEROID_DESPAWN_DISTANCE,
   ASTEROID_ENCOUNTER_DISTANCE,
-  ASTEROID_FADE_IN_DISTANCE,
   ASTEROID_FADE_OUT_DISTANCE,
   ASTEROID_MIN_SPEED,
   ASTEROID_MIN_SPEED_DISTANCE,
@@ -79,7 +89,6 @@ import {
   CAMERA_FOV_DEG,
   COMET_DESPAWN_DISTANCE,
   COMET_ENCOUNTER_DISTANCE,
-  COMET_FADE_IN_DISTANCE,
   COMET_FADE_OUT_DISTANCE,
   COMET_MIN_SPEED,
   COMET_MIN_SPEED_DISTANCE,
@@ -94,6 +103,7 @@ import {
   ENCOUNTER_COMET_SHARE,
   ENCOUNTER_DISTANCE,
   ENCOUNTER_DRIFT_SETTLE_SECONDS,
+  ENCOUNTER_FADE_IN_SECONDS,
   ENCOUNTER_FLYBY_DISTANCE,
   ENCOUNTER_INTERVAL_JITTER,
   ENCOUNTER_INTERVAL_SECONDS,
@@ -132,6 +142,9 @@ import {
   encounterOpacity,
   encounterRemaining,
   encounterTargetSpeed,
+  farHandoverSpeed,
+  farStretchRoom,
+  farStretchTargetSpeed,
   frustumConeHalfAngle,
   frustumSphereMargin,
   planEncounter,
@@ -258,6 +271,13 @@ interface ActiveEncounterBase {
   side: EncounterSide;
   /** Planned path and object position (`plan.radius` is the planet's or the nebula's radius). */
   plan: Encounter;
+  /**
+   * The far stretch's length, in world units travelled from the spawn (`farStretchRoom`); without it
+   * (or 0) there is none.
+   */
+  farRoom?: number;
+  /** The ship's speed at the spawn, where the far stretch starts (the encounter's cruise speed without it). */
+  farStart?: number;
 }
 
 export interface PlanetEncounter extends ActiveEncounterBase {
@@ -286,6 +306,18 @@ export interface CometEncounter extends ActiveEncounterBase {
 
 export type ActiveEncounter = PlanetEncounter | NebulaEncounter | AsteroidEncounter | CometEncounter;
 
+/**
+ * An encounter's object, chosen for its index before it is planned (`chooseEncounter`): its kind, the
+ * spec its chooser gave (`AutopilotParams.planetFor` and the others), and its far stretch's length
+ * (`encounterChoiceRoom`), which depends only on the object and the distances of the params.
+ */
+export type EncounterChoice = { index: number; seed: number; farRoom: number } & (
+  | { kind: 'planet'; planet: PlanetSpec }
+  | { kind: 'nebula'; nebula: NebulaSpec }
+  | { kind: 'asteroid'; asteroid: AsteroidSpec }
+  | { kind: 'comet'; comet: CometSpec }
+);
+
 /** How a kind of encounter is planned and flown. */
 export interface EncounterKindParams {
   /** `D`: how far ahead the object is placed, which is also the spawn distance. */
@@ -296,7 +328,10 @@ export interface EncounterKindParams {
   profile: Readonly<EncounterProfile>;
 }
 
-/** The nebula speed and fade profile, tuned for the default cruise speed. */
+/**
+ * The nebula speed and fade profile, tuned for the default cruise speed. A nebula keeps its own
+ * approach: it fades in over a distance, and has no far stretch (config.ts, NEBULA_ENCOUNTER_DISTANCE).
+ */
 export const NEBULA_ENCOUNTER_PROFILE: Readonly<EncounterProfile> = {
   minSpeed: NEBULA_MIN_SPEED,
   minSpeedFloor: NEBULA_MIN_SPEED_FLOOR,
@@ -304,9 +339,13 @@ export const NEBULA_ENCOUNTER_PROFILE: Readonly<EncounterProfile> = {
   minSpeedDistance: NEBULA_MIN_SPEED_DISTANCE,
   speedupDistance: NEBULA_SPEEDUP_DISTANCE,
   fadeInDistance: NEBULA_FADE_IN_DISTANCE,
+  fadeInTime: 0,
   spawnScale: 1,
   fadeOutDistance: NEBULA_FADE_OUT_DISTANCE,
   despawnDistance: NEBULA_DESPAWN_DISTANCE,
+  farSpeed: 0,
+  farAccel: 0,
+  farMaxAngle: 0,
 };
 
 /** The asteroid speed and fade profile, tuned for the default cruise speed. */
@@ -316,10 +355,14 @@ export const ASTEROID_ENCOUNTER_PROFILE: Readonly<EncounterProfile> = {
   slowdownDistance: ASTEROID_SLOWDOWN_DISTANCE,
   minSpeedDistance: ASTEROID_MIN_SPEED_DISTANCE,
   speedupDistance: ASTEROID_SPEEDUP_DISTANCE,
-  fadeInDistance: ASTEROID_FADE_IN_DISTANCE,
+  fadeInDistance: 0,
+  fadeInTime: ENCOUNTER_FADE_IN_SECONDS,
   spawnScale: 1,
   fadeOutDistance: ASTEROID_FADE_OUT_DISTANCE,
   despawnDistance: ASTEROID_DESPAWN_DISTANCE,
+  farSpeed: DEFAULT_ENCOUNTER_PROFILE.farSpeed,
+  farAccel: DEFAULT_ENCOUNTER_PROFILE.farAccel,
+  farMaxAngle: DEFAULT_ENCOUNTER_PROFILE.farMaxAngle,
 };
 
 /** The comet speed and fade profile, tuned for the default cruise speed. */
@@ -329,10 +372,14 @@ export const COMET_ENCOUNTER_PROFILE: Readonly<EncounterProfile> = {
   slowdownDistance: COMET_SLOWDOWN_DISTANCE,
   minSpeedDistance: COMET_MIN_SPEED_DISTANCE,
   speedupDistance: COMET_SPEEDUP_DISTANCE,
-  fadeInDistance: COMET_FADE_IN_DISTANCE,
+  fadeInDistance: 0,
+  fadeInTime: ENCOUNTER_FADE_IN_SECONDS,
   spawnScale: 1,
   fadeOutDistance: COMET_FADE_OUT_DISTANCE,
   despawnDistance: COMET_DESPAWN_DISTANCE,
+  farSpeed: DEFAULT_ENCOUNTER_PROFILE.farSpeed,
+  farAccel: DEFAULT_ENCOUNTER_PROFILE.farAccel,
+  farMaxAngle: DEFAULT_ENCOUNTER_PROFILE.farMaxAngle,
 };
 
 export interface AutopilotParams {
@@ -511,6 +558,17 @@ export interface AutopilotState {
   kindRun: number;
   /** The encounter in progress, or `null` in CRUISE. */
   encounter: ActiveEncounter | null;
+  /**
+   * Seconds since the encounter in progress started (0 on the step that plans it, where the object
+   * appears at opacity 0), which its fade-in follows; 0 in CRUISE.
+   */
+  encounterTime: number;
+  /**
+   * The next encounter's object, once the cruise before it has chosen it (`chooseEncounter`): above
+   * the arrival speed the cruise needs its far stretch to know how far to drop out of warp. The
+   * encounter starts with it when it is still the one for that index. `null` until then.
+   */
+  next: EncounterChoice | null;
   /** Remaining distance to the closest approach (see encounter.ts); `Infinity` with no encounter. */
   remaining: number;
   /**
@@ -897,8 +955,14 @@ const curveScratch: [number, number] = [0, 0];
  * only a cruise no longer than the lead (shorter than any configured interval) starts it at the
  * arrival speed at once.
  *
- * Continuous with the encounter's target speed at both ends: an encounter starts at
- * `encounterCruiseSpeed` (see `encounterTargetSpeed`) and ends at the entry speed.
+ * `handover` is the speed the drop out of warp ends at: the arrival speed by default, or, before an
+ * encounter with a far stretch, the speed that can fly on from (`farHandoverSpeed`, between the
+ * arrival speed and the cruise speed). Everything said of the arrival speed above then holds for it:
+ * at the top level the cruise before most planets, asteroids and comets does not drop out of warp at
+ * all, and their far stretch slows the ship down instead.
+ *
+ * Continuous with the encounter's target speed at both ends: an encounter starts at the hand-over
+ * speed (see `encounterTargetSpeed` and `farStretchTargetSpeed`) and ends at the entry speed.
  */
 export function cruiseTargetSpeed(
   cruiseTime: number,
@@ -910,9 +974,10 @@ export function cruiseTargetSpeed(
   quickAt = 0,
   quickSpeed: number = entrySpeed,
   quickAccel = 0,
+  handover: number = encounterCruiseSpeed(params),
 ): number {
   const cruise = params.cruiseSpeed;
-  const arrival = encounterCruiseSpeed(params);
+  const arrival = Math.min(cruise, Math.max(encounterCruiseSpeed(params), handover));
   const exitEnd = interval - params.warpExitLead;
   let target = cruise;
   // The quick entry's lead over the ship's lag, added on top of any drop out of warp.
@@ -985,6 +1050,64 @@ export function asteroidPassFactor(asteroid: Readonly<AsteroidSpec>, sideOffsetF
  */
 export function cometPassFactor(comet: Readonly<CometSpec>, sideOffsetFactor: number): number {
   return Math.max(comet.passFactor ?? sideOffsetFactor, 1 + ENCOUNTER_CLEARANCE_MARGIN);
+}
+
+/**
+ * The object of encounter `index` (appearance seed `seed`, of `kind`, which `encounterKindAt` picks):
+ * the spec its kind's chooser gives for the seed, and its far stretch's length. Calls that chooser
+ * once.
+ */
+export function chooseEncounter(index: number, seed: number, kind: EncounterKind, params: Readonly<AutopilotParams>): EncounterChoice {
+  const farRoom = 0;
+  const choice: EncounterChoice =
+    kind === 'nebula'
+      ? { index, seed, farRoom, kind, nebula: params.nebulaFor(seed) }
+      : kind === 'asteroid'
+        ? { index, seed, farRoom, kind, asteroid: params.asteroidFor(seed) }
+        : kind === 'comet'
+          ? { index, seed, farRoom, kind, comet: params.cometFor(seed) }
+          : { index, seed, farRoom, kind, planet: params.planetFor(seed) };
+  choice.farRoom = encounterChoiceRoom(choice, params);
+  return choice;
+}
+
+/**
+ * How `choice` is planned: its encounter radius, `D` and `k` (each kind's pass factor rule), and the
+ * radius of the sphere that holds what is drawn of it for the far stretch's threshold (config.ts,
+ * ENCOUNTER_FAR_SPEED): a planet's extent (its atmosphere or its ring; PLANET_VIEW_RADIUS_FACTOR
+ * without one), an asteroid field's bounding sphere, a comet's coma, a nebula's core.
+ */
+export function encounterChoicePlan(
+  choice: Readonly<EncounterChoice>,
+  params: Readonly<AutopilotParams>,
+): { radius: number; distance: number; k: number; drawnRadius: number } {
+  switch (choice.kind) {
+    case 'nebula': {
+      const { radius } = choice.nebula;
+      return { radius, distance: params.nebula.encounterDistance, k: params.nebula.sideOffsetFactor, drawnRadius: radius };
+    }
+    case 'asteroid': {
+      const { radius } = choice.asteroid;
+      const k = asteroidPassFactor(choice.asteroid, params.asteroid.sideOffsetFactor);
+      return { radius, distance: params.asteroid.encounterDistance, k, drawnRadius: radius };
+    }
+    case 'comet': {
+      const { radius } = choice.comet;
+      const k = cometPassFactor(choice.comet, params.comet.sideOffsetFactor);
+      return { radius, distance: params.comet.encounterDistance, k, drawnRadius: radius };
+    }
+    case 'planet': {
+      const { radius } = choice.planet;
+      const k = planetPassFactor(choice.planet, params.sideOffsetFactor);
+      return { radius, distance: params.encounterDistance, k, drawnRadius: radius * Math.max(1, choice.planet.extent ?? PLANET_VIEW_RADIUS_FACTOR) };
+    }
+  }
+}
+
+/** The far stretch's length for `choice` (`farStretchRoom` with its plan and its kind's profile). */
+export function encounterChoiceRoom(choice: Readonly<EncounterChoice>, params: Readonly<AutopilotParams>): number {
+  const { radius, distance, k, drawnRadius } = encounterChoicePlan(choice, params);
+  return farStretchRoom(distance, radius * k, drawnRadius, encounterProfile(params, choice.kind));
 }
 
 /**
@@ -1090,6 +1213,22 @@ function cometViewMargin(encounter: Readonly<CometEncounter>, ship: Readonly<Shi
   return margin;
 }
 
+/**
+ * The target speed during `encounter` at `remaining` distance: on its far stretch (while the distance
+ * travelled from the spawn is under `farRoom`), `farStretchTargetSpeed` from the ship's speed at the
+ * spawn; from there on, the speed profile from `encounterCruiseSpeed` (`encounterTargetSpeed`), the
+ * same as without a far stretch. Pure and allocation-free.
+ */
+export function activeEncounterTargetSpeed(encounter: Readonly<ActiveEncounter>, remaining: number, params: Readonly<AutopilotParams>): number {
+  const profile = encounterProfile(params, encounter.kind);
+  const arrival = encounterCruiseSpeed(params);
+  const room = encounter.farRoom ?? 0;
+  const travelled = encounter.plan.spawnDistance - remaining;
+  return room > 0 && travelled < room
+    ? farStretchTargetSpeed(travelled, room, encounter.farStart ?? arrival, arrival, profile, params.shipSpeedTau)
+    : encounterTargetSpeed(remaining, arrival, profile);
+}
+
 /** Starting autopilot state: CRUISE from the beginning, with no encounter yet. */
 export function createAutopilotState(params: Readonly<AutopilotParams> = DEFAULT_AUTOPILOT_PARAMS): AutopilotState {
   return {
@@ -1099,6 +1238,8 @@ export function createAutopilotState(params: Readonly<AutopilotParams> = DEFAULT
     lastKind: null,
     kindRun: 0,
     encounter: null,
+    encounterTime: 0,
+    next: null,
     remaining: Number.POSITIVE_INFINITY,
     viewMargin: Number.NEGATIVE_INFINITY,
     outOfViewTime: Number.NEGATIVE_INFINITY,
@@ -1140,10 +1281,13 @@ export function createAutopilotState(params: Readonly<AutopilotParams> = DEFAULT
  * - The lateness carried from the end of DEPARTURE is the time since the first of those held: since
  *   the despawn distance was passed, or since the view margin turned positive (interpolated between
  *   the two steps either side), up to three steps.
- * - The target speed follows the encounter speed profile from `encounterCruiseSpeed`, and is
- *   `cruiseTargetSpeed` in CRUISE: after an encounter, the return to warp from the target speed the
- *   encounter ended at (quick when it ended out of view), and the drop out of warp at the end of the
- *   cruise when the cruise speed is above the arrival speed.
+ * - The target speed follows the encounter's far stretch and then its speed profile from
+ *   `encounterCruiseSpeed` (`activeEncounterTargetSpeed`), and is `cruiseTargetSpeed` in CRUISE:
+ *   after an encounter, the return to warp from the target speed the encounter ended at (quick when it
+ *   ended out of view), and the drop out of warp to the hand-over speed at the end of the cruise when
+ *   the cruise speed is above the arrival speed (which chooses the next object, `next`, once).
+ * - The fade follows the encounter's own time (`encounterTime`) for the fade-in of a planet, an
+ *   asteroid or a comet, and the remaining distance otherwise (`encounterOpacity`).
  * - The drift rate eases to 0 at the end of CRUISE, stays 0 through APPROACH and FLYBY, and eases
  *   back toward 1 over DEPARTURE as the ship recedes (reaching 1 at the despawn distance), then on
  *   to 1 at the start of CRUISE from wherever DEPARTURE left it.
@@ -1162,6 +1306,8 @@ export function updateAutopilot(
   let lastKind = state.lastKind;
   let kindRun = state.kindRun;
   let encounter = state.encounter;
+  let next = state.next;
+  let encounterTime = travel === 'CRUISE' ? 0 : state.encounterTime + dt;
   let entrySpeed = state.entrySpeed;
   let entryDrift = state.entryDrift;
   let entryQuick = state.entryQuick;
@@ -1179,33 +1325,24 @@ export function updateAutopilot(
       const seed = hash(params.baseSeed, index);
       const kind = encounterKindAt(index, seed, params, lastKind, kindRun);
       const { side, sideAngle } = encounterSide(seed, params.sideElevation);
-      if (kind === 'nebula') {
-        const nebula = params.nebulaFor(seed);
-        const { encounterDistance, sideOffsetFactor } = params.nebula;
-        const plan = planEncounter(ship.position, ship.heading, nebula.radius, encounterDistance, sideOffsetFactor, sideAngle);
-        encounter = { kind: 'nebula', index, seed, side, nebula, plan };
-      } else if (kind === 'asteroid') {
-        const asteroid = params.asteroidFor(seed);
-        const k = asteroidPassFactor(asteroid, params.asteroid.sideOffsetFactor);
-        const plan = planEncounter(ship.position, ship.heading, asteroid.radius, params.asteroid.encounterDistance, k, sideAngle);
-        encounter = { kind: 'asteroid', index, seed, side, asteroid, plan };
-      } else if (kind === 'comet') {
-        const comet = params.cometFor(seed);
-        const k = cometPassFactor(comet, params.comet.sideOffsetFactor);
-        const plan = planEncounter(ship.position, ship.heading, comet.radius, params.comet.encounterDistance, k, sideAngle);
-        encounter = { kind: 'comet', index, seed, side, comet, plan };
-      } else {
-        const planet = params.planetFor(seed);
-        const k = planetPassFactor(planet, params.sideOffsetFactor);
-        const plan = planEncounter(ship.position, ship.heading, planet.radius, params.encounterDistance, k, sideAngle);
-        encounter = { kind: 'planet', index, seed, side, planet, plan };
-      }
+      // The object the cruise chose, if it is still the one for this index; otherwise choose it now.
+      const choice = next !== null && next.index === index && next.seed === seed && next.kind === kind ? next : chooseEncounter(index, seed, kind, params);
+      const { radius, distance, k } = encounterChoicePlan(choice, params);
+      const plan = planEncounter(ship.position, ship.heading, radius, distance, k, sideAngle);
+      const base = { index, seed, side, plan, farRoom: choice.farRoom, farStart: ship.speed };
+      if (choice.kind === 'nebula') encounter = { ...base, kind: 'nebula', nebula: choice.nebula };
+      else if (choice.kind === 'asteroid') encounter = { ...base, kind: 'asteroid', asteroid: choice.asteroid };
+      else if (choice.kind === 'comet') encounter = { ...base, kind: 'comet', comet: choice.comet };
+      else encounter = { ...base, kind: 'planet', planet: choice.planet };
+      next = null;
       encounterCount = index + 1;
       kindRun = runClass(kind) === runClass(lastKind) ? kindRun + 1 : 1;
       lastKind = kind;
       // How late this encounter starts. The plan stays at the ship's actual position; the next CRUISE
       // is shortened by this instead.
       cruiseTime = Math.min(cruiseTime - interval, dt);
+      // The object appears at opacity 0 on this step, planned where the ship is now.
+      encounterTime = 0;
       travel = 'APPROACH';
     }
   }
@@ -1260,6 +1397,7 @@ export function updateAutopilot(
         entryAt = cruiseTime;
         travel = 'CRUISE';
         encounter = null;
+        encounterTime = 0;
         remaining = Number.POSITIVE_INFINITY;
         viewMargin = Number.NEGATIVE_INFINITY;
         outOfViewTime = Number.NEGATIVE_INFINITY;
@@ -1273,6 +1411,7 @@ export function updateAutopilot(
   out.lastKind = lastKind;
   out.kindRun = kindRun;
   out.encounter = encounter;
+  out.encounterTime = encounterTime;
   out.remaining = remaining;
   out.viewMargin = viewMargin;
   out.outOfViewTime = outOfViewTime;
@@ -1284,15 +1423,38 @@ export function updateAutopilot(
   out.entryShipAccel = entryShipAccel;
   if (encounter === null) {
     const interval = cruiseInterval(params, encounterCount);
+    const arrival = encounterCruiseSpeed(params);
+    let handover = arrival;
+    if (params.cruiseSpeed > arrival) {
+      // Above the arrival speed the drop out of warp ends where the next far stretch can fly on from,
+      // so the cruise chooses the next object now (once: it is kept for the encounter).
+      const index = encounterCount;
+      const seed = hash(params.baseSeed, index);
+      const kind = encounterKindAt(index, seed, params, lastKind, kindRun);
+      if (next === null || next.index !== index || next.seed !== seed || next.kind !== kind) next = chooseEncounter(index, seed, kind, params);
+      handover = farHandoverSpeed(next.farRoom, params.cruiseSpeed, arrival, encounterProfile(params, kind));
+    }
     out.fade = 0;
-    out.targetSpeed = cruiseTargetSpeed(cruiseTime, interval, params, encounterCount > 0, entrySpeed, entryQuick, entryAt, entryShipSpeed, entryShipAccel);
+    out.targetSpeed = cruiseTargetSpeed(
+      cruiseTime,
+      interval,
+      params,
+      encounterCount > 0,
+      entrySpeed,
+      entryQuick,
+      entryAt,
+      entryShipSpeed,
+      entryShipAccel,
+      handover,
+    );
     out.driftRate = cruiseDriftRate(cruiseTime, interval, params, encounterCount > 0 ? entryDrift : 1);
   } else {
     const profile = encounterProfile(params, encounter.kind);
-    out.fade = encounterOpacity(encounter.plan, remaining, profile);
-    out.targetSpeed = encounterTargetSpeed(remaining, encounterCruiseSpeed(params), profile);
+    out.fade = encounterOpacity(encounter.plan, remaining, profile, encounterTime);
+    out.targetSpeed = activeEncounterTargetSpeed(encounter, remaining, params);
     out.driftRate = travel === 'DEPARTURE' ? smoothstep(0, -profile.despawnDistance, remaining) : 0;
   }
+  out.next = next;
   return out;
 }
 
@@ -1306,6 +1468,9 @@ export function updateAutopilot(
  * speed (the base profile itself when the arrival speed is the base cruise speed, as by default).
  * Distances are untouched, so the fades, the transitions and the planned path are unchanged and a
  * change in the middle of an encounter never makes it skip a state. Allocates the new profile.
+ *
+ * The far stretch's speed is scaled the same way, and its acceleration by the square of the factor,
+ * since its distances are unchanged too (config.ts, ENCOUNTER_FAR_SPEED).
  *
  * The scaled minimum speed is floored at the profile's `minSpeedFloor` (ENCOUNTER_MIN_SPEED_FLOOR
  * for planets, NEBULA_MIN_SPEED_FLOOR for nebulae, ASTEROID_MIN_SPEED_FLOOR for asteroids,
@@ -1324,6 +1489,9 @@ export function setCruiseSpeed(
   const scaled = (profile: Readonly<EncounterProfile>): EncounterProfile => ({
     ...profile,
     minSpeed: Math.min(encounterSpeed, Math.max(profile.minSpeed * factor, profile.minSpeedFloor)),
+    // The far stretch keeps its distances, so its speeds scale and its acceleration with their square.
+    farSpeed: profile.farSpeed * factor,
+    farAccel: profile.farAccel * factor * factor,
   });
   params.cruiseSpeed = cruiseSpeed;
   params.profile = scaled(base.profile);
