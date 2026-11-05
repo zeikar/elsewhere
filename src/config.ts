@@ -6,7 +6,11 @@
 /** Upper bound on the device pixel ratio applied to the renderer (docs/PLAN.md section 6, Performance). */
 export const DPR_CAP = 2;
 
-/** Camera vertical field of view in degrees, and clip planes in world units. Placeholders until the starfield is tuned. */
+/**
+ * Camera vertical field of view in degrees, and clip planes in world units. Placeholders until the
+ * starfield is tuned. The vertical field of view is CAMERA_FOV_DEG up to 21:9 and narrower beyond it
+ * (VIEW_WIDEST_ASPECT, `cameraFovDeg` in engine/renderSize.ts); the live value is the camera's `fov`.
+ */
 export const CAMERA_FOV_DEG = 60;
 export const CAMERA_NEAR = 0.1;
 export const CAMERA_FAR = 10000;
@@ -231,12 +235,15 @@ export const ENCOUNTER_WARP_ENTRY_SECONDS = 8;
  * instead of crawling on to the despawn distance with the object already behind the camera.
  *
  * "Out of view" is a pure function of the simulation state (the ship's position and heading and the
- * encounter plan) and the fixed vertical field of view (CAMERA_FOV_DEG), never of the browser's
- * viewport. The vertical field of view is fixed, so a wider screen only shows more at the sides, and
- * VIEW_WIDEST_ASPECT (width / height) is the widest supported: 21:9. The autopilot tests against the
- * cone around the camera's forward axis that contains the whole view at that aspect (its half-angle
- * reaches the view's corners, about 55.7°; `viewConeHalfAngle`), so an object outside it is
- * off-screen on every supported screen, whatever the camera's roll. The criterion for each kind:
+ * encounter plan) and the base vertical field of view (CAMERA_FOV_DEG), never of the browser's
+ * viewport. Up to VIEW_WIDEST_ASPECT (width / height), 21:9, the vertical field of view is fixed, so
+ * a wider screen only shows more at the sides. Beyond it the engine narrows the vertical field of
+ * view so the horizontal one stays at the 21:9 one (`cameraFovDeg` in engine/renderSize.ts: a wider
+ * screen shows less at the top and bottom instead). The autopilot tests against the cone around the
+ * camera's forward axis that contains the whole view at 21:9 (its half-angle reaches the view's
+ * corners, about 55.7°; `viewConeHalfAngle`), which contains the view at every other aspect ratio
+ * too, so an object outside it is off-screen on every screen, whatever the camera's roll. The
+ * criterion for each kind:
  *
  * - A planet is out of view once the sphere of radius `radius × (1 + ENCOUNTER_CLEARANCE_MARGIN)`,
  *   which holds everything drawn for it (the atmosphere shell included, see Planets below), lies

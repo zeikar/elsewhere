@@ -71,6 +71,7 @@ Each automated check is written as `file` — `test title`, using the title as i
 - `src/engine/EncounterView.test.ts` — `keeps a new nebula hidden until its compile settles`
 - `src/engine/Autopilot.test.ts` — `planets at level %i, k from 1.6 to 6 and elevations from -0.6 to 0.6: while in the 21:9 view the ship is never faster than on main, and it is never in view again after the encounter ends`
 - `src/engine/Autopilot.test.ts` — `nebulae at level %i, elevations from -0.6 to 0.6: while any layer is in the 21:9 view the ship is never faster than on main, and none is in view again after the encounter ends`
+- `src/engine/renderSize.test.ts` — `keeps the whole view inside the autopilot view cone at every aspect ratio`
 - `e2e/encounter.spec.ts` — `three encounters run CRUISE → APPROACH → FLYBY → DEPARTURE → CRUISE and free their GPU resources`
 - Manual: watch a few encounters, either on the live site (the first planet appears within about a minute) or on the e2e build with a short interval (`npm run build:e2e && npx vite preview --outDir dist-e2e`, then open `/elsewhere/?encounterInterval=5`). Stars, planets and nebulae should fade in and out with no visible pop. Smoothness on screen is a visual judgement. The `Starfield.test.ts` checks above test `starFade` in `src/engine/Starfield.ts`, the TypeScript mirror of the shader's star fade, so the GLSL that actually runs on the GPU is covered only by this manual step.
 

@@ -82,6 +82,7 @@ import {
 } from './encounter';
 import { Nebula, nebulaParams, type NebulaParams } from './Nebula';
 import { planetParams } from './Planet';
+import { cameraFovDeg } from './renderSize';
 import { hash, mulberry32 } from './seed';
 import { DEFAULT_SHIP_PARAMS, createShipState, updateShip, type ShipParams, type ShipState, type Vec3 } from './Ship';
 
@@ -1505,13 +1506,14 @@ function departureTimes(kind: 'planet' | 'nebula', level: number, viewHalfAngle:
 describe('speed driven by visibility', () => {
   const HALF_ANGLE = DEFAULT_AUTOPILOT_PARAMS.viewHalfAngle;
 
-  it('the view cone holds the whole view at 21:9 and at every narrower aspect ratio, and reaches the 21:9 corners', () => {
+  it('the view cone holds the whole view at every aspect ratio (wider than 21:9 with the engine field of view), and reaches the 21:9 corners', () => {
     expect(HALF_ANGLE).toBe(viewConeHalfAngle(CAMERA_FOV_DEG, VIEW_WIDEST_ASPECT));
     expect((HALF_ANGLE * 180) / Math.PI).toBeCloseTo(55.7, 1);
     const forward = { x: 0, y: 0, z: 1 };
-    for (const aspect of [VIEW_WIDEST_ASPECT, 16 / 9, 4 / 3, 1, 9 / 16, 9 / 21]) {
+    for (const aspect of [32 / 9, 3, 2.4, VIEW_WIDEST_ASPECT, 16 / 9, 4 / 3, 1, 9 / 16, 9 / 21]) {
+      const tanHalfV = Math.tan((cameraFovDeg(CAMERA_FOV_DEG, aspect, VIEW_WIDEST_ASPECT) * Math.PI) / 360);
       for (const [sx, sy] of [[1, 1], [1, -1], [-1, 1], [-1, -1], [1, 0], [0, 1]] as const) {
-        const edge = { x: sx * TAN_HALF_V * aspect, y: sy * TAN_HALF_V, z: 1 };
+        const edge = { x: sx * tanHalfV * aspect, y: sy * tanHalfV, z: 1 };
         expect(angleBetween(edge, forward)).toBeLessThanOrEqual(HALF_ANGLE + 1e-12);
       }
     }

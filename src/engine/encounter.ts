@@ -179,7 +179,9 @@ export const DEFAULT_ENCOUNTER_PROFILE: Readonly<EncounterProfile> = {
  * whole view of a camera with vertical field of view `fovDeg` (degrees) at aspect ratio `aspect`
  * (width / height): the angle from the forward axis to the view's corners. The cone does not depend
  * on the camera's roll, and contains the view at every narrower aspect ratio too, since the vertical
- * field of view is fixed and a narrower screen only shows less at the sides.
+ * field of view is fixed and a narrower screen only shows less at the sides. At `aspect` = 21:9
+ * (config.ts, VIEW_WIDEST_ASPECT) it also contains the view at every wider aspect ratio, where the
+ * engine narrows the vertical field of view instead (`cameraFovDeg` in renderSize.ts).
  */
 export function viewConeHalfAngle(fovDeg: number, aspect: number): number {
   const tanHalf = Math.tan((fovDeg * Math.PI) / 360);

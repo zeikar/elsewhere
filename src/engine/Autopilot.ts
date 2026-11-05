@@ -26,7 +26,8 @@
  *
  * Speed driven by visibility (docs/PLAN.md section 9, Phase 4; config.ts, VIEW_WIDEST_ASPECT): after
  * the closest approach, DEPARTURE ends as soon as the object is out of view at the widest supported
- * aspect ratio (`encounterViewMargin`), or at the profile's despawn distance if that comes first. The
+ * aspect ratio (`encounterViewMargin`; wider screens narrow the vertical field of view, so it holds on
+ * every screen), or at the profile's despawn distance if that comes first. The
  * next cruise eases the target speed up from where the encounter left it, and the heading drift
  * likewise, so neither jumps. Until the object is out of view nothing changes: the target speed is
  * the distance-based profile throughout the encounter.
