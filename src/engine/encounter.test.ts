@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CAMERA_FAR,
   DT_CAP_SECONDS,
+  ENCOUNTER_ARRIVAL_SPEED,
   ENCOUNTER_CLEARANCE_MARGIN,
   ENCOUNTER_DESPAWN_DISTANCE,
   ENCOUNTER_DISTANCE,
@@ -12,7 +13,6 @@ import {
   ENCOUNTER_SIDE_OFFSET_FACTOR,
   ENCOUNTER_SLOWDOWN_DISTANCE,
   ENCOUNTER_SPEEDUP_DISTANCE,
-  SHIP_DEFAULT_SPEED_LEVEL,
   SHIP_SPEED_LEVELS,
 } from '../config';
 import {
@@ -227,7 +227,9 @@ describe('encounterTargetSpeed', () => {
     const radius = 100;
     const steady: ShipParams = { ...DEFAULT_SHIP_PARAMS, yawAmplitude: 0, pitchAmplitude: 0 };
     for (const dt of [1 / 60, 1 / 120]) {
-      for (const cruise of SHIP_SPEED_LEVELS) {
+      // The speeds encounters are flown from at each speed level: faster levels drop out of warp to
+      // the arrival speed first (Autopilot.ts, `encounterCruiseSpeed`).
+      for (const cruise of SHIP_SPEED_LEVELS.map((level) => Math.min(level, ENCOUNTER_ARRIVAL_SPEED))) {
         const params: ShipParams = { ...steady, targetSpeed: cruise };
         let ship = createShipState({ speed: cruise, position: { x: 5e9, y: 0, z: -3e9 } }, params);
         const e = planEncounter(ship.position, ship.heading, radius);
@@ -247,10 +249,8 @@ describe('encounterTargetSpeed', () => {
           remaining = next;
         }
         // The ship lags the profile by about tau, so it reaches the closest approach a little faster.
-        // Above the default cruise speed the slowdown spans fewer time constants: from the top speed,
-        // with this unscaled minimum, it is still at about a quarter of the cruise speed there.
         expect(speedAtClosest).toBeGreaterThanOrEqual(ENCOUNTER_MIN_SPEED);
-        expect(speedAtClosest).toBeLessThan(cruise <= SHIP_SPEED_LEVELS[SHIP_DEFAULT_SPEED_LEVEL] ? ENCOUNTER_MIN_SPEED * 1.5 : cruise / 3);
+        expect(speedAtClosest).toBeLessThan(ENCOUNTER_MIN_SPEED * 1.5);
         expect(ship.speed).toBeGreaterThan(cruise * 0.95);
         expect(minDistance).toBeGreaterThan(radius * (1 + ENCOUNTER_CLEARANCE_MARGIN));
       }

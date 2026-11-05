@@ -439,8 +439,9 @@ export function encounterCruiseSpeed(params: Readonly<Pick<AutopilotParams, 'cru
  * (smoothstep) up to the cruise speed over `warpEntryTime` (back into warp), and from `warpExitLead
  * + warpExitTime` before the encounter starts, easing back down to the arrival speed, which it
  * reaches `warpExitLead` before the encounter starts (out of warp). Where the two eases overlap (a
- * short cruise) the lower one applies, so the target is continuous and never jumps, and a cruise
- * shorter than the exit and its lead stays at the arrival speed throughout.
+ * short cruise) the lower one applies, so the target is continuous and never jumps, it never
+ * reaches the cruise speed, and it is still at the arrival speed from `warpExitLead` before the
+ * encounter starts (throughout, for a cruise no longer than that).
  *
  * Continuous with the encounter's target speed at both ends: an encounter starts and ends at
  * `encounterCruiseSpeed` (see `encounterTargetSpeed`).

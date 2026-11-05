@@ -194,9 +194,9 @@ export const ENCOUNTER_DRIFT_SETTLE_SECONDS = 5;
  * about 3 units per second of the arrival speed at the spawn, and within 0.5 when the object
  * reaches opacity 0.1 (checked in EncounterView.test.ts). After the encounter, the target eases back
  * up to the cruise speed over ENCOUNTER_WARP_ENTRY_SECONDS at the start of the next cruise. All
- * three are cruise time, so they count toward the encounter interval; a cruise too short for them
- * (an interval below their sum, as in tests) never reaches the full cruise speed, and stays at the
- * arrival speed when it is shorter than the exit and its lead.
+ * three are cruise time, so they count toward the encounter interval. A cruise too short for them (an
+ * interval below their sum, as in tests) never reaches the full cruise speed, and is still back at
+ * the arrival speed ENCOUNTER_WARP_EXIT_LEAD_SECONDS before the encounter starts.
  */
 export const ENCOUNTER_ARRIVAL_SPEED = 60;
 export const ENCOUNTER_WARP_EXIT_SECONDS = 10;
