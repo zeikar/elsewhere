@@ -27,6 +27,7 @@ import {
   CAMERA_NEAR,
   CLEAR_COLOR,
   DPR_CAP,
+  ENCOUNTER_BASE_SEED,
   SHIP_DEFAULT_SPEED_LEVEL,
   SHIP_SPEED_LEVELS,
 } from '../config';
@@ -53,6 +54,12 @@ import { DEFAULT_SHIP_PARAMS, type ShipState } from './Ship';
 import { DEFAULT_STARFIELD_OPTIONS, Starfield } from './Starfield';
 
 export interface EngineOptions {
+  /**
+   * Trip seed (a uint32): encounter `i` uses the appearance seed `hash(tripSeed, i)`, so one seed
+   * fixes the whole sequence of kinds, appearances and placements. The app passes a random seed, or
+   * the one in `?seed=` (src/tripSeed.ts). Default: ENCOUNTER_BASE_SEED, the test default.
+   */
+  tripSeed?: number;
   /** Speed level travel starts at (index into SHIP_SPEED_LEVELS, clamped). Default: SHIP_DEFAULT_SPEED_LEVEL. */
   speedLevel?: number;
   /** Starfield streak time, in seconds. Default: STAR_STREAK_TIME_SECONDS. */
@@ -131,6 +138,7 @@ export class Engine {
     const kind = options.encounterKind;
     const autopilotParams: AutopilotParams = {
       ...DEFAULT_AUTOPILOT_PARAMS,
+      baseSeed: options.tripSeed === undefined ? ENCOUNTER_BASE_SEED : options.tripSeed >>> 0,
       interval: interval !== undefined && interval >= 0 ? interval : DEFAULT_AUTOPILOT_PARAMS.interval,
       arrivalSpeed:
         options.arrivalSpeed !== undefined && options.arrivalSpeed > 0 ? options.arrivalSpeed : DEFAULT_AUTOPILOT_PARAMS.arrivalSpeed,
@@ -288,6 +296,11 @@ export class Engine {
   /** Live autopilot state (read-only view; do not modify). */
   getAutopilot(): Readonly<AutopilotState> {
     return this.travel.autopilot;
+  }
+
+  /** Trip seed in use (a uint32; see EngineOptions.tripSeed). */
+  getTripSeed(): number {
+    return this.travel.autopilotParams.baseSeed;
   }
 
   /** Encounter interval in use, in seconds. */

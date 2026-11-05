@@ -46,6 +46,7 @@ import {
   defaultPlanet,
   encounterCruiseSpeed,
   encounterKind,
+  encounterKindAt,
   encounterSchedule,
   encounterSide,
   kindDrawShare,
@@ -298,13 +299,68 @@ describe('encounter schedule', () => {
   });
 
   it('the default opening: the first default encounter is a planet, within 30–60 s of load, then a nebula at index 1 or 2', () => {
-    // The base seed is the same on every load (the simulation test below checks the autopilot meets
-    // the schedule in order).
+    // The default base seed is the test default trip seed (ENCOUNTER_BASE_SEED); production draws a
+    // random one on each load (the simulation test below checks the autopilot meets the schedule in
+    // order, and the tests below check the planet first for any base seed).
     const [first, second, third] = encounterSchedule(DEFAULT_AUTOPILOT_PARAMS, 3);
     expect(first!.kind).toBe('planet');
     expect(first!.interval).toBeGreaterThanOrEqual(30);
     expect(first!.interval).toBeLessThanOrEqual(60);
     expect([second!.kind, third!.kind]).toContain('nebula');
+  });
+
+  it('for any base seed, encounter 0 is a planet whose cruise from load lasts 30–60 s (10,000 base seeds)', () => {
+    // The base seed is the trip seed, random on each load in production (src/tripSeed.ts).
+    const random = mulberry32(0x0f1a_e7ed);
+    const baseSeeds = [0, 1, ENCOUNTER_BASE_SEED, 0x7fff_ffff, 0x8000_0000, 0xffff_ffff];
+    while (baseSeeds.length < 10_000) baseSeeds.push(Math.floor(random() * 2 ** 32));
+    let drawnNebulae = 0;
+    for (const baseSeed of baseSeeds) {
+      const params = { ...DEFAULT_AUTOPILOT_PARAMS, baseSeed };
+      const [first] = encounterSchedule(params, 1);
+      const label = `base seed ${baseSeed}`;
+      expect(first!.kind, label).toBe('planet');
+      expect(first!.interval, label).toBeGreaterThanOrEqual(30);
+      expect(first!.interval, label).toBeLessThanOrEqual(60);
+      if (nextEncounterKind(first!.seed, params, null, 0) === 'nebula') drawnNebulae++;
+    }
+    // The rule is in effect: the plain draw would open with a nebula for about a third of the seeds.
+    expect(drawnNebulae).toBeGreaterThan(2000);
+  });
+
+  it('for any base seed, the autopilot meets a planet first, visible within 30–60 s of load at the default level', () => {
+    const random = mulberry32(0x0f1a_5eed);
+    for (let i = 0; i < 100; i++) {
+      const baseSeed = Math.floor(random() * 2 ** 32);
+      const label = `base seed ${baseSeed}`;
+      let firstVisible = Number.NaN;
+      const { autopilot, transitions } = simulate(1 / 60, {
+        params: { baseSeed, planetFor: planetParams, nebulaFor: nebulaParams },
+        until: (a) => a.fade > 0,
+        maxSeconds: 70,
+        onFrame: ({ ship, autopilot: a }) => {
+          if (Number.isNaN(firstVisible) && a.fade > 0) firstVisible = ship.time;
+        },
+      });
+      expect(transitions.map((t) => t.to), label).toEqual(['APPROACH']);
+      expect(autopilot.encounter!.index, label).toBe(0);
+      expect(autopilot.encounter!.kind, label).toBe('planet');
+      expect(firstVisible, label).toBeGreaterThanOrEqual(30);
+      expect(firstVisible, label).toBeLessThanOrEqual(60);
+    }
+  });
+
+  it('encounterKindAt: a planet at index 0 unless every encounter is a nebula, nextEncounterKind after that', () => {
+    const params = { nebulaShare: ENCOUNTER_NEBULA_SHARE, maxSameKindRun: 3 };
+    for (let i = 0; i < 300; i++) {
+      const seed = hash(ENCOUNTER_BASE_SEED, i);
+      expect(encounterKindAt(0, seed, params, null, 0)).toBe('planet');
+      expect(encounterKindAt(0, seed, { ...params, nebulaShare: 0 }, null, 0)).toBe('planet');
+      expect(encounterKindAt(0, seed, { ...params, nebulaShare: 1 }, null, 0)).toBe('nebula');
+      for (const [lastKind, run] of [['planet', 1], ['nebula', 2], ['planet', 3]] as const) {
+        expect(encounterKindAt(i + 1, seed, params, lastKind, run)).toBe(nextEncounterKind(seed, params, lastKind, run));
+      }
+    }
   });
 
   it('nextEncounterKind keeps the draw until the run reaches the cap, then switches kind', () => {

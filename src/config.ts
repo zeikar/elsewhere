@@ -232,9 +232,13 @@ export const ENCOUNTER_FLYBY_DISTANCE = 300;
 export const ENCOUNTER_PLANET_RADIUS = 48;
 
 /**
- * Base seed for encounter appearance: encounter `i` uses `hash(ENCOUNTER_BASE_SEED, i)`. It is the
- * same on every load, so it is chosen for its opening: an oceanic planet first (within the 30–60 s
- * of docs/PLAN.md section 9, Phase 2), then a nebula, then another planet and another nebula.
+ * The test default trip seed. Encounter `i` of a trip uses the appearance seed `hash(tripSeed, i)`.
+ * In production the trip seed is random on each load, or taken from `?seed=` (src/tripSeed.ts).
+ * This value is the default of `DEFAULT_AUTOPILOT_PARAMS.baseSeed` and of `EngineOptions.tripSeed`,
+ * and the e2e suite passes it as `?seed=91b3a5ba`, so tests stay deterministic. It is chosen for its
+ * opening: an oceanic planet first, then a nebula, then another planet and another nebula. Every
+ * trip seed starts with a planet (`encounterKindAt`) within the 30–60 s of docs/PLAN.md section 9,
+ * Phase 2 (see ENCOUNTER_INTERVAL_JITTER).
  */
 export const ENCOUNTER_BASE_SEED = 0x91b3_a5ba;
 
@@ -402,7 +406,7 @@ export const PLANET_SPHERE_SEGMENTS = [96, 64] as const;
 /*
  * Nebulae (docs/PLAN.md section 6, Nebulae (Phase 3)): layered, soft-blended planes shaded with a
  * cheap fBm fragment shader. An encounter is a planet or a nebula, chosen from the encounter's
- * appearance seed `hash(ENCOUNTER_BASE_SEED, index)`. Nebula encounters use the same planned-path
+ * appearance seed `hash(tripSeed, index)` (see ENCOUNTER_BASE_SEED). Nebula encounters use the same planned-path
  * maths as planets (`planEncounter`), with their own distance, side offset, speed and fade curves.
  *
  * A nebula's `radius` (the encounter radius, used for the clearance) is its core radius: every

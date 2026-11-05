@@ -43,8 +43,7 @@ import {
   SOAK_FRAME_TIME_SLACK_MS,
   SOAK_HEAP_GROWTH_LIMIT_BYTES,
 } from '../limits';
-
-const APP_PATH = '/elsewhere/';
+import { appUrl } from '../app';
 
 function envNumber(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -232,7 +231,7 @@ test(`soak: ${SOAK_MINUTES} min, heap, frame time and GPU resources stay stable`
   // flown from the default speed after dropping out of warp, and a 3-minute run meets only 2 of them
   // and takes 2 samples (measured), too few for its checks. Heap, frame time and resources do not
   // depend on the speed profile.
-  await page.goto(`${APP_PATH}?encounterInterval=${SOAK_ENCOUNTER_INTERVAL_SECONDS}&arrivalSpeed=${FAST_ENCOUNTERS_ARRIVAL_SPEED}`);
+  await page.goto(appUrl(`encounterInterval=${SOAK_ENCOUNTER_INTERVAL_SECONDS}&arrivalSpeed=${FAST_ENCOUNTERS_ARRIVAL_SPEED}`));
   await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 0);
   expect((await page.evaluate(() => window.__elsewhere!.snapshot())).autopilot.arrivalSpeed).toBe(FAST_ENCOUNTERS_ARRIVAL_SPEED);
   // Top speed (setSpeed clamps), so the encounters pass as quickly as the profile allows.
