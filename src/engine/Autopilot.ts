@@ -17,6 +17,13 @@
  * `stepTravel` is that step, and is what the engine runs each frame. The user's speed setting goes
  * through `setCruiseSpeed`, which scales the whole speed profile rather than overriding it.
  *
+ * Warp (docs/PLAN.md section 1): cruise is the warp, and an encounter is flown at the arrival speed.
+ * Every encounter is flown as if the cruise speed were `encounterCruiseSpeed` (min(cruise speed,
+ * arrival speed)). Above the arrival speed the ship drops out of warp at the end of the cruise,
+ * before the object spawns, and eases back into warp at the start of the next one
+ * (`cruiseTargetSpeed`), so the encounter itself is the same at every speed level at or above the
+ * arrival speed. Both eases are cruise time and count toward the encounter interval.
+ *
  * Heading: `planEncounter` assumes the ship holds the planned heading. Shrinking the drift
  * amplitudes would turn the heading back toward -Z and move the path sideways, eating into the
  * clearance. Instead the autopilot slows the ship's drift clock to a stop over the end of the
@@ -37,6 +44,7 @@
  * elevation (`encounterSide`). `encounterSchedule` lists what the autopilot will meet.
  */
 import {
+  ENCOUNTER_ARRIVAL_SPEED,
   ENCOUNTER_BASE_SEED,
   ENCOUNTER_DISTANCE,
   ENCOUNTER_DRIFT_SETTLE_SECONDS,
@@ -48,6 +56,9 @@ import {
   ENCOUNTER_PLANET_RADIUS,
   ENCOUNTER_SIDE_ELEVATION_RANGE,
   ENCOUNTER_SIDE_OFFSET_FACTOR,
+  ENCOUNTER_WARP_ENTRY_SECONDS,
+  ENCOUNTER_WARP_EXIT_LEAD_SECONDS,
+  ENCOUNTER_WARP_EXIT_SECONDS,
   NEBULA_DESPAWN_DISTANCE,
   NEBULA_ENCOUNTER_DISTANCE,
   NEBULA_FADE_IN_DISTANCE,
@@ -160,9 +171,24 @@ export const NEBULA_ENCOUNTER_PROFILE: Readonly<EncounterProfile> = {
 };
 
 export interface AutopilotParams {
-  /** Speed outside encounters, in world units per second; the encounter speed profile scales from it. */
+  /** Speed outside encounters (the warp), in world units per second. */
   cruiseSpeed: number;
-  /** Mean seconds of cruise before each encounter starts (the encounter interval). */
+  /**
+   * Highest speed an encounter is flown from, in world units per second: encounters are flown as if
+   * the cruise speed were `encounterCruiseSpeed`, min(cruiseSpeed, this), and the encounter speed
+   * profile scales from that (`setCruiseSpeed`). `Infinity` flies them from the cruise speed.
+   */
+  arrivalSpeed: number;
+  /** Seconds over which the target speed eases down from the cruise speed to the arrival speed (warp exit). */
+  warpExitTime: number;
+  /** Seconds before the encounter starts at which the warp exit has ended. */
+  warpExitLead: number;
+  /** Seconds at the start of each cruise over which the target speed eases back up to the cruise speed (warp entry). */
+  warpEntryTime: number;
+  /**
+   * Mean seconds of cruise before each encounter starts (the encounter interval). The warp entry,
+   * exit and lead are part of the cruise, so they count toward it.
+   */
   interval: number;
   /** Seeded jitter on each cruise, as a fraction of `interval`, in [0, 1] (see `cruiseInterval`). */
   intervalJitter: number;
@@ -194,6 +220,10 @@ export interface AutopilotParams {
 
 export const DEFAULT_AUTOPILOT_PARAMS: Readonly<AutopilotParams> = {
   cruiseSpeed: SHIP_SPEED_LEVELS[SHIP_DEFAULT_SPEED_LEVEL],
+  arrivalSpeed: ENCOUNTER_ARRIVAL_SPEED,
+  warpExitTime: ENCOUNTER_WARP_EXIT_SECONDS,
+  warpExitLead: ENCOUNTER_WARP_EXIT_LEAD_SECONDS,
+  warpEntryTime: ENCOUNTER_WARP_ENTRY_SECONDS,
   interval: ENCOUNTER_INTERVAL_SECONDS,
   intervalJitter: ENCOUNTER_INTERVAL_JITTER,
   driftSettleTime: ENCOUNTER_DRIFT_SETTLE_SECONDS,
@@ -394,6 +424,38 @@ function cruiseDriftRate(cruiseTime: number, interval: number, params: Readonly<
   return smoothstep(interval, interval - settle, cruiseTime);
 }
 
+/**
+ * The speed an encounter is flown from, in world units per second: the cruise speed, or the arrival
+ * speed when the cruise is faster (dropping out of warp). The encounter speed profile is scaled for
+ * it (`setCruiseSpeed`) and returns to it after the closest approach.
+ */
+export function encounterCruiseSpeed(params: Readonly<Pick<AutopilotParams, 'cruiseSpeed' | 'arrivalSpeed'>>): number {
+  return Math.min(params.cruiseSpeed, params.arrivalSpeed);
+}
+
+/**
+ * Target speed after `cruiseTime` seconds of a cruise lasting `interval`. The cruise speed when it
+ * is at most the arrival speed. Above it: the arrival speed at the start of the cruise, easing
+ * (smoothstep) up to the cruise speed over `warpEntryTime` (back into warp), and from `warpExitLead
+ * + warpExitTime` before the encounter starts, easing back down to the arrival speed, which it
+ * reaches `warpExitLead` before the encounter starts (out of warp). Where the two eases overlap (a
+ * short cruise) the lower one applies, so the target is continuous and never jumps, and a cruise
+ * shorter than the exit and its lead stays at the arrival speed throughout.
+ *
+ * Continuous with the encounter's target speed at both ends: an encounter starts and ends at
+ * `encounterCruiseSpeed` (see `encounterTargetSpeed`).
+ */
+export function cruiseTargetSpeed(cruiseTime: number, interval: number, params: Readonly<AutopilotParams>): number {
+  const cruise = params.cruiseSpeed;
+  const arrival = encounterCruiseSpeed(params);
+  if (!(cruise > arrival)) return cruise;
+  const { warpEntryTime: entryTime, warpExitTime: exitTime } = params;
+  const exitEnd = interval - params.warpExitLead;
+  const entry = entryTime > 0 ? smoothstep(0, entryTime, cruiseTime) : 1;
+  const exit = exitTime > 0 ? smoothstep(exitEnd, exitEnd - exitTime, cruiseTime) : cruiseTime >= exitEnd ? 0 : 1;
+  return arrival + (cruise - arrival) * Math.min(entry, exit);
+}
+
 /** Starting autopilot state: CRUISE from the beginning, with no encounter yet. */
 export function createAutopilotState(params: Readonly<AutopilotParams> = DEFAULT_AUTOPILOT_PARAMS): AutopilotState {
   return {
@@ -405,7 +467,7 @@ export function createAutopilotState(params: Readonly<AutopilotParams> = DEFAULT
     encounter: null,
     remaining: Number.POSITIVE_INFINITY,
     fade: 0,
-    targetSpeed: params.cruiseSpeed,
+    targetSpeed: cruiseTargetSpeed(0, cruiseInterval(params, 0), params),
     driftRate: cruiseDriftRate(0, cruiseInterval(params, 0), params),
   };
 }
@@ -427,7 +489,9 @@ export function createAutopilotState(params: Readonly<AutopilotParams> = DEFAULT
  * - APPROACH becomes FLYBY once the remaining distance is at most `flybyDistance`, FLYBY becomes
  *   DEPARTURE once the closest approach is passed (remaining ≤ 0), and DEPARTURE returns to CRUISE
  *   once the ship is the profile's despawn distance past it, where the fade has reached 0.
- * - The target speed follows the encounter speed profile, and is `cruiseSpeed` in CRUISE.
+ * - The target speed follows the encounter speed profile from `encounterCruiseSpeed`, and is
+ *   `cruiseTargetSpeed` in CRUISE: the cruise speed, with the drop out of warp at the end of the
+ *   cruise and the return to warp at its start when the cruise speed is above the arrival speed.
  * - The drift rate eases to 0 at the end of CRUISE, stays 0 through APPROACH and FLYBY, and eases
  *   back to 1 over DEPARTURE as the ship recedes, reaching 1 as CRUISE resumes.
  */
@@ -500,13 +564,14 @@ export function updateAutopilot(
   out.encounter = encounter;
   out.remaining = remaining;
   if (encounter === null) {
+    const interval = cruiseInterval(params, encounterCount);
     out.fade = 0;
-    out.targetSpeed = params.cruiseSpeed;
-    out.driftRate = cruiseDriftRate(cruiseTime, cruiseInterval(params, encounterCount), params);
+    out.targetSpeed = cruiseTargetSpeed(cruiseTime, interval, params);
+    out.driftRate = cruiseDriftRate(cruiseTime, interval, params);
   } else {
     const profile = encounterProfile(params, encounter.kind);
     out.fade = encounterOpacity(encounter.plan, remaining, profile);
-    out.targetSpeed = encounterTargetSpeed(remaining, params.cruiseSpeed, profile);
+    out.targetSpeed = encounterTargetSpeed(remaining, encounterCruiseSpeed(params), profile);
     out.driftRate = travel === 'DEPARTURE' ? smoothstep(0, -profile.despawnDistance, remaining) : 0;
   }
   return out;
@@ -515,25 +580,30 @@ export function updateAutopilot(
 /**
  * Sets the cruise speed (the user's speed setting) without overriding the encounter speed profile:
  * the profile is tuned for `base.cruiseSpeed`, and every speed in it is multiplied by
- * `cruiseSpeed / base.cruiseSpeed`, so an encounter slows down by the same proportion at every speed
- * level. Distances are untouched, so the fades, the transitions and the planned path are unchanged
- * and a change in the middle of an encounter never makes it skip a state. Allocates the new profile.
+ * `encounterSpeed / base.cruiseSpeed`, where `encounterSpeed` is the speed encounters are flown from
+ * at the new cruise speed (`encounterCruiseSpeed`: min(cruise speed, `params.arrivalSpeed`)). Below
+ * the arrival speed an encounter slows down by the same proportion at every speed level; at or above
+ * it, the ship drops out of warp first and every level flies the profile scaled for the arrival
+ * speed (the base profile itself when the arrival speed is the base cruise speed, as by default).
+ * Distances are untouched, so the fades, the transitions and the planned path are unchanged and a
+ * change in the middle of an encounter never makes it skip a state. Allocates the new profile.
  *
  * The scaled minimum speed is floored at the profile's `minSpeedFloor` (ENCOUNTER_MIN_SPEED_FLOOR
  * for planets, NEBULA_MIN_SPEED_FLOOR for nebulae), so the slowest levels (the reduced-motion start)
  * slow down proportionally less instead of crawling through the flyby; it is also capped at the
- * cruise speed, so an encounter never speeds the ship up. Planet and nebula profiles are both scaled
- * this way.
+ * encounter speed, so an encounter never speeds the ship up. Planet and nebula profiles are both
+ * scaled this way.
  */
 export function setCruiseSpeed(
   params: AutopilotParams,
   cruiseSpeed: number,
   base: Readonly<AutopilotParams> = DEFAULT_AUTOPILOT_PARAMS,
 ): void {
-  const factor = base.cruiseSpeed > 0 ? cruiseSpeed / base.cruiseSpeed : 1;
+  const encounterSpeed = encounterCruiseSpeed({ cruiseSpeed, arrivalSpeed: params.arrivalSpeed });
+  const factor = base.cruiseSpeed > 0 ? encounterSpeed / base.cruiseSpeed : 1;
   const scaled = (profile: Readonly<EncounterProfile>): EncounterProfile => ({
     ...profile,
-    minSpeed: Math.min(cruiseSpeed, Math.max(profile.minSpeed * factor, profile.minSpeedFloor)),
+    minSpeed: Math.min(encounterSpeed, Math.max(profile.minSpeed * factor, profile.minSpeedFloor)),
   });
   params.cruiseSpeed = cruiseSpeed;
   params.profile = scaled(base.profile);
