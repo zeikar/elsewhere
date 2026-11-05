@@ -10,8 +10,9 @@ const LIT_THRESHOLD = 16;
  * Forced appearance seeds, three per kind, chosen to show the widened parameter space (docs/PLAN.md
  * section 9, Phase 3): an oceanic and a ferric rocky planet and an emerald gas giant; a planetary,
  * an aurora and a rosette nebula, on both sides of the path, with different layer counts and shapes.
+ * Asteroids have their own previews (e2e/asteroid.spec.ts).
  */
-const SEEDS: Record<EncounterKind, readonly number[]> = {
+const SEEDS: Record<Exclude<EncounterKind, 'asteroid'>, readonly number[]> = {
   planet: [14, 2, 3],
   nebula: [9, 2, 1],
 };

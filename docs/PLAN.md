@@ -177,7 +177,8 @@ src/
 │   ├── Galaxies.ts    # Distant galaxies on the far layer (trip-seeded, rotation only)
 │   ├── Autopilot.ts   # Phase 2: travel state machine
 │   ├── Planet.ts      # Phase 2
-│   └── Nebula.ts      # Phase 3
+│   ├── Nebula.ts      # Phase 3
+│   └── Asteroid.ts    # Phase 4: asteroids (irregular rocky bodies)
 └── ui/
     ├── controls.ts    # Buttons, keyboard, auto-hide, cursor
     └── wakeLock.ts

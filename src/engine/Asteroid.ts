@@ -147,22 +147,30 @@ function bodyRadius(x: number, y: number, z: number, shape: Readonly<IrregularBo
   return ellipsoid * (1 + h);
 }
 
+/** An icosphere's merged unit vertex directions and triangle indices (CPU-side data only). */
+interface UnitIcosphere {
+  directions: Float64Array;
+  index: Uint16Array;
+}
+
+/** The unit icospheres made so far, by detail; pure data, kept for the whole run. */
+const icospheres = new Map<number, UnitIcosphere>();
+
 /**
- * A seeded, noise-displaced low-poly sphere (an irregular rocky body): see the module comment. The
- * geometry is indexed, with `position`, smooth vertex `normal`s and `uv` (all zero; the attributes
- * of the planet sphere, so it draws with the planet programs), and its farthest vertex is exactly at
- * radius 1, so a mesh scaled by `r` lies within `r` of its centre whatever its rotation (the
- * triangles lie within their vertices' bounding sphere). Pure and deterministic. The caller owns the
- * geometry and disposes it.
+ * The unit icosphere of `detail` (`IcosahedronGeometry`'s, with its duplicate vertices merged so a
+ * displaced surface stays closed and its normals smooth). Made on first use and kept: a few kB of
+ * plain arrays per detail, no GPU resource, so building a rock (once per encounter) is only its
+ * displacement and normals.
  */
-export function irregularBodyGeometry(shape: Readonly<IrregularBodyShape>): BufferGeometry {
-  const ico = new IcosahedronGeometry(1, Math.max(0, Math.floor(shape.detail)));
+function unitIcosphere(rawDetail: number): UnitIcosphere {
+  const detail = Math.max(0, Math.min(40, Math.floor(rawDetail)));
+  const cached = icospheres.get(detail);
+  if (cached !== undefined) return cached;
+  const ico = new IcosahedronGeometry(1, detail);
   const source = ico.getAttribute('position');
-  // The polyhedron is non-indexed; merge its duplicate vertices so the displaced surface stays closed
-  // and its normals smooth.
   const ids = new Map<string, number>();
   const directions: number[] = [];
-  const index: number[] = [];
+  const index = new Uint16Array(source.count);
   for (let i = 0; i < source.count; i++) {
     const x = source.getX(i);
     const y = source.getY(i);
@@ -175,10 +183,25 @@ export function irregularBodyGeometry(shape: Readonly<IrregularBodyShape>): Buff
       const l = Math.hypot(x, y, z);
       directions.push(x / l, y / l, z / l);
     }
-    index.push(id);
+    index[i] = id;
   }
   ico.dispose();
+  const made = { directions: Float64Array.from(directions), index };
+  icospheres.set(detail, made);
+  return made;
+}
 
+
+/**
+ * A seeded, noise-displaced low-poly sphere (an irregular rocky body): see the module comment. The
+ * geometry is indexed, with `position`, smooth vertex `normal`s and `uv` (all zero; the attributes
+ * of the planet sphere, so it draws with the planet programs), and its farthest vertex is exactly at
+ * radius 1, so a mesh scaled by `r` lies within `r` of its centre whatever its rotation (the
+ * triangles lie within their vertices' bounding sphere). Pure and deterministic. The caller owns the
+ * geometry and disposes it.
+ */
+export function irregularBodyGeometry(shape: Readonly<IrregularBodyShape>): BufferGeometry {
+  const { directions, index } = unitIcosphere(shape.detail);
   const { waves, craters } = shapeFeatures(shape);
   const count = directions.length / 3;
   const positions = new Float32Array(count * 3);
@@ -197,7 +220,7 @@ export function irregularBodyGeometry(shape: Readonly<IrregularBodyShape>): Buff
   }
   const geometry = new BufferGeometry();
   geometry.setAttribute('position', new BufferAttribute(positions, 3));
-  geometry.setIndex(index);
+  geometry.setIndex(new BufferAttribute(index.slice(), 1));
   geometry.computeVertexNormals();
   geometry.setAttribute('uv', new BufferAttribute(new Float32Array(count * 2), 2));
   geometry.computeBoundingSphere();
@@ -430,6 +453,21 @@ export function rockPosition(offset: readonly [number, number, number], frame: R
   out.y = a * d.y + b * s.y + c * uy;
   out.z = a * d.z + b * s.z + c * uz;
   return out;
+}
+
+/**
+ * Makes the unit icospheres asteroid rocks are built from (ASTEROID_DETAIL), and builds and disposes
+ * one field of seven rocks, so the frame that creates the first asteroid of a run neither makes them
+ * nor runs the builder's code for the first time (measured under SwiftShader at 960×540, the work of
+ * the frame that created a first field of seven rocks was 17–122 ms without this, and is 7–16 ms
+ * with it, against 5–13 ms for a planet's: e2e/asteroid.spec.ts). The engine calls it at
+ * start-up. It makes no GPU resource: the trial asteroid is never drawn or compiled, and its
+ * geometries and materials are disposed at once.
+ */
+export function prepareAsteroids(): void {
+  let seed = 0;
+  while (asteroidParams(seed).rocks.length < ASTEROID_RANGES.fieldCount[1] && seed < 1000) seed++;
+  new Asteroid(asteroidParams(seed)).dispose();
 }
 
 export class Asteroid {

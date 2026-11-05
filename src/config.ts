@@ -231,7 +231,7 @@ export const ENCOUNTER_INTERVAL_JITTER = 0.2;
 export const ENCOUNTER_MAX_SAME_KIND_RUN = 3;
 
 /**
- * Side of the path (docs/PLAN.md section 9, Phase 3): each encounter's planet or nebula sits to the
+ * Side of the path (docs/PLAN.md section 9, Phase 3): each encounter's object sits to the
  * left or the right of the path (seeded, even odds), raised or lowered by an elevation angle drawn
  * from this range, in radians (0 is level with the path, positive is up).
  */
@@ -737,6 +737,14 @@ export const NEBULA_NOISE_OFFSET_RANGE = [-100, 100] as const;
  * rock's centre at least ASTEROID_MIN_PASS_DISTANCE from the path (the rocks are laid out in the
  * encounter's own frame, so their distances from the path are known when it is planned). The
  * out-of-view test uses the same sphere.
+ *
+ * Measured over 2,000 seeds (Asteroid.test.ts checks the bounds): half are fields; the main rock's
+ * radius p10/p50/p90 about 4.8/7.9/11.2 (every rock smaller than the smallest planet), the field's
+ * bounding radius 5.5/11.9/33.4 (51.5 at most); the closest approach to the field centre
+ * 31/41/57, and of each rock's centre 32/46/67 (never under ASTEROID_MIN_PASS_DISTANCE; a planet
+ * passes at least 75 off); the main rock 13°/21°/35° across at its closest approach. At the default
+ * level an asteroid encounter lasts about 67–71 s from its spawn and ends at its closest approach or
+ * within about 4 s of it, once the field is out of view (about 148–153 s at the slowest level).
  */
 
 /** Share of all encounters that are asteroids, in the long run (see the section comment). */

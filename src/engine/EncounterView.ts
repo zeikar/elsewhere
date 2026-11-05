@@ -182,7 +182,7 @@ export class EncounterView {
     this.compile = compile;
   }
 
-  /** The current encounter object, planet or nebula, or `null` (read-only view; do not modify). */
+  /** The current encounter object, planet, nebula or asteroid, or `null` (read-only view; do not modify). */
   getObject(): EncounterObject | null {
     return this.current;
   }

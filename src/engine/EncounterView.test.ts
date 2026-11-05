@@ -30,6 +30,7 @@ import {
   stepTravel,
   updateAutopilot,
   warpEntryDuration,
+  type AsteroidEncounter,
   type AutopilotParams,
   type PlanetEncounter,
   type PlanetSpec,
@@ -44,8 +45,10 @@ import {
   encounterTargetSpeed,
   planEncounter,
 } from './encounter';
+import { Asteroid, asteroidParams } from './Asteroid';
 import {
   EncounterView,
+  encounterAsteroidParams,
   encounterLightDirection,
   encounterNebulaParams,
   encounterPlanetParams,
@@ -63,16 +66,19 @@ const dist = (a: Vec3, b: Vec3) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 const CYCLE: TravelState[] = ['APPROACH', 'FLYBY', 'DEPARTURE', 'CRUISE'];
 
 /**
- * Engine-like autopilot params: seeded planets and nebulae, a short interval, cruise at speed level
- * `level`. Planets only unless `nebulaShare` is given.
+ * Engine-like autopilot params: seeded planets, nebulae and asteroids, a short interval, cruise at
+ * speed level `level`. Planets only unless `nebulaShare` is given (and with it no asteroids unless
+ * `asteroidShare` is).
  */
-function engineParams(level = SHIP_DEFAULT_SPEED_LEVEL, interval = 2, nebulaShare = 0): AutopilotParams {
+function engineParams(level = SHIP_DEFAULT_SPEED_LEVEL, interval = 2, nebulaShare = 0, asteroidShare = 0): AutopilotParams {
   const params: AutopilotParams = {
     ...DEFAULT_AUTOPILOT_PARAMS,
     interval,
     planetFor: planetParams,
     nebulaFor: nebulaParams,
+    asteroidFor: asteroidParams,
     nebulaShare,
+    asteroidShare,
   };
   setCruiseSpeed(params, SHIP_SPEED_LEVELS[level]!);
   return params;
@@ -331,24 +337,26 @@ describe('EncounterView with nebulae', () => {
     expect(nebulaGeometryRefs()).toBe(0);
   });
 
-  it('with the default share, each encounter gets the object of its kind, and all are freed', () => {
+  it('with the default shares, each encounter gets the object of its kind, and all are freed', () => {
     const scene = new Scene();
     const view = new EncounterView(scene);
-    const travel = createTravel(engineParams(2, 1, DEFAULT_AUTOPILOT_PARAMS.nebulaShare), DEFAULT_SHIP_PARAMS);
+    const travel = createTravel(engineParams(2, 1, DEFAULT_AUTOPILOT_PARAMS.nebulaShare, DEFAULT_AUTOPILOT_PARAMS.asteroidShare), DEFAULT_SHIP_PARAMS);
     const kinds: string[] = [];
     let last: unknown = null;
-    for (let i = 0; i < 200_000 && travel.autopilot.encounterCount < 5; i++) {
+    for (let i = 0; i < 200_000 && (travel.autopilot.encounterCount < 5 || travel.autopilot.encounter !== null); i++) {
       frame(travel, view, 1 / 20);
       const current = view.getObject();
       const encounter = travel.autopilot.encounter;
       if (current !== null && current !== last) {
         last = current;
-        kinds.push(current instanceof Nebula ? 'nebula' : 'planet');
+        kinds.push(current instanceof Nebula ? 'nebula' : current instanceof Asteroid ? 'asteroid' : 'planet');
         expect(kinds.at(-1)).toBe(encounter!.kind);
+        if (current instanceof Asteroid) expect(current.params).toEqual(encounterAsteroidParams(encounter as AsteroidEncounter));
       }
     }
+    // The test default trip: a planet, a nebula, a planet, a nebula, then an asteroid.
     expect(kinds.slice(0, 5)).toEqual(encounterSchedule(travel.autopilotParams, 5).map((e) => e.kind));
-    expect(new Set(kinds)).toEqual(new Set(['planet', 'nebula']));
+    expect(new Set(kinds)).toEqual(new Set(['planet', 'nebula', 'asteroid']));
     view.dispose();
     expect(planetGeometryRefs()).toBe(0);
     expect(nebulaGeometryRefs()).toBe(0);
@@ -501,7 +509,7 @@ function medianPlanetRadius(): number {
  */
 function medianPlanetFlyby(level: number, planet: PlanetSpec = { radius: medianPlanetRadius() }) {
   const radius = planet.radius;
-  const params: AutopilotParams = { ...DEFAULT_AUTOPILOT_PARAMS, nebulaShare: 0, planetFor: () => planet };
+  const params: AutopilotParams = { ...DEFAULT_AUTOPILOT_PARAMS, nebulaShare: 0, asteroidShare: 0, planetFor: () => planet };
   setCruiseSpeed(params, SHIP_SPEED_LEVELS[level]!);
   const travel = createTravel(params, DEFAULT_SHIP_PARAMS);
   const dt = 1 / 60;
@@ -754,7 +762,7 @@ describe('the travel step', () => {
       // bearing atan2(c, remaining). One flown trace then gives every seeded planet's peak bearing
       // rate, exactly as `medianPlanetFlyby` measures it.
       const dt = 1 / 60;
-      const travel = createTravel({ ...DEFAULT_AUTOPILOT_PARAMS, nebulaShare: 0, planetFor: () => ({ radius: 50 }) }, DEFAULT_SHIP_PARAMS);
+      const travel = createTravel({ ...DEFAULT_AUTOPILOT_PARAMS, nebulaShare: 0, asteroidShare: 0, planetFor: () => ({ radius: 50 }) }, DEFAULT_SHIP_PARAMS);
       setCruiseSpeed(travel.autopilotParams, SHIP_SPEED_LEVELS[level]!);
       const trace: number[] = [];
       for (let i = 0; i < 1e6 && !(trace.length > 0 && travel.autopilot.encounter === null); i++) {

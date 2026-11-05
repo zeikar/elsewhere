@@ -44,7 +44,7 @@ import {
   type EncounterKind,
   type Travel,
 } from './Autopilot';
-import { asteroidParams, type Asteroid } from './Asteroid';
+import { asteroidParams, prepareAsteroids, type Asteroid } from './Asteroid';
 import { EncounterView } from './EncounterView';
 import { FarStarfield } from './FarStarfield';
 import { FrameClock } from './FrameClock';
@@ -168,9 +168,11 @@ export class Engine {
       this.renderer.compileAsync(object, this.camera, this.scene),
     );
     // Compile the planet and nebula programs once, now, and keep them, so no encounter compiles any.
-    // Asteroid rocks draw with the rocky planet surface program, so they need no holder of their own.
+    // Asteroid rocks draw with the rocky planet surface program, so they need no holder of their own;
+    // their CPU-side building blocks are made now too, so the first asteroid's frame does not.
     this.programWarmup = new ProgramWarmup([...planetProgramMaterials(), ...nebulaProgramMaterials()]);
     void this.programWarmup.compile(this.renderer, this.camera, this.scene);
+    prepareAsteroids();
     this.applyHeading();
   }
 
