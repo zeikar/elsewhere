@@ -62,10 +62,17 @@ export const SHIP_MAX_TURN_RATE_RAD_PER_S = 0.03;
 /*
  * Starfield (docs/PLAN.md section 6, Starfield). Distances are in world units, the same units as the
  * ship speeds above; pixel sizes are CSS pixels and are multiplied by the applied DPR on the GPU.
+ *
+ * The sky has two layers. The STAR_* settings are the near layer: fine dust and near stars in a
+ * wrapped cube around the camera, which streak with speed and give the sense of motion. They are
+ * kept small and mostly dim, with a few bright ones whose streaks carry the warp feel, so they read
+ * as stars rushing past rather than as the sky. The FAR_STAR_*
+ * settings below are the far layer: stars at effectively infinite distance, which only turn with the
+ * camera, so they give a fixed backdrop that planets and nebulae are seen against.
  */
 
-/** Number of stars (one instanced quad each). */
-export const STAR_COUNT = 12000;
+/** Number of near stars (one instanced quad each). */
+export const STAR_COUNT = 8000;
 
 /** Side `L` of the cube the stars live in, centred on the camera and wrapped as the ship moves. */
 export const STAR_CUBE_SIZE = 1200;
@@ -74,14 +81,14 @@ export const STAR_CUBE_SIZE = 1200;
 export const STAR_STREAK_TIME_SECONDS = 0.06;
 
 /** Star width in CSS pixels before the per-star size factor. A still star is a dot this wide. */
-export const STAR_BASE_SIZE_PX = 1.6;
+export const STAR_BASE_SIZE_PX = 1.4;
 
 /** Range of the per-star size factor (multiplies STAR_BASE_SIZE_PX). Skewed toward the small end. */
 export const STAR_SIZE_MIN = 0.7;
-export const STAR_SIZE_MAX = 1.8;
+export const STAR_SIZE_MAX = 1.5;
 
 /** Range of the per-star brightness. Skewed toward the dim end, with a few bright stars. */
-export const STAR_BRIGHTNESS_MIN = 0.45;
+export const STAR_BRIGHTNESS_MIN = 0.3;
 export const STAR_BRIGHTNESS_MAX = 1;
 
 /**
@@ -104,6 +111,27 @@ export const STAR_MAX_STREAK_PX = 360;
 
 /** Seed for the star layout, so every run starts from the same sky. */
 export const STAR_SEED = 0x5eed_57a2;
+
+/**
+ * Far stars: directions on the unit sphere, drawn at infinity, so they have no parallax and never
+ * move with the ship's travel, only with the camera's rotation. Always round dots (no streaks). About
+ * 12% of them are in view at once (a 60° vertical field of view at 16:9), about 470.
+ */
+export const FAR_STAR_COUNT = 4000;
+
+/** Far star width in CSS pixels before the per-star size factor. */
+export const FAR_STAR_BASE_SIZE_PX = 1.4;
+
+/** Range of the far stars' size factor (multiplies FAR_STAR_BASE_SIZE_PX). Skewed toward the small end. */
+export const FAR_STAR_SIZE_MIN = 0.7;
+export const FAR_STAR_SIZE_MAX = 2;
+
+/** Range of the far stars' brightness. Strongly skewed toward the dim end, with a few bright stars. */
+export const FAR_STAR_BRIGHTNESS_MIN = 0.2;
+export const FAR_STAR_BRIGHTNESS_MAX = 1;
+
+/** Seed for the far star layout. */
+export const FAR_STAR_SEED = 0xfa7_5ea5;
 
 /*
  * Encounters (docs/PLAN.md section 6, Planets). An encounter plans a straight path along the heading

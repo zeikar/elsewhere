@@ -130,3 +130,68 @@ test('draws a rocky and a gas planet that are non-blank and clearly differ, with
   // Three.js logs shader compile and link errors through console.error.
   expect(errors).toEqual([]);
 });
+
+/** Hides everything but the canvases while a screenshot is taken (the controls overlay the view). */
+const CANVAS_ONLY = 'body > :not(canvas) { display: none !important; }';
+
+test('a planet hides the far stars behind its disc, and they show all around it', async ({ page }) => {
+  const errors = collectErrors(page);
+  await page.goto(APP_PATH);
+  await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 0);
+  await page.evaluate(() => window.__elsewhere!.pause());
+
+  // The same planet, framed the same, drawn without and then with the far-star layer behind it.
+  const plainInfo = await page.evaluate(() => window.__elsewhere!.showPlanet('rocky'));
+  expect(plainInfo.farStarsBehindDisc).toBeNull();
+  const plain = await page.locator('#planet-preview').screenshot({ style: CANVAS_ONLY });
+  const info = await page.evaluate(() => window.__elsewhere!.showPlanet('rocky', 0, { farStars: true }));
+  const starry = await page.locator('#planet-preview').screenshot({ style: CANVAS_ONLY });
+  await test.info().attach('planet with far stars', { body: starry, contentType: 'image/png' });
+  // Plenty of far stars lie behind the disc, so hiding them is a real check.
+  expect(info.farStarsBehindDisc).toBeGreaterThan(20);
+  expect(info.disc.radius).toBeGreaterThan(50);
+
+  // Pixels that differ between the two draws, inside the disc (0.8 × its radius, clear of the
+  // antialiased limb) and well outside it (beyond 1.6 × its radius, clear of the atmosphere glow).
+  const diff = await page.evaluate(
+    async ({ a, b, disc }) => {
+      const decode = async (b64: string) => {
+        const bitmap = await createImageBitmap(await (await fetch(`data:image/png;base64,${b64}`)).blob());
+        const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+        const ctx = canvas.getContext('2d')!;
+        ctx.drawImage(bitmap, 0, 0);
+        return { data: ctx.getImageData(0, 0, bitmap.width, bitmap.height).data, width: bitmap.width, height: bitmap.height };
+      };
+      const [pa, pb] = await Promise.all([decode(a), decode(b)]);
+      // Screenshot pixels per CSS pixel.
+      const scale = pa.width / window.innerWidth;
+      let inside = 0;
+      let insidePixels = 0;
+      let outside = 0;
+      for (let y = 0; y < pa.height; y++) {
+        for (let x = 0; x < pa.width; x++) {
+          const r = Math.hypot((x + 0.5) / scale - disc.x, (y + 0.5) / scale - disc.y) / disc.radius;
+          const i = (y * pa.width + x) * 4;
+          const differs = pa.data[i] !== pb.data[i] || pa.data[i + 1] !== pb.data[i + 1] || pa.data[i + 2] !== pb.data[i + 2];
+          if (r < 0.8) {
+            insidePixels++;
+            if (differs) inside++;
+          } else if (r > 1.6 && differs) {
+            outside++;
+          }
+        }
+      }
+      return { inside, insidePixels, outside, sameSize: pa.width === pb.width && pa.height === pb.height };
+    },
+    { a: plain.toString('base64'), b: starry.toString('base64'), disc: info.disc },
+  );
+  test.info().annotations.push({ type: 'far-star occlusion', description: JSON.stringify({ ...diff, behindDisc: info.farStarsBehindDisc }) });
+  expect(diff.sameSize).toBe(true);
+  expect(diff.insidePixels).toBeGreaterThan(10_000);
+  // Not one far-star pixel shows through the planet...
+  expect(diff.inside).toBe(0);
+  // ...while the far stars are drawn all around it.
+  expect(diff.outside).toBeGreaterThan(200);
+  await page.evaluate(() => window.__elsewhere!.hidePlanet());
+  expect(errors).toEqual([]);
+});

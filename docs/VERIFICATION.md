@@ -23,9 +23,10 @@ Each automated check is written as `file` — `test title`, using the title as i
 - `e2e/starfield.spec.ts` — `multiplies star pixel sizes by the applied DPR`
 - `e2e/engine.spec.ts` — `backs the canvas at 2× and follows viewport resizes`
 - `src/engine/Starfield.test.ts` — `use the applied DPR from computeRenderSize, and pixel size = base size × applied DPR`
+- `src/engine/FarStarfield.test.ts` — `setRenderSize writes the applied DPR, pixel size = base size × applied DPR and the viewport into its uniforms`
 - `src/engine/renderSize.test.ts` — `caps the device pixel ratio: (1000, 500, 3, 2) gives 2000×1000 at DPR 2`
 - `src/config.test.ts` — `caps the device pixel ratio at 2`
-- Manual: open the site on a Retina or other high-DPI display and on a standard one. Stars should look like small, sharp, round points of light, at the same CSS size on both. Automation checks the sizes, but whether stars look crisp is a visual judgement.
+- Manual: open the site on a Retina or other high-DPI display and on a standard one. Stars, both the far stars and the near dust, should look like small, sharp, round points of light, at the same CSS size on both. Automation checks the sizes, but whether stars look crisp is a visual judgement.
 
 ## 3. Refresh-rate independence: feeding the simulation update `dt = 1/60` 60 times and `dt = 1/120` 120 times gives the same distance within tolerance. 120 Hz is hard to reproduce with browser automation, so verify this way.
 
@@ -57,6 +58,7 @@ Each automated check is written as `file` — `test title`, using the title as i
 - `src/engine/Starfield.test.ts` — `is 0 on the cube boundary`
 - `src/engine/Starfield.test.ts` — `is 0 at the camera`
 - `src/engine/Starfield.test.ts` — `stays within [0, 1] and is continuous: no big step across a fine sample grid`
+- `e2e/starfield.spec.ts` — `after the ship translates with no rotation, far-star pixels stay put while near stars move`
 - `src/engine/encounter.test.ts` — `starts at opacity 0 and at full size for a non-default D (no pop-in)`
 - `src/engine/encounter.test.ts` — `opacity is 0 at the spawn and despawn distances, and 1 around the closest approach`
 - `src/engine/encounter.test.ts` — `changes by less than ${FADE_EPSILON} over a 0.1 s capped frame at the top speed`
@@ -108,6 +110,7 @@ Each automated check is written as `file` — `test title`, using the title as i
 
 - `e2e/engine.spec.ts` — `backs the canvas at 2× and follows viewport resizes`
 - `src/engine/Starfield.test.ts` — `are written into the Starfield material uniforms on setRenderSize`
+- `src/engine/FarStarfield.test.ts` — `setRenderSize writes the applied DPR, pixel size = base size × applied DPR and the viewport into its uniforms`
 - `src/engine/renderSize.test.ts` — `rounds fractional backing sizes down, like WebGLRenderer.setSize`
 
 ## 12. After 30 minutes, memory and FPS have not degraded noticeably.

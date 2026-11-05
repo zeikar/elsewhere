@@ -16,8 +16,9 @@
  *
  * `e2eEngineOptions` reads e2e-only engine overrides from the page URL (also absent from the
  * production build): `?encounterInterval=<seconds>` shortens (or, with a huge value, effectively
- * disables) the encounter interval so tests run quickly, and `?encounterKind=planet|nebula` makes
- * every encounter that kind.
+ * disables) the encounter interval so tests run quickly, `?encounterKind=planet|nebula` makes
+ * every encounter that kind, `?starLayers=far|near` draws only that star layer, and `?headingDrift=0`
+ * holds the heading at -Z (so the ship only translates).
  */
 import { Vector3 } from 'three';
 import type { Engine, EngineOptions } from './engine/Engine';
@@ -31,6 +32,7 @@ import {
   showPlanetPreview,
   type EncounterPreviewInfo,
   type PlanetPreviewInfo,
+  type PlanetPreviewOptions,
 } from './e2ePlanetPreview';
 
 /** A rolling window of frame times, in milliseconds (`null` fields while the window is empty). */
@@ -81,6 +83,8 @@ export interface E2EHookSnapshot {
     speed: number;
     distance: number;
     position: { x: number; y: number; z: number };
+    /** Unit direction of travel (the camera looks along it). */
+    heading: { x: number; y: number; z: number };
   };
   renderer: {
     calls: number;
@@ -107,6 +111,18 @@ export interface E2EHookSnapshot {
     pixelSize: number;
     /** Streak time uniform, in seconds. */
     streakTime: number;
+    /** Whether the near layer is drawn. */
+    visible: boolean;
+  };
+  /** The far-star layer (stars at infinity, turning with the camera only). */
+  farStars: {
+    count: number;
+    /** Whether it is drawn. */
+    visible: boolean;
+    /** DPR uniform. */
+    dpr: number;
+    /** Base star width uniform, in device pixels. */
+    pixelSize: number;
   };
   autopilot: {
     state: TravelState;
@@ -129,7 +145,7 @@ export interface E2EHookSnapshot {
     /** Side of the path the encounter object sits on, or `null` in CRUISE. */
     side: EncounterSide | null;
   };
-  /** Objects in the scene besides the starfield (the encounter planet or nebula). */
+  /** Objects in the scene besides the two star layers (the encounter planet or nebula). */
   planets: number;
   /** The encounter planet as last placed for rendering, or `null`. */
   planet: {
@@ -183,9 +199,10 @@ export interface E2EHook {
   setSpeed(level: number): void;
   /**
    * Draws the `nth` (default 0) encounter planet of `type` at a fixed position in front of the camera
-   * on an overlay canvas (`#planet-preview`), replacing any planet already shown.
+   * on an overlay canvas (`#planet-preview`), replacing any planet already shown. With
+   * `{ farStars: true }` the far-star layer is drawn behind it, as in the engine.
    */
-  showPlanet(type: PlanetType, nth?: number): PlanetPreviewInfo;
+  showPlanet(type: PlanetType, nth?: number, options?: PlanetPreviewOptions): PlanetPreviewInfo;
   /**
    * Draws the planet or nebula for appearance seed `seed` on the same overlay canvas, replacing
    * anything shown: a planet framed as `showPlanet` frames it, a nebula as seen mid-APPROACH.
@@ -202,14 +219,20 @@ declare global {
 }
 
 /** Reads the e2e-only engine overrides from a URL query string (see the module comment). */
-export function e2eEngineOptions(search: string): Pick<EngineOptions, 'encounterInterval' | 'encounterKind'> {
+export function e2eEngineOptions(
+  search: string,
+): Pick<EngineOptions, 'encounterInterval' | 'encounterKind' | 'starLayers' | 'headingDrift'> {
   const query = new URLSearchParams(search);
   const raw = query.get('encounterInterval');
   const interval = raw === null ? Number.NaN : Number(raw);
   const kind = query.get('encounterKind');
+  const layers = query.get('starLayers');
+  const drift = query.get('headingDrift');
   return {
     ...(interval >= 0 ? { encounterInterval: interval } : {}),
     ...(kind === 'planet' || kind === 'nebula' ? { encounterKind: kind } : {}),
+    ...(layers === 'far' || layers === 'near' || layers === 'both' ? { starLayers: layers } : {}),
+    ...(drift === '0' ? { headingDrift: false } : {}),
   };
 }
 
@@ -306,6 +329,7 @@ export function installE2EHook(engine: Engine): void {
           speed: ship.speed,
           distance: ship.distance,
           position: { x: ship.position.x, y: ship.position.y, z: ship.position.z },
+          heading: { x: ship.heading.x, y: ship.heading.y, z: ship.heading.z },
         },
         renderer: {
           calls: info.render.calls,
@@ -320,7 +344,8 @@ export function installE2EHook(engine: Engine): void {
           workMs: frameTimes(engine.getFrameWork()),
           heapUsed: heapUsed(),
         },
-        starfield: { ...engine.getStarfieldSizing(), streakTime: engine.getStreakTime() },
+        starfield: { ...engine.getStarfieldSizing(), streakTime: engine.getStreakTime(), visible: engine.isStarfieldVisible() },
+        farStars: engine.getFarStarfieldInfo(),
         autopilot: {
           state: autopilot.state,
           encounterIndex: autopilot.encounter?.index ?? null,
@@ -358,7 +383,7 @@ export function installE2EHook(engine: Engine): void {
     pause: () => engine.pause(),
     resume: () => engine.resume(),
     setSpeed: (level) => engine.setSpeed(level),
-    showPlanet: (type, nth) => showPlanetPreview(type, nth),
+    showPlanet: (type, nth, options) => showPlanetPreview(type, nth, options),
     showEncounter: (kind, seed) => showEncounterPreview(kind, seed),
     hidePlanet: () => hidePlanetPreview(),
   };

@@ -6,7 +6,9 @@
  * looking down -Z, like the engine's. It is drawn once at a fixed time so screenshots are repeatable.
  *
  * - A planet sits at a fixed position relative to the camera, scaled by its radius so every planet
- *   is framed the same.
+ *   is framed the same. On request the far-star layer (FarStarfield, the engine's own) is drawn
+ *   behind it, with the engine's render order, so a test can check that the planet hides the far
+ *   stars behind its disc.
  * - A nebula is seen as in its encounter, mid-APPROACH: planned along -Z on its seeded side of the
  *   path (`encounterSide`), with the camera NEBULA_PREVIEW_REMAINING short of the closest approach,
  *   fully faded in.
@@ -24,8 +26,10 @@ import {
 } from './config';
 import { encounterSide, type EncounterKind, type EncounterSide } from './engine/Autopilot';
 import { encounterOffset, planEncounter } from './engine/encounter';
+import { FarStarfield } from './engine/FarStarfield';
 import { Nebula, nebulaParams } from './engine/Nebula';
 import { Planet, planetParams, type PlanetType } from './engine/Planet';
+import { computeRenderSize } from './engine/renderSize';
 import { hash } from './engine/seed';
 
 /** Planet centre relative to the camera, in planet radii: straight ahead, slightly right. */
@@ -49,6 +53,18 @@ export interface PlanetPreviewInfo {
   radius: number;
   /** Compiled shader programs in the preview renderer. */
   programs: number;
+  /** The planet's disc on the canvas, in CSS pixels from the top-left corner (approximately a circle). */
+  disc: { x: number; y: number; radius: number };
+  /**
+   * With the far stars drawn: how many far stars lie behind the inner 80% of the disc's radius
+   * (their direction within 0.8 × the disc's angular radius of its centre). `null` without them.
+   */
+  farStarsBehindDisc: number | null;
+}
+
+export interface PlanetPreviewOptions {
+  /** Draw the far-star layer behind the planet. Default: false. */
+  farStars?: boolean;
 }
 
 export interface EncounterPreviewInfo {
@@ -67,6 +83,7 @@ export interface EncounterPreviewInfo {
 let canvas: HTMLCanvasElement | null = null;
 let renderer: WebGLRenderer | null = null;
 let shown: Planet | Nebula | null = null;
+let farStars: FarStarfield | null = null;
 // Created on first use, so merely importing this module has no side effects.
 let scene: Scene | null = null;
 let camera: PerspectiveCamera | null = null;
@@ -102,11 +119,38 @@ function prepare(): { renderer: WebGLRenderer; scene: Scene; camera: Perspective
   camera.updateProjectionMatrix();
   shown?.dispose();
   shown = null;
+  if (farStars !== null) scene.remove(farStars.mesh);
   return { renderer, scene, camera };
 }
 
-/** Draws the planet for appearance seed `seed`, framed by its radius, replacing anything shown. */
-function drawPlanet(seed: number): Planet {
+/** Adds the far-star layer to the preview scene, sized for the preview canvas. */
+function addFarStars(s: Scene): FarStarfield {
+  farStars ??= new FarStarfield();
+  farStars.setRenderSize(computeRenderSize(window.innerWidth, window.innerHeight, window.devicePixelRatio, DPR_CAP));
+  s.add(farStars.mesh);
+  return farStars;
+}
+
+/** Number of far stars whose direction is within `angle` (radians) of the unit direction `centre`. */
+function farStarsWithin(stars: FarStarfield, centre: { x: number; y: number; z: number }, angle: number): number {
+  const directions = stars.mesh.geometry.getAttribute('aDirection');
+  const cos = Math.cos(angle);
+  let count = 0;
+  for (let i = 0; i < directions.count; i++) {
+    const dot = directions.getX(i) * centre.x + directions.getY(i) * centre.y + directions.getZ(i) * centre.z;
+    if (dot > cos) count++;
+  }
+  return count;
+}
+
+/**
+ * Draws the planet for appearance seed `seed`, framed by its radius, replacing anything shown, with
+ * the far stars behind it when asked for.
+ */
+function drawPlanet(
+  seed: number,
+  options: Readonly<PlanetPreviewOptions> = {},
+): { planet: Planet; disc: PlanetPreviewInfo['disc']; farStarsBehindDisc: number | null } {
   const { renderer: r, scene: s, camera: c } = prepare();
   const params = planetParams(seed);
   const planet = new Planet(params);
@@ -115,8 +159,24 @@ function drawPlanet(seed: number): Planet {
   planet.object.position.set(PREVIEW_OFFSET_RADII.x * radius, PREVIEW_OFFSET_RADII.y * radius, PREVIEW_OFFSET_RADII.z * radius);
   planet.update(PREVIEW_TIME);
   s.add(planet.object);
+  const stars = options.farStars === true ? addFarStars(s) : null;
   r.render(s, c);
-  return planet;
+
+  // The disc: centre projected, radius from the angular radius (the camera looks down -Z unrotated).
+  const p = planet.object.position;
+  const distance = p.length();
+  const angularRadius = Math.asin(Math.min(1, planet.object.scale.x / distance));
+  const centre = p.clone().project(c);
+  const halfHeight = window.innerHeight / 2;
+  const focal = halfHeight / Math.tan(((c.fov / 2) * Math.PI) / 180);
+  const disc = {
+    x: (centre.x + 1) * (window.innerWidth / 2),
+    y: (1 - centre.y) * halfHeight,
+    radius: Math.tan(angularRadius) * focal,
+  };
+  const farStarsBehindDisc =
+    stars === null ? null : farStarsWithin(stars, { x: p.x / distance, y: p.y / distance, z: p.z / distance }, 0.8 * angularRadius);
+  return { planet, disc, farStarsBehindDisc };
 }
 
 /** Draws the nebula for appearance seed `seed` as seen mid-APPROACH, replacing anything shown. */
@@ -145,11 +205,12 @@ function drawNebula(seed: number): Nebula {
 
 /**
  * Shows the `nth` (default: the first) encounter planet of `type`, replacing anything shown, and
- * draws it once.
+ * draws it once, with the far stars behind it when `options.farStars` is set.
  */
-export function showPlanetPreview(type: PlanetType, nth = 0): PlanetPreviewInfo {
+export function showPlanetPreview(type: PlanetType, nth = 0, options: Readonly<PlanetPreviewOptions> = {}): PlanetPreviewInfo {
   const { index, seed } = findSeed(type, Math.max(0, Math.floor(nth)));
-  const { params } = drawPlanet(seed);
+  const { planet, disc, farStarsBehindDisc } = drawPlanet(seed, options);
+  const { params } = planet;
   return {
     index,
     seed,
@@ -157,6 +218,8 @@ export function showPlanetPreview(type: PlanetType, nth = 0): PlanetPreviewInfo 
     family: params.family,
     radius: params.radius,
     programs: renderer?.info.programs?.length ?? 0,
+    disc,
+    farStarsBehindDisc,
   };
 }
 
@@ -171,7 +234,7 @@ export function showEncounterPreview(kind: EncounterKind, seed: number): Encount
     const { params } = drawNebula(s);
     return { kind, seed: s, family: params.family, type: null, radius: params.radius, side, programs: renderer?.info.programs?.length ?? 0 };
   }
-  const { params } = drawPlanet(s);
+  const { params } = drawPlanet(s).planet;
   return { kind, seed: s, family: params.family, type: params.type, radius: params.radius, side, programs: renderer?.info.programs?.length ?? 0 };
 }
 
@@ -179,6 +242,9 @@ export function showEncounterPreview(kind: EncounterKind, seed: number): Encount
 export function hidePlanetPreview(): void {
   shown?.dispose();
   shown = null;
+  if (farStars !== null) scene?.remove(farStars.mesh);
+  farStars?.dispose();
+  farStars = null;
   renderer?.dispose();
   renderer = null;
   canvas?.remove();

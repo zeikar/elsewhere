@@ -28,6 +28,7 @@ import {
   type TravelState,
 } from './Autopilot';
 import { encounterOffset, planEncounter } from './encounter';
+import { FAR_STARFIELD_RENDER_ORDER } from './FarStarfield';
 import { EncounterView, encounterNebulaParams } from './EncounterView';
 import {
   DEFAULT_NEBULA_FRAME,
@@ -289,9 +290,10 @@ describe('Nebula', () => {
     nebula.dispose();
   });
 
-  it('draws before the starfield, soft-blended, depth-tested and without depth writes', () => {
+  it('draws after the far stars and before the near starfield, soft-blended, depth-tested and without depth writes', () => {
     const nebula = new Nebula(nebulaParams(SEEDS[2]!));
     const starfield = new Starfield();
+    expect(NEBULA_RENDER_ORDER).toBeGreaterThan(FAR_STARFIELD_RENDER_ORDER);
     expect(NEBULA_RENDER_ORDER).toBeLessThan(STARFIELD_RENDER_ORDER);
     for (const layer of nebula.layers) {
       const m = layer.mesh.material;

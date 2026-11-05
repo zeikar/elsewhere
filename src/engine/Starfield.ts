@@ -1,6 +1,12 @@
 /**
- * Starfield: one instanced quad per star, speed-driven streaks, wrapping and fading
- * (docs/PLAN.md section 6, Starfield).
+ * Starfield: the near layer of the sky, one instanced quad per star, speed-driven streaks, wrapping
+ * and fading (docs/PLAN.md section 6, Starfield).
+ *
+ * The sky has two layers. This one is fine dust and near stars in a cube around the camera: they
+ * stream past with the ship's travel and carry the sense of speed ("stars rush toward the camera",
+ * docs/PLAN.md section 4), so they are kept small and mostly dim, with a few bright ones whose
+ * streaks carry the warp feel. The other, FarStarfield.ts, is stars at infinity that only turn with
+ * the camera: the fixed backdrop.
  *
  * - Each star is an instance of one quad (InstancedBufferGeometry + ShaderMaterial); no Points or
  *   Lines. The vertex shader projects the head and the tail (head + ship velocity × streak time) and
@@ -14,9 +20,20 @@
  * - Stars fade out near the cube boundary and right in front of the camera, so wrapping never makes
  *   a star pop in or out.
  * - Each star is drawn at its head's depth with depth testing on and depth writes off, so it never
- *   hides anything but is hidden by depth-writing scenery in front of it. Objects that should hide the stars
- *   behind them (planet surfaces) write depth and draw before the starfield (a lower renderOrder than
- *   STARFIELD_RENDER_ORDER); additive glows draw after it.
+ *   hides anything but is hidden by depth-writing scenery in front of it.
+ *
+ * Render order, for everything in the scene (all of it is in Three.js' transparent list, which draws
+ * in ascending renderOrder):
+ *
+ * 1. FAR_STARFIELD_RENDER_ORDER (-2): the far stars, additive, just inside the far plane, no depth
+ *    writes. Drawn first, so they never hide anything, and everything below draws over them.
+ * 2. STARFIELD_RENDER_ORDER - 1 (-1): planet surfaces (SURFACE_RENDER_ORDER), which write depth and
+ *    paint over the far stars behind them; and nebula layers (NEBULA_RENDER_ORDER), which blend over
+ *    the far stars without writing depth. One encounter is in the scene at a time, so the two never
+ *    meet.
+ * 3. STARFIELD_RENDER_ORDER (0): this near layer, additive, depth-tested against the planet surface,
+ *    so near stars behind a planet are hidden and those in front of it still show.
+ * 4. STARFIELD_RENDER_ORDER + 1 (+1): planet atmospheres (ATMOSPHERE_RENDER_ORDER), additive.
  *
  * The CPU-side maths is exported as pure functions (with TS mirrors of the shader's wrap and fade)
  * so it can be tested without WebGL.
@@ -182,8 +199,8 @@ export interface StarData {
   colors: Float32Array;
 }
 
-/** Star colour tints, from blue-white through white to warm. */
-const TINTS: readonly (readonly [number, number, number])[] = [
+/** Star colour tints, from blue-white through white to warm (shared with the far layer). */
+export const STAR_TINTS: readonly (readonly [number, number, number])[] = [
   [0.72, 0.82, 1.0],
   [0.86, 0.91, 1.0],
   [1.0, 1.0, 1.0],
@@ -209,7 +226,7 @@ export function generateStars(options: Readonly<StarfieldOptions>): StarData {
     const b = random();
     const brightness = brightnessMin + (brightnessMax - brightnessMin) * b * b;
     // Mostly white, with blue and warm tints toward the ends.
-    const tint = TINTS[Math.min(TINTS.length - 1, Math.floor(random() * TINTS.length))] ?? [1, 1, 1];
+    const tint = STAR_TINTS[Math.min(STAR_TINTS.length - 1, Math.floor(random() * STAR_TINTS.length))] ?? [1, 1, 1];
     colors[i * 3] = tint[0] * brightness;
     colors[i * 3 + 1] = tint[1] * brightness;
     colors[i * 3 + 2] = tint[2] * brightness;
@@ -329,8 +346,9 @@ void main() {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * The starfield's render order. Depth-writing objects that should hide the stars behind them use a
- * lower value, so their depth is in the buffer when the stars are depth-tested.
+ * The near starfield's render order (the full order is in the module comment). Depth-writing objects
+ * that should hide the stars behind them use a lower value, so their depth is in the buffer when the
+ * stars are depth-tested. The far stars (FarStarfield.ts) use a lower value still.
  */
 export const STARFIELD_RENDER_ORDER = 0;
 

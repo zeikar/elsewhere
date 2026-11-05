@@ -20,11 +20,12 @@
  * - Cost: the fragment shader computes its alpha (the fades above) first and discards a fragment
  *   below NEBULA_MIN_ALPHA before any noise, and a layer whose encounter fade × near fade is below it
  *   is not drawn at all. Both cut-offs are under half an 8-bit step, so they change no pixel.
- * - Draw order, blending and depth (the render-order contract in Planet.ts and Starfield.ts): the
- *   layers draw before the starfield (NEBULA_RENDER_ORDER, below STARFIELD_RENDER_ORDER), depth-tested
- *   and without depth writes. They blend as premultiplied "glow over": each layer adds its emission
- *   and dims what is behind it a little by its dust, and the transparent sort draws them back to
- *   front. The additive stars draw afterwards, so they stay visible over the nebula glow.
+ * - Draw order, blending and depth (the render-order contract in Starfield.ts): the layers draw
+ *   after the far stars and before the near starfield (NEBULA_RENDER_ORDER, between
+ *   FAR_STARFIELD_RENDER_ORDER and STARFIELD_RENDER_ORDER), depth-tested and without depth writes.
+ *   They blend as premultiplied "glow over": each layer adds its emission and dims what is behind it
+ *   (the far stars included) a little by its dust, and the transparent sort draws them back to
+ *   front. The additive near stars draw afterwards, so they stay visible over the nebula glow.
  * - Geometry is one module-level unit plane shared by every layer of every nebula, reference-counted
  *   like the planet sphere: each nebula holds it from its constructor until its `dispose()`, and the
  *   last one frees it. Each nebula owns its layer materials (one program for all of them) and frees
@@ -488,8 +489,9 @@ export function disposeNebulaGeometry(): void {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Render order: before the starfield, so the additive stars draw over the nebula glow; layers sort
- * back to front among themselves. No depth writes (see the module comment).
+ * Render order: after the far stars, so the layers blend over them, and before the near starfield,
+ * so the additive near stars draw over the nebula glow; layers sort back to front among themselves.
+ * No depth writes (see the module comment).
  */
 export const NEBULA_RENDER_ORDER = STARFIELD_RENDER_ORDER - 1;
 
