@@ -16,9 +16,9 @@ import {
   ENCOUNTER_FADE_OUT_DISTANCE,
   ENCOUNTER_MIN_SPEED,
   ENCOUNTER_MIN_SPEED_DISTANCE,
+  ENCOUNTER_MIN_SPEED_FLOOR,
   ENCOUNTER_SIDE_OFFSET_FACTOR,
   ENCOUNTER_SLOWDOWN_DISTANCE,
-  ENCOUNTER_SPAWN_SCALE,
   ENCOUNTER_SPEEDUP_DISTANCE,
 } from '../config';
 import type { Vec3 } from './Ship';
@@ -139,15 +139,20 @@ export function encounterRemaining(encounter: Readonly<Encounter>, shipPos: Read
 export interface EncounterProfile {
   /** Lowest target speed, held around the closest approach, in world units per second. */
   minSpeed: number;
+  /**
+   * Lowest value `setCruiseSpeed` scales `minSpeed` down to at the slower speed levels (units per
+   * second), so the flyby does not crawl there. Not used by the target speed itself.
+   */
+  minSpeedFloor: number;
   /** Remaining distance at which the slowdown starts. */
   slowdownDistance: number;
   /** Half-width of the band around the closest approach where the target speed is `minSpeed`. */
   minSpeedDistance: number;
   /** Distance after that band over which the target speed returns to cruise. */
   speedupDistance: number;
-  /** Distance after spawning over which opacity and scale ease up. */
+  /** Distance after spawning over which opacity (and, below 1, the size scale) eases up. */
   fadeInDistance: number;
-  /** Size scale at spawn. */
+  /** Size scale at spawn. 1 for both planets and nebulae: they keep their world size throughout. */
   spawnScale: number;
   /** Distance before despawning over which opacity eases down. */
   fadeOutDistance: number;
@@ -157,11 +162,14 @@ export interface EncounterProfile {
 
 export const DEFAULT_ENCOUNTER_PROFILE: Readonly<EncounterProfile> = {
   minSpeed: ENCOUNTER_MIN_SPEED,
+  minSpeedFloor: ENCOUNTER_MIN_SPEED_FLOOR,
   slowdownDistance: ENCOUNTER_SLOWDOWN_DISTANCE,
   minSpeedDistance: ENCOUNTER_MIN_SPEED_DISTANCE,
   speedupDistance: ENCOUNTER_SPEEDUP_DISTANCE,
   fadeInDistance: ENCOUNTER_FADE_IN_DISTANCE,
-  spawnScale: ENCOUNTER_SPAWN_SCALE,
+  // A planet keeps its world size from spawn to despawn, so its apparent size comes from
+  // perspective alone; it starts as a distant dot because it is far away (see ENCOUNTER_DISTANCE).
+  spawnScale: 1,
   fadeOutDistance: ENCOUNTER_FADE_OUT_DISTANCE,
   despawnDistance: ENCOUNTER_DESPAWN_DISTANCE,
 };
@@ -219,9 +227,10 @@ export function encounterOpacity(
 }
 
 /**
- * Planet size scale in [spawnScale, 1] at `remaining` distance: `spawnScale` at the encounter's spawn distance,
- * easing up to 1 over `fadeInDistance` and staying 1 after that, so the planet starts as a distant dot
- * and has its full radius well before the closest approach.
+ * Size scale in [spawnScale, 1] at `remaining` distance: `spawnScale` at the encounter's spawn
+ * distance, easing up to 1 over `fadeInDistance` and staying 1 after that. Both default profiles
+ * (planets and nebulae) have a spawn scale of 1, so it is 1 throughout: the object keeps its world
+ * size and only its opacity fades.
  */
 export function encounterScale(
   encounter: Readonly<Encounter>,

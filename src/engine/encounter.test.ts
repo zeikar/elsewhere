@@ -11,8 +11,8 @@ import {
   ENCOUNTER_MIN_SPEED_DISTANCE,
   ENCOUNTER_SIDE_OFFSET_FACTOR,
   ENCOUNTER_SLOWDOWN_DISTANCE,
-  ENCOUNTER_SPAWN_SCALE,
   ENCOUNTER_SPEEDUP_DISTANCE,
+  SHIP_DEFAULT_SPEED_LEVEL,
   SHIP_SPEED_LEVELS,
 } from '../config';
 import {
@@ -74,8 +74,8 @@ describe('encounter config', () => {
     // Fully visible and full size from before the slowest stretch until after it.
     expect(ENCOUNTER_DISTANCE - ENCOUNTER_FADE_IN_DISTANCE).toBeGreaterThanOrEqual(ENCOUNTER_MIN_SPEED_DISTANCE);
     expect(ENCOUNTER_DESPAWN_DISTANCE - ENCOUNTER_FADE_OUT_DISTANCE).toBeGreaterThanOrEqual(ENCOUNTER_MIN_SPEED_DISTANCE);
-    expect(ENCOUNTER_SPAWN_SCALE).toBeGreaterThan(0);
-    expect(ENCOUNTER_SPAWN_SCALE).toBeLessThan(1);
+    // Planets keep their world size: no size animation while approaching.
+    expect(DEFAULT_ENCOUNTER_PROFILE.spawnScale).toBe(1);
     expect(ENCOUNTER_MIN_SPEED).toBeGreaterThan(0);
     expect(ENCOUNTER_MIN_SPEED).toBeLessThan(Math.min(...SHIP_SPEED_LEVELS));
   });
@@ -247,8 +247,10 @@ describe('encounterTargetSpeed', () => {
           remaining = next;
         }
         // The ship lags the profile by about tau, so it reaches the closest approach a little faster.
+        // Above the default cruise speed the slowdown spans fewer time constants: from the top speed,
+        // with this unscaled minimum, it is still at about a quarter of the cruise speed there.
         expect(speedAtClosest).toBeGreaterThanOrEqual(ENCOUNTER_MIN_SPEED);
-        expect(speedAtClosest).toBeLessThan(ENCOUNTER_MIN_SPEED * 1.5);
+        expect(speedAtClosest).toBeLessThan(cruise <= SHIP_SPEED_LEVELS[SHIP_DEFAULT_SPEED_LEVEL] ? ENCOUNTER_MIN_SPEED * 1.5 : cruise / 3);
         expect(ship.speed).toBeGreaterThan(cruise * 0.95);
         expect(minDistance).toBeGreaterThan(radius * (1 + ENCOUNTER_CLEARANCE_MARGIN));
       }
@@ -265,7 +267,7 @@ describe('encounter fade', () => {
     expect(encounterRemaining(e, { x: 0, y: 0, z: 0 })).toBeCloseTo(e.spawnDistance, 9);
   });
 
-  it('starts at opacity 0 and the spawn scale for a non-default D (no pop-in)', () => {
+  it('starts at opacity 0 and at full size for a non-default D (no pop-in)', () => {
     for (const D of [1000, 1500, ENCOUNTER_DISTANCE * 2, 5000]) {
       const ship = { x: 12, y: -3, z: 40 };
       const custom = planEncounter(ship, { x: 1, y: 0.2, z: -1 }, 50, D);
@@ -273,7 +275,7 @@ describe('encounter fade', () => {
       const remaining = encounterRemaining(custom, ship);
       expect(remaining).toBeCloseTo(D, 9);
       expect(encounterOpacity(custom, D)).toBe(0);
-      expect(encounterScale(custom, D)).toBe(ENCOUNTER_SPAWN_SCALE);
+      expect(encounterScale(custom, D)).toBe(1);
       // The first frame, at the remaining distance actually measured from the ship.
       expect(encounterOpacity(custom, remaining)).toBeLessThan(1e-12);
       // Then eases in over the fade-in distance, as with the default D.
@@ -294,12 +296,14 @@ describe('encounter fade', () => {
     }
   });
 
-  it('scale starts at the spawn scale and reaches 1 before the closest approach', () => {
-    expect(encounterScale(e, ENCOUNTER_DISTANCE)).toBe(ENCOUNTER_SPAWN_SCALE);
-    expect(encounterScale(e, ENCOUNTER_DISTANCE + 100)).toBe(ENCOUNTER_SPAWN_SCALE);
-    expect(encounterScale(e, ENCOUNTER_DISTANCE - ENCOUNTER_FADE_IN_DISTANCE)).toBe(1);
-    expect(encounterScale(e, 0)).toBe(1);
-    expect(encounterScale(e, despawn)).toBe(1);
+  it('the planet keeps its world size: the size scale is 1 from spawn to despawn', () => {
+    // Its apparent size comes from perspective alone, for the default D and others.
+    for (const D of [ENCOUNTER_DISTANCE, 1000, ENCOUNTER_DISTANCE * 2]) {
+      const custom = planEncounter({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: -1 }, 50, D);
+      for (let s = D + 100; s >= despawn - 100; s -= 0.5) {
+        expect(encounterScale(custom, s)).toBe(1);
+      }
+    }
   });
 
   it(`changes by less than ${FADE_EPSILON} over a 0.1 s capped frame at the top speed`, () => {
