@@ -75,34 +75,66 @@ test('draws stars after 1 s, with no console errors', async ({ page }) => {
   expect(errors).toEqual([]);
 });
 
-test('streak length responds to speed', async ({ page }) => {
-  const errors = collectErrors(page);
-  // A paused fake clock: no frame runs until the test steps time, so the first view is at speed 0.
+interface SpeedViews {
+  slow: Awaited<ReturnType<typeof canvasShot>>;
+  fast: Awaited<ReturnType<typeof canvasShot>>;
+  still: E2EHookSnapshot;
+}
+
+/**
+ * Loads `query` with a paused fake clock, so no frame runs until the test steps time and the first
+ * view is at speed 0, then steps 8 s of simulation in 0.1 s frames at the top speed level (one frame
+ * per jump) and takes a second view.
+ */
+async function speedViews(page: Page, query: string): Promise<SpeedViews> {
   await page.clock.install({ time: 0 });
   await page.clock.pauseAt(1000);
-  // The near layer alone (an e2e-only override): the far stars are round dots at any speed.
-  await page.goto(`${APP_PATH}?starLayers=near`);
+  await page.goto(`${APP_PATH}${query}`);
   await page.waitForFunction(() => window.__elsewhere !== undefined);
 
   const still = await snapshot(page);
   expect(still.ship.speed).toBe(0);
-  expect(still.starfield.visible).toBe(true);
-  expect(still.farStars.visible).toBe(false);
   const slow = await canvasShot(page);
 
-  // Step 8 s of simulation in 0.1 s frames at the top speed level (one frame per jump).
   // setSpeed clamps, so 99 selects the top level.
   await page.evaluate(() => window.__elsewhere!.setSpeed(99));
   for (let i = 0; i < 80; i++) await page.clock.fastForward(100);
   const moving = await snapshot(page);
   expect(moving.frames).toBeGreaterThan(still.frames);
   expect(moving.ship.speed).toBeGreaterThan(100);
+  expect(moving.autopilot.state).toBe('CRUISE');
   const fast = await canvasShot(page);
+  test.info().annotations.push({
+    type: 'lit pixels (slow, fast, ratio)',
+    description: JSON.stringify({ slow: slow.lit, fast: fast.lit, ratio: +(fast.lit / slow.lit).toFixed(3) }),
+  });
+  return { slow, fast, still };
+}
+
+test('streak length responds to speed', async ({ page }) => {
+  const errors = collectErrors(page);
+  // The near layer alone (an e2e-only override): the far stars are round dots at any speed.
+  const { slow, fast, still } = await speedViews(page, '?starLayers=near');
+  expect(still.starfield.visible).toBe(true);
+  expect(still.farStars.visible).toBe(false);
 
   expect(fast.png.equals(slow.png)).toBe(false);
   // At speed 0 every star is a round dot; at speed the same stars become streaks covering far more pixels.
   expect(slow.lit).toBeGreaterThan(0);
   expect(fast.lit).toBeGreaterThan(slow.lit * 2);
+  expect(errors).toEqual([]);
+});
+
+test('streak length responds to speed in the default view, with both star layers', async ({ page }) => {
+  const errors = collectErrors(page);
+  const { slow, fast, still } = await speedViews(page, '');
+  expect(still.starfield.visible).toBe(true);
+  expect(still.farStars.visible).toBe(true);
+
+  // The still far stars add the same lit pixels to both views, which dilutes the near layer's
+  // ratio, but the sky as seen must still read clearly faster at the top speed.
+  expect(slow.lit).toBeGreaterThan(0);
+  expect(fast.lit).toBeGreaterThan(slow.lit * 1.6);
   expect(errors).toEqual([]);
 });
 
