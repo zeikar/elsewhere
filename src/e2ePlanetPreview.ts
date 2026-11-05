@@ -14,6 +14,7 @@
  *   along -Z with the planet to the right (DEFAULT_PLANET_FRAME).
  * - `checkRingDepth` draws a ringed planet with and without its ring and compares the pixels by
  *   where the ring lies (in front of the disc, behind it, or over the sky), found by ray casting.
+ *   Drawn airless too, it measures the atmosphere's glow where the ring crosses the halo.
  * - A nebula is seen as in its encounter, mid-APPROACH: planned along -Z on its seeded side of the
  *   path (`encounterSide`), with the camera NEBULA_PREVIEW_REMAINING short of the closest approach,
  *   fully faded in.
@@ -303,9 +304,35 @@ export interface RingDepthClass {
   maxDiff: number;
 }
 
+/**
+ * The atmosphere's glow at pixels where the ring is seen through the halo, past the limb: each
+ * pixel's drawing with the atmosphere less its drawing airless, summed over the three channels
+ * (0–765). Only pixels whose glow without the ring is at least RING_HALO_MIN_GLOW are counted.
+ */
+export interface RingHaloClass {
+  /** Pixels in the class. */
+  n: number;
+  /** Mean glow with the ring hidden. */
+  glowWithout: number;
+  /** Mean glow with the ring drawn. */
+  glowWith: number;
+  /** Pixels whose glow with the ring drawn is 0 or less. */
+  zeroed: number;
+}
+
+/** Glow (summed over the three channels) a pixel needs, with the ring hidden, to count in a RingHaloClass. */
+const RING_HALO_MIN_GLOW = 24;
+
 export interface RingDepthInfo {
   seed: number;
   family: string;
+  /**
+   * Halo pixels where the ring is nearer than the planet, so in front of the glow: the glow must
+   * show through the ring, dimmed by its opacity. Sampled at every pixel.
+   */
+  haloFront: RingHaloClass;
+  /** Halo pixels where the ring is further than the planet, so behind the glow: the glow must show whole. */
+  haloBehind: RingHaloClass;
   /** Pixels where the ring lies in front of the planet's disc: the ring must show. */
   frontOfDisc: RingDepthClass;
   /** Pixels where the ring lies behind the disc: the planet must hide it (no difference at all). */
@@ -321,13 +348,19 @@ export interface RingDepthInfo {
  * ring and once with the ring hidden, and compares the two drawings pixel by pixel, sorted by what a
  * ray through each pixel meets first: the ring in front of the disc, the disc in front of the ring,
  * the ring alone, or neither. Pixels within two pixels of the disc's limb or the ring's edges (where
- * antialiasing blends classes) are left out. Leaves the planet shown, with its ring.
+ * antialiasing blends classes) are left out. Both are drawn again airless (atmosphere intensity 0),
+ * for the glow where the ring crosses the halo (`haloFront`, `haloBehind`). Leaves the planet shown, with its
+ * ring and atmosphere.
  */
 export function checkRingDepth(seed: number): RingDepthInfo {
   const s = seed >>> 0;
   const { planet } = drawPlanet(s);
   const ring = planet.ring;
   if (ring === null) throw new Error(`seed ${s}: no ring`);
+  if (planet.atmosphere === null) throw new Error(`seed ${s}: no atmosphere`);
+  // Airless: the atmosphere's intensity, which the ring's glow over its far side shares, at 0.
+  const intensity = planet.uniforms.uAtmosphereIntensity;
+  const lit = intensity.value;
   const { renderer: r, scene: sc, camera: c } = prepareKeep();
   const gl = r.getContext();
   const width = gl.drawingBufferWidth;
@@ -339,7 +372,11 @@ export function checkRingDepth(seed: number): RingDepthInfo {
     return pixels;
   };
   const withRing = read();
+  intensity.value = 0;
+  const withRingAirless = read();
   ring.visible = false;
+  const withoutAirless = read();
+  intensity.value = lit;
   const without = read();
   ring.visible = true;
   r.render(sc, c);
@@ -351,10 +388,17 @@ export function checkRingDepth(seed: number): RingDepthInfo {
   const axis = ringAxis(planet.params.ring!, DEFAULT_PLANET_FRAME, { x: 0, y: 0, z: 0 });
   const inner = planet.params.ring!.inner * radius;
   const outer = planet.params.ring!.outer * radius;
+  const shell = radius * (1 + planet.params.atmosphereThickness);
   const inverse = c.projectionMatrixInverse;
   const ray = new Vector3();
+  /**
+   * Set by `classify`, for a pixel where the ring is seen against the sky within the atmosphere
+   * shell's outline: whether the ring is nearer than the planet (`front`) or further (`behind`).
+   */
+  const seen: { halo: 'front' | 'behind' | null } = { halo: null };
   /** What the ray through drawing-buffer pixel (px, py) (from the bottom left) meets first. */
-  const classify = (px: number, py: number): keyof Omit<RingDepthInfo, 'seed' | 'family'> | 'edge' => {
+  const classify = (px: number, py: number): 'frontOfDisc' | 'behindDisc' | 'overSky' | 'elsewhere' | 'edge' => {
+    seen.halo = null;
     ray.set(((px + 0.5) / width) * 2 - 1, ((py + 0.5) / height) * 2 - 1, 0.5).applyMatrix4(inverse).normalize();
     // The sphere.
     const b = ray.dot(centre);
@@ -373,23 +417,45 @@ export function checkRingDepth(seed: number): RingDepthInfo {
     const onRing = ringR >= inner && ringR <= outer;
     if (Math.abs(ringR - inner) < pixel || Math.abs(ringR - outer) < pixel) return 'edge';
     if (!onRing) return 'elsewhere';
-    if (!Number.isFinite(sphereT)) return 'overSky';
+    if (!Number.isFinite(sphereT)) {
+      if (centre.lengthSq() - b * b < shell * shell) seen.halo = ringT < b ? 'front' : 'behind';
+      return 'overSky';
+    }
     return ringT < sphereT ? 'frontOfDisc' : 'behindDisc';
   };
   const empty = (): RingDepthClass => ({ n: 0, meanDiff: 0, maxDiff: 0 });
+  const emptyHalo = (): RingHaloClass => ({ n: 0, glowWithout: 0, glowWith: 0, zeroed: 0 });
   const info: RingDepthInfo = {
     seed: s,
     family: planet.params.family,
+    haloFront: emptyHalo(),
+    haloBehind: emptyHalo(),
     frontOfDisc: empty(),
     behindDisc: empty(),
     overSky: empty(),
     elsewhere: empty(),
   };
-  for (let py = 0; py < height; py += 3) {
-    for (let px = 0; px < width; px += 3) {
+  const glow = (lit: Uint8Array, airless: Uint8Array, i: number): number =>
+    lit[i]! - airless[i]! + (lit[i + 1]! - airless[i + 1]!) + (lit[i + 2]! - airless[i + 2]!);
+  for (let py = 0; py < height; py++) {
+    for (let px = 0; px < width; px++) {
       const k = classify(px, py);
       if (k === 'edge') continue;
       const i = (py * width + px) * 4;
+      const h = seen.halo;
+      if (h !== null) {
+        const glowWithout = glow(without, withoutAirless, i);
+        if (glowWithout >= RING_HALO_MIN_GLOW) {
+          const glowWith = glow(withRing, withRingAirless, i);
+          const cls = h === 'front' ? info.haloFront : info.haloBehind;
+          cls.n++;
+          cls.glowWithout += glowWithout;
+          cls.glowWith += glowWith;
+          if (glowWith <= 0) cls.zeroed++;
+        }
+      }
+      // The ring-depth classes keep to every third pixel either way.
+      if (px % 3 !== 0 || py % 3 !== 0) continue;
       const diff = Math.max(
         Math.abs(withRing[i]! - without[i]!),
         Math.abs(withRing[i + 1]! - without[i + 1]!),
@@ -402,6 +468,10 @@ export function checkRingDepth(seed: number): RingDepthInfo {
     }
   }
   for (const cls of [info.frontOfDisc, info.behindDisc, info.overSky, info.elsewhere]) cls.meanDiff = cls.n > 0 ? cls.meanDiff / cls.n : 0;
+  for (const cls of [info.haloFront, info.haloBehind]) {
+    cls.glowWithout = cls.n > 0 ? cls.glowWithout / cls.n : 0;
+    cls.glowWith = cls.n > 0 ? cls.glowWith / cls.n : 0;
+  }
   return info;
 }
 

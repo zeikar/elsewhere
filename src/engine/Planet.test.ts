@@ -27,6 +27,7 @@ import {
   DEFAULT_PLANET_FRAME,
   GAS_FAMILY_NAMES,
   Planet,
+  RINGED_ATMOSPHERE_RENDER_ORDER,
   RING_RENDER_ORDER,
   ROCKY_FAMILY_NAMES,
   ROCKY_FAMILY_RANGES,
@@ -538,12 +539,21 @@ describe('Planet', () => {
       if (o instanceof Mesh) meshes.push(o);
     });
     const surface = meshes.find((m) => m.renderOrder === SURFACE_RENDER_ORDER)!;
-    const atmosphere = meshes.find((m) => m.renderOrder === ATMOSPHERE_RENDER_ORDER)!;
+    const atmosphere = planet.atmosphere!;
     expect(meshes).toHaveLength(3);
-    // Order: far stars, surface, ring, near stars, atmosphere (all in the transparent list).
+    expect(meshes).toContain(atmosphere);
+    // Order: far stars, surface, atmosphere, ring, near stars (all in the transparent list). The
+    // atmosphere draws before the ring, so the ring blends over its glow rather than hiding it.
     expect(ringMesh.renderOrder).toBe(RING_RENDER_ORDER);
-    expect(RING_RENDER_ORDER).toBeGreaterThan(SURFACE_RENDER_ORDER);
+    expect(atmosphere.renderOrder).toBe(RINGED_ATMOSPHERE_RENDER_ORDER);
+    expect(RINGED_ATMOSPHERE_RENDER_ORDER).toBeGreaterThan(SURFACE_RENDER_ORDER);
+    expect(RING_RENDER_ORDER).toBeGreaterThan(RINGED_ATMOSPHERE_RENDER_ORDER);
     expect(RING_RENDER_ORDER).toBeLessThan(STARFIELD_RENDER_ORDER);
+    // A planet without a ring keeps its atmosphere after the near stars.
+    const plain = new Planet(firstOfType('gas'));
+    expect(plain.ring).toBeNull();
+    expect(plain.atmosphere!.renderOrder).toBe(ATMOSPHERE_RENDER_ORDER);
+    plain.dispose();
     expect(ringMaterial.transparent).toBe(true);
     // The planet's depth hides the ring behind its disc; the ring's hides the near stars behind it.
     expect(ringMaterial.depthTest).toBe(true);
@@ -560,6 +570,12 @@ describe('Planet', () => {
     expect(ringMaterial.uniforms.uOpacity).toBe(planet.uniforms.uOpacity);
     expect(ringMaterial.uniforms.uLightDir).toBe(planet.uniforms.uLightDir);
     expect(ringMaterial.uniforms.uRingOuter!.value).toBe(ring.outer);
+    // It adds the planet's own glow in front of its far side.
+    expect(atmosphereMaterial.depthTest).toBe(true);
+    expect(atmosphereMaterial.depthWrite).toBe(false);
+    for (const name of ['uAtmosphereColor', 'uAtmosphereIntensity', 'uThickness'] as const) {
+      expect(ringMaterial.uniforms[name]).toBe(planet.uniforms[name]);
+    }
     // The ring and the spin axis share the tilt, so a gas giant's bands run along its ring.
     expect(ringMesh.parent).toBe(surface.parent);
     planet.dispose();

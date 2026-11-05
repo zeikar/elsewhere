@@ -3,7 +3,9 @@
  *
  * - The ring's depth order, on the preview canvas: drawn with and without its ring, a ringed planet
  *   must change exactly where the ring is in front of its disc or against the sky, and nowhere else;
- *   the disc hides the ring's far side.
+ *   the disc hides the ring's far side. Drawn airless too: where the ring crosses the atmosphere's
+ *   halo past the limb, the glow shows through the ring in front of it, dimmed, and over the ring
+ *   behind it, whole.
  * - The look: a ringed gas giant, a ringed rocky planet and an icy dwarf, screenshotted for review.
  * - Performance under SwiftShader: a ringed encounter against a plain one of a similar planet, in
  *   the engine, with no program compiled during either (the ring draws with the atmosphere's
@@ -60,7 +62,7 @@ test('a ring shows in front of its planet and against the sky, and the planet hi
     firstSeed((p) => p.type === 'rocky' && p.ring !== null && p.ring.opening < 0.5),
   ];
   const results = [];
-  for (const seed of seeds) {
+  for (const [index, seed] of seeds.entries()) {
     const info = await page.evaluate((s) => window.__elsewhere!.checkRingDepth(s), seed);
     results.push(info);
     await savePreview(page, `ringed-${info.family}-${seed}.png`);
@@ -74,6 +76,22 @@ test('a ring shows in front of its planet and against the sky, and the planet hi
     expect(info.behindDisc.maxDiff, label).toBe(0);
     // …and nothing else changes.
     expect(info.elsewhere.maxDiff, label).toBe(0);
+    // Where the ring crosses the halo past the limb, the glow shows through it: dimmed by the ring
+    // in front of it, never cut off, and whole over the ring behind it. (The rocky planet's faint
+    // glow may leave these classes empty; the gas giant's never does.)
+    if (index === 0) {
+      expect(info.haloFront.n, label).toBeGreaterThan(30);
+      expect(info.haloBehind.n, label).toBeGreaterThan(30);
+    }
+    if (info.haloFront.n > 0) {
+      expect(info.haloFront.zeroed, label).toBe(0);
+      expect(info.haloFront.glowWith / info.haloFront.glowWithout, label).toBeGreaterThan(0.15);
+      expect(info.haloFront.glowWith / info.haloFront.glowWithout, label).toBeLessThan(0.95);
+    }
+    if (info.haloBehind.n > 0) {
+      expect(info.haloBehind.zeroed, label).toBe(0);
+      expect(Math.abs(info.haloBehind.glowWith / info.haloBehind.glowWithout - 1), label).toBeLessThan(0.03);
+    }
   }
   test.info().annotations.push({ type: 'ring depth', description: JSON.stringify(results) });
 

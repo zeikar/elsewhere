@@ -243,7 +243,8 @@ export interface E2EHook {
   /**
    * Draws the ringed planet for appearance seed `seed` as `showEncounter` does, with and without its
    * ring, and reports how the pixels differ where the ring lies in front of the disc, behind it and
-   * over the sky (see `checkRingDepth` in src/e2ePlanetPreview.ts).
+   * over the sky, and the atmosphere's glow where the ring crosses the halo (see `checkRingDepth` in
+   * src/e2ePlanetPreview.ts).
    */
   checkRingDepth(seed: number): RingDepthInfo;
   /** Removes the planet overlay canvas. */

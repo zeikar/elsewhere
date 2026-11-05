@@ -39,7 +39,11 @@
  *   affected. A partly faded surface blends over the far stars, so they show through it as it fades.
  *   The ring draws after the surface and before the near starfield (RING_RENDER_ORDER), depth-tested,
  *   so the disc hides the ring's far side and the near side blends over the disc and the far stars;
- *   it writes depth (except in its gaps), so near stars behind it are hidden too.
+ *   it writes depth (except in its gaps), so near stars behind it are hidden too. A ringed planet's
+ *   atmosphere draws between its surface and its ring instead (RINGED_ATMOSPHERE_RENDER_ORDER), so
+ *   the ring's near side blends over the glow, dimming it by the ring's opacity rather than hiding
+ *   it; where the ring's far side shows past the limb, through the glow, the ring adds that glow
+ *   back over itself (see `haloFragmentShader`).
  *
  * Positions are relative to the ship (floating origin): the caller sets `object.position` to
  * `planet centre - ship position`, computed in float64 on the CPU.
@@ -1007,18 +1011,15 @@ vec4 ring() {
   return vec4(color, alpha);
 }
 
-void main() {
-  if (uRing > 0.5) {
-    gl_FragColor = ring();
-    #include <colorspace_fragment>
-    return;
-  }
-  // How close the view ray through this fragment passes to the planet centre, in planet radii:
-  // 1 at the limb, 1 + thickness at the shell's edge.
+// The atmosphere's glow along the view ray through this fragment (linear colour, before the output
+// encoding), for a planet of radius planetRadius. It depends on the ray alone, so the ring can
+// compute the glow the atmosphere draws at the same pixel.
+vec3 atmosphereGlow(float planetRadius) {
+  // How close the ray passes to the planet centre, in planet radii: 1 at the limb, 1 + thickness at
+  // the shell's edge.
   vec3 rd = normalize(vWorld - cameraPosition);
   vec3 oc = vCenter - cameraPosition;
   vec3 closest = cameraPosition + rd * dot(oc, rd);
-  float planetRadius = vShellRadius / (1.0 + uThickness);
   float x = length(closest - vCenter) / planetRadius;
 
   float glow;
@@ -1033,8 +1034,25 @@ void main() {
   // Brighter on the day side, wrapping a little past the terminator as scattered light does.
   vec3 toLimb = normalize(closest - vCenter + 1e-5);
   float day = smoothstep(-0.3, 0.55, dot(toLimb, normalize(uLightDir)));
-  vec3 color = uAtmosphereColor * glow * day * uAtmosphereIntensity * uOpacity;
-  gl_FragColor = vec4(color, 1.0);
+  return uAtmosphereColor * glow * day * uAtmosphereIntensity * uOpacity;
+}
+
+void main() {
+  if (uRing > 0.5) {
+    gl_FragColor = ring();
+    #include <colorspace_fragment>
+    // The atmosphere drew before the ring (RINGED_ATMOSPHERE_RENDER_ORDER), so the ring blends over
+    // its glow. The ring lies outside the atmosphere shell, so on this view ray the glow is all
+    // behind the ring or all in front of it. Behind (the ring nearer than the planet centre along the
+    // ray): blending over it is right. In front (the ring's far side, seen past the limb): the ring
+    // adds the glow, as the atmosphere wrote it, to its own colour, so blended at alpha a it leaves
+    // a × glow + (1 − a) × glow, the whole glow, over itself.
+    if (uAtmosphereIntensity > 0.0 && dot(vWorld - vCenter, vWorld - cameraPosition) > 0.0) {
+      gl_FragColor.rgb += linearToOutputTexel(vec4(atmosphereGlow(vShellRadius), 1.0)).rgb;
+    }
+    return;
+  }
+  gl_FragColor = vec4(atmosphereGlow(vShellRadius / (1.0 + uThickness)), 1.0);
   #include <colorspace_fragment>
 }
 `;
@@ -1122,8 +1140,15 @@ export interface PlanetUniforms {
  * behind it. The ring draws after the surface, depth-tested against it, so the planet hides the part
  * of the ring behind its disc and the part in front blends over the disc; it writes depth too, so the
  * near stars behind it are hidden as well. The additive atmosphere draws after the near starfield.
+ *
+ * A ringed planet's atmosphere draws between its surface and its ring instead
+ * (RINGED_ATMOSPHERE_RENDER_ORDER), so the ring's depth never hides the glow: the ring's near side
+ * blends over it, and its far side, seen past the limb through the glow, adds the glow back over
+ * itself (see `haloFragmentShader`). The atmosphere is additive, depth-tested only against the
+ * surface and writes no depth, so drawing it before the near starfield leaves the stars as they are.
  */
 export const SURFACE_RENDER_ORDER = STARFIELD_RENDER_ORDER - 1;
+export const RINGED_ATMOSPHERE_RENDER_ORDER = SURFACE_RENDER_ORDER + 0.25;
 export const RING_RENDER_ORDER = SURFACE_RENDER_ORDER + 0.5;
 export const ATMOSPHERE_RENDER_ORDER = STARFIELD_RENDER_ORDER + 1;
 
@@ -1164,7 +1189,8 @@ function createAtmosphereMaterial(uniforms: Uniforms): ShaderMaterial {
 /**
  * The ring's material: the same halo program as the atmosphere (same sources, no defines, front
  * faces only), blended normally and writing depth (see RING_RENDER_ORDER). The ring geometry holds
- * both windings, so front faces alone show it from either side.
+ * both windings, so front faces alone show it from either side. It takes the atmosphere's uniforms
+ * too, to add the glow in front of its far side (see RINGED_ATMOSPHERE_RENDER_ORDER).
  */
 function createRingMaterial(uniforms: Uniforms): ShaderMaterial {
   return new ShaderMaterial({
@@ -1253,7 +1279,8 @@ export class Planet {
   readonly uniforms: PlanetUniforms;
   private readonly tilt = new Group();
   private readonly surface: Mesh<SphereGeometry, ShaderMaterial>;
-  private readonly atmosphere: Mesh<SphereGeometry, ShaderMaterial> | null;
+  /** The atmosphere shell, or `null` for an airless planet; it draws with the shared sphere. */
+  readonly atmosphere: Mesh<SphereGeometry, ShaderMaterial> | null;
   /** The ring, or `null`; it owns its geometry. */
   readonly ring: Mesh<RingGeometry, ShaderMaterial> | null;
   private disposed = false;
@@ -1334,6 +1361,9 @@ export class Planet {
     if (ring !== null) {
       const [r0, r1] = ring.colors;
       const ringMaterial = createRingMaterial({
+        uAtmosphereColor: u.uAtmosphereColor,
+        uAtmosphereIntensity: u.uAtmosphereIntensity,
+        uThickness: u.uThickness,
         uLightDir: u.uLightDir,
         uOpacity: u.uOpacity,
         uRingInner: { value: ring.inner },
@@ -1363,7 +1393,7 @@ export class Planet {
       });
       this.atmosphere = new Mesh(geometry, atmosphereMaterial);
       this.atmosphere.scale.setScalar(1 + params.atmosphereThickness);
-      this.atmosphere.renderOrder = ATMOSPHERE_RENDER_ORDER;
+      this.atmosphere.renderOrder = ring === null ? ATMOSPHERE_RENDER_ORDER : RINGED_ATMOSPHERE_RENDER_ORDER;
       this.object.add(this.atmosphere);
     } else {
       this.atmosphere = null;
