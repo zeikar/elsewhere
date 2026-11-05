@@ -16,11 +16,14 @@ import {
   SHIP_DEFAULT_SPEED_LEVEL,
   SHIP_SPEED_LEVELS,
   SHIP_SPEED_TAU_SECONDS,
-  ENCOUNTER_WARP_ENTRY_SECONDS,
+  ENCOUNTER_VIEW_ENTRY_SECONDS,
+  CAMERA_FOV_DEG,
+  VIEW_WIDEST_ASPECT,
 } from '../config';
 import {
   DEFAULT_AUTOPILOT_PARAMS,
   planetPassFactor,
+  planetViewRadiusFactor,
   createTravel,
   encounterCruiseSpeed,
   encounterProfile,
@@ -29,7 +32,7 @@ import {
   setCruiseSpeed,
   stepTravel,
   updateAutopilot,
-  warpEntryDuration,
+  viewEntryDuration,
   type AsteroidEncounter,
   type AutopilotParams,
   type PlanetEncounter,
@@ -44,6 +47,7 @@ import {
   encounterScale,
   encounterTargetSpeed,
   planEncounter,
+  viewConeHalfAngle,
 } from './encounter';
 import { Asteroid, asteroidParams } from './Asteroid';
 import {
@@ -500,16 +504,34 @@ function medianPlanetRadius(): number {
   return (low + high) / 2;
 }
 
+/** The cone around the camera's forward axis that holds the view on every screen (21:9 and wider alike). */
+const EVERY_SCREEN_CONE = viewConeHalfAngle(CAMERA_FOV_DEG, VIEW_WIDEST_ASPECT);
+
+/**
+ * Whether a planet of view radius `viewRadius` passed `closest` from the path, at `remaining` along
+ * it, may be on some screen with the heading held along the path: inside the cone that holds every
+ * view. The bearing-rate guard (5.1°/s) holds while it is.
+ */
+function onSomeScreen(closest: number, remaining: number, viewRadius: number): boolean {
+  const d = Math.hypot(closest, remaining);
+  return d <= viewRadius || Math.atan2(closest, remaining) - Math.asin(viewRadius / d) < EVERY_SCREEN_CONE;
+}
+
 /**
  * One median-radius planet encounter at speed level `level`, simulated from load at dt = 1/60 with
- * the default (jittered) interval: the peak bearing rate (°/s), the 30°→80° bearing sweep, the times
- * from the spawn to the closest approach and to the end (s), and the ship's speed when the planet
- * first reaches opacity 0.1 and at the closest approach. The bearing is the angle between the planned
- * path and the line of sight to the planet centre.
+ * the default (jittered) interval: the peak bearing rate (°/s) while the planet may be on some screen
+ * (`onSomeScreen`), the 30°→80° bearing sweep, the times from the spawn to the closest approach and
+ * to the end (s), and the ship's speed when the planet first reaches opacity 0.1 and at the closest
+ * approach. The bearing is the angle between the planned path and the line of sight to the planet
+ * centre. The encounter's slow phase ends once the planet is off the screen, which on a narrow screen
+ * may be before the closest approach; until then the speed profile is the same on every screen. To
+ * measure the whole pass, the planet is kept to its despawn distance (`view` null) unless `view` is
+ * given.
  */
-function medianPlanetFlyby(level: number, planet: PlanetSpec = { radius: medianPlanetRadius() }) {
+function medianPlanetFlyby(level: number, planet: PlanetSpec = { radius: medianPlanetRadius() }, view: AutopilotParams['view'] = null) {
   const radius = planet.radius;
-  const params: AutopilotParams = { ...DEFAULT_AUTOPILOT_PARAMS, nebulaShare: 0, asteroidShare: 0, planetFor: () => planet };
+  const viewRadius = radius * planetViewRadiusFactor(planet);
+  const params: AutopilotParams = { ...DEFAULT_AUTOPILOT_PARAMS, nebulaShare: 0, asteroidShare: 0, planetFor: () => planet, view };
   setCruiseSpeed(params, SHIP_SPEED_LEVELS[level]!);
   const travel = createTravel(params, DEFAULT_SHIP_PARAMS);
   const dt = 1 / 60;
@@ -541,11 +563,13 @@ function medianPlanetFlyby(level: number, planet: PlanetSpec = { radius: medianP
     const bearing = (Math.acos(Math.min(1, dot(toPlanet, encounter.plan.direction) / len(toPlanet))) * 180) / Math.PI;
     if (Number.isNaN(at30) && bearing >= 30) at30 = ship.time;
     if (Number.isNaN(at80) && bearing >= 80) at80 = ship.time;
-    if (!Number.isNaN(prevBearing)) peak = Math.max(peak, Math.abs(bearing - prevBearing) / dt);
+    if (!Number.isNaN(prevBearing) && onSomeScreen(encounter.plan.closestDistance, autopilot.remaining, viewRadius)) {
+      peak = Math.max(peak, Math.abs(bearing - prevBearing) / dt);
+    }
     prevBearing = bearing;
   }
-  expect(endedAt).toBeGreaterThan(closestAt);
-  expect(at80).toBeGreaterThan(at30);
+  if (view === null) expect(endedAt).toBeGreaterThan(closestAt);
+  if (view === null) expect(at80).toBeGreaterThan(at30);
   return {
     peak,
     sweep: at80 - at30,
@@ -658,7 +682,7 @@ describe('the travel step', () => {
         if (before === 'CRUISE' && autopilot.state === 'APPROACH') startedAt = ship.time;
         if (before === 'DEPARTURE' && autopilot.state === 'CRUISE') {
           endedAt = ship.time;
-          endedOutOfView = encounterViewMargin(prevEncounter!, ship, params.viewHalfAngle) > 0;
+          endedOutOfView = encounterViewMargin(prevEncounter!, ship, params.view) > 0;
         }
         // The planet is removed once out of view, at whatever fade it has, which no one sees.
         if (!endedOutOfView) worstFadeStep = Math.max(worstFadeStep, Math.abs(autopilot.fade - prevFade));
@@ -672,15 +696,18 @@ describe('the travel step', () => {
       }
       expect(endedAt).toBeGreaterThan(startedAt);
       expect(endedOutOfView).toBe(true);
-      // Clear of the planet, at its planned closest approach.
+      // Clear of the planet, and never nearer than its planned closest approach (here it leaves the
+      // screen just before the ship gets there).
       expect(minClearance).toBeGreaterThanOrEqual(radius * (1 + ENCOUNTER_CLEARANCE_MARGIN));
+      expect(minClearance).toBeGreaterThanOrEqual(closest * (1 - 1e-9));
       expect(minClearance).toBeCloseTo(closest, 0);
       // Fades in gradually: no frame changes the opacity by more than 2% while it is in view.
       expect(worstFadeStep).toBeGreaterThan(0);
       expect(worstFadeStep).toBeLessThan(0.02);
-      // Slows to the floor, not below it, so it does not crawl, and ends once the planet is out of
-      // view, shortly after the closest approach: one encounter takes about 153 s (about 285 s when it
-      // ran on to the despawn distance, and about 350 s with the unfloored minimum of 2).
+      // Slows to the floor, not below it, so it does not crawl, and ends once the planet is off the
+      // screen, about at its closest approach: one encounter takes about 151 s (about 153 s when it
+      // waited for the closest approach, about 285 s when it ran on to the despawn distance, and about
+      // 350 s with the unfloored minimum of 2).
       expect(slowest).toBeCloseTo(ENCOUNTER_MIN_SPEED_FLOOR, 9);
       expect(endedAt - startedAt).toBeLessThan(170);
     },
@@ -762,22 +789,24 @@ describe('the travel step', () => {
       // bearing atan2(c, remaining). One flown trace then gives every seeded planet's peak bearing
       // rate, exactly as `medianPlanetFlyby` measures it.
       const dt = 1 / 60;
-      const travel = createTravel({ ...DEFAULT_AUTOPILOT_PARAMS, nebulaShare: 0, asteroidShare: 0, planetFor: () => ({ radius: 50 }) }, DEFAULT_SHIP_PARAMS);
+      // Flown to the despawn distance (no view): the profile any planet is flown with while on screen.
+      const travel = createTravel({ ...DEFAULT_AUTOPILOT_PARAMS, nebulaShare: 0, asteroidShare: 0, planetFor: () => ({ radius: 50 }), view: null }, DEFAULT_SHIP_PARAMS);
       setCruiseSpeed(travel.autopilotParams, SHIP_SPEED_LEVELS[level]!);
       const trace: number[] = [];
       for (let i = 0; i < 1e6 && !(trace.length > 0 && travel.autopilot.encounter === null); i++) {
         stepTravel(travel, dt);
         if (travel.autopilot.encounter !== null) trace.push(travel.autopilot.remaining);
       }
-      const peakFor = (closest: number) => {
+      const peakFor = (closest: number, viewRadius: number) => {
         let peak = 0;
         for (let i = 1; i < trace.length; i++) {
+          if (!onSomeScreen(closest, trace[i]!, viewRadius)) continue;
           const rate = Math.abs(Math.atan2(closest, trace[i]!) - Math.atan2(closest, trace[i - 1]!)) / dt;
           peak = Math.max(peak, (rate * 180) / Math.PI);
         }
         return peak;
       };
-      const peaks = seededPlanets.map((p) => ({ ...p, peak: peakFor(p.closest) }));
+      const peaks = seededPlanets.map((p) => ({ ...p, peak: peakFor(p.closest, p.planet.radius * planetViewRadiusFactor(p.planet)) }));
       const worst = peaks.reduce((a, b) => (b.peak > a.peak ? b : a));
       const closest = peaks.reduce((a, b) => (b.closest < a.closest ? b : a));
       // Measured: about 4.99°/s at most, for a planet passed about 210 from the path, whose peak
@@ -785,10 +814,12 @@ describe('the travel step', () => {
       // at about 4.66°/s, at its closest approach, and so does the median planet.
       expect(worst.peak).toBeLessThanOrEqual(BEFORE_PEAK_DEG_PER_S * 1.2);
       expect(closest.closest).toBeCloseTo(PLANET_MIN_PASS_DISTANCE, 6);
-      // Flown for real, the worst and the closest planet peak exactly as computed.
+      // Flown for real, the worst and the closest planet peak exactly as computed; and with the live
+      // view (the default 16:9 screen), whose encounter ends once the planet is off it, no higher.
       for (const p of [worst, closest]) {
         const flyby = medianPlanetFlyby(level, p.planet);
         expect(flyby.peak).toBeCloseTo(p.peak, 6);
+        expect(medianPlanetFlyby(level, p.planet, DEFAULT_AUTOPILOT_PARAMS.view).peak).toBeLessThanOrEqual(p.peak + 1e-9);
       }
     },
   );
@@ -843,9 +874,10 @@ describe('the travel step', () => {
       // new level.
       travel.autopilotParams.interval = 60;
       const endedAt = travel.ship.time;
-      // The encounter ended out of view, near its minimum speed, so the return to warp starts there.
-      const entry = warpEntryDuration(travel.autopilotParams, travel.autopilot.entrySpeed);
-      expect(entry).toBeGreaterThan(ENCOUNTER_WARP_ENTRY_SECONDS);
+      // The encounter ended out of view, near its minimum speed, so the quick return to warp starts there.
+      expect(travel.autopilot.entryQuick).toBe(true);
+      const entry = viewEntryDuration(travel.autopilotParams, travel.autopilot.entrySpeed);
+      expect(entry).toBeGreaterThan(ENCOUNTER_VIEW_ENTRY_SECONDS);
       while (travel.ship.time < endedAt + entry + SHIP_SPEED_TAU_SECONDS) step(dt);
       expect(states).toEqual(['CRUISE', ...CYCLE]);
       expect(worstJump).toBeLessThan(1e-9);

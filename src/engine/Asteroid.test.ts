@@ -17,6 +17,8 @@ import {
   PLANET_ROCKY_RANGES,
   SHIP_DEFAULT_SPEED_LEVEL,
   SHIP_SPEED_LEVELS,
+  CAMERA_FOV_DEG,
+  VIEW_WIDEST_ASPECT,
 } from '../config';
 import {
   ASTEROID_FAMILY_NAMES,
@@ -40,7 +42,7 @@ import {
   type AsteroidEncounter,
   type AutopilotParams,
 } from './Autopilot';
-import { encounterOffset, planEncounter, type Encounter } from './encounter';
+import { encounterOffset, planEncounter, viewConeHalfAngle, type Encounter } from './encounter';
 import { encounterAsteroidParams, encounterLightDirection } from './EncounterView';
 import { DEFAULT_PLANET_FRAME, SURFACE_RENDER_ORDER, planetProgramMaterials } from './Planet';
 import { hash, mulberry32 } from './seed';
@@ -382,9 +384,25 @@ describe('asteroid flybys never whip by', () => {
     ({ cruiseSpeed }) => cruiseSpeed >= ENCOUNTER_ARRIVAL_SPEED,
   );
 
-  /** The remaining distance at every step of one asteroid encounter flown at `level`, and the ship's speed at the closest approach. */
+  /** The cone around the camera's forward axis that holds the view on every screen (21:9 and wider alike). */
+  const EVERY_SCREEN_CONE = viewConeHalfAngle(CAMERA_FOV_DEG, VIEW_WIDEST_ASPECT);
+
+  /**
+   * Whether a rock of radius `radius` whose centre is at bearing `bearing` (radians from the path,
+   * along which the heading is held) and `distance` from the ship may be on some screen: inside the
+   * cone that holds every view. The bearing-rate guard holds while it is.
+   */
+  const onSomeScreen = (bearing: number, distance: number, radius: number): boolean =>
+    distance <= radius || bearing - Math.asin(radius / distance) < EVERY_SCREEN_CONE;
+
+  /**
+   * The remaining distance at every step of one asteroid encounter flown at `level`, and the ship's
+   * speed at the closest approach. The encounter is flown to its despawn distance (`view` null): the
+   * slow phase ends once the object is off the screen, and until then every encounter flies this same
+   * profile.
+   */
   function trace(level: number, dt: number): { remaining: number[]; speedAtClosest: number } {
-    const travel = createTravel(asteroidsOnly(level, { asteroidFor: () => ({ radius: 10 }) }), DEFAULT_SHIP_PARAMS);
+    const travel = createTravel(asteroidsOnly(level, { asteroidFor: () => ({ radius: 10 }), view: null }), DEFAULT_SHIP_PARAMS);
     const remaining: number[] = [];
     let speedAtClosest = Number.NaN;
     for (let i = 0; i < 1e7 && !(remaining.length > 0 && travel.autopilot.encounter === null); i++) {
@@ -397,12 +415,15 @@ describe('asteroid flybys never whip by', () => {
   }
 
   /**
-   * Peak bearing rate, °/s, of a point `lateral` from the path and `along` ahead of the field centre
-   * along it, so `remaining + along` ahead of the ship.
+   * Peak bearing rate, °/s, of a rock of radius `radius` centred `lateral` from the path and `along`
+   * ahead of the field centre along it, so `remaining + along` ahead of the ship, while it may be on
+   * some screen (`onSomeScreen`).
    */
-  function peakFor(remaining: readonly number[], dt: number, lateral: number, along: number): number {
+  function peakFor(remaining: readonly number[], dt: number, lateral: number, along: number, radius: number): number {
     let peak = 0;
     for (let i = 1; i < remaining.length; i++) {
+      const ahead = remaining[i]! + along;
+      if (!onSomeScreen(Math.atan2(lateral, ahead), Math.hypot(lateral, ahead), radius)) continue;
       const rate = Math.abs(Math.atan2(lateral, remaining[i]! + along) - Math.atan2(lateral, remaining[i - 1]! + along)) / dt;
       peak = Math.max(peak, (rate * 180) / Math.PI);
     }
@@ -421,24 +442,38 @@ describe('asteroid flybys never whip by', () => {
       for (const params of SEEDED) {
         const distances = asteroidRockPassDistances(params.rocks, params.radius * params.passFactor);
         for (const [j, rock] of params.rocks.entries()) {
-          const peak = peakFor(remaining, dt, distances[j]!, rock.offset[0]);
+          const peak = peakFor(remaining, dt, distances[j]!, rock.offset[0], rock.radius);
           if (peak > worst.peak) worst = { peak, lateral: distances[j]!, along: rock.offset[0], seed: params.seed, rock: j };
         }
       }
-      // Measured at the default and top levels: about 4.6°/s at most, for a rock at the minimum
-      // pass distance, passed at the minimum speed (2.4 u/s over 30 units); 3.8°/s at the slowest.
+      // Measured at the default and top levels: about 4.4°/s at most while on some screen, for a rock
+      // at the minimum pass distance, passed at the minimum speed (2.4 u/s over 30 units); 3.7°/s at
+      // the slowest. A point there, on screen or not, peaks at about 4.6°/s and 3.8°/s, at its
+      // closest approach, so no rock sweeps past faster.
       expect(worst.peak).toBeLessThanOrEqual(BEARING_GUARD_DEG_PER_S);
       expect(worst.lateral).toBeCloseTo(ASTEROID_MIN_PASS_DISTANCE, 1);
-      expect(peakFor(remaining, dt, ASTEROID_MIN_PASS_DISTANCE, 0)).toBeGreaterThan(worst.peak - 0.01);
+      const anywhere = peakFor(remaining, dt, ASTEROID_MIN_PASS_DISTANCE, 0, Number.POSITIVE_INFINITY);
+      expect(anywhere).toBeGreaterThan(worst.peak - 0.01);
+      expect(anywhere).toBeLessThanOrEqual(BEARING_GUARD_DEG_PER_S);
       // Every rock is passed within the minimum-speed band, at the (scaled) minimum speed.
       if (level >= SHIP_DEFAULT_SPEED_LEVEL) {
         expect(speedAtClosest).toBeGreaterThanOrEqual(ASTEROID_MIN_SPEED);
         expect(speedAtClosest).toBeLessThan(ASTEROID_MIN_SPEED * 1.05);
       }
 
-      // Flown for real, the bearing of the worst rock's centre peaks as computed.
+      // Flown for real, the bearing of the worst rock's centre peaks as computed; and with the live
+      // view (the default 16:9 screen), whose encounter ends once the field is off it, no higher.
       const params = SEEDED.find((p) => p.seed === worst.seed)!;
-      const travel = createTravel(asteroidsOnly(level, { asteroidFor: () => params }), DEFAULT_SHIP_PARAMS);
+      expect(flownPeak(level, dt, params, worst.rock, null)).toBeCloseTo(worst.peak, 4);
+      expect(flownPeak(level, dt, params, worst.rock, DEFAULT_AUTOPILOT_PARAMS.view)).toBeLessThanOrEqual(worst.peak + 1e-9);
+    },
+    120_000,
+  );
+
+  /** Peak bearing rate, °/s, of rock `index` of `params` flown for real at `level` with `view`, while it may be on some screen. */
+  function flownPeak(level: number, dt: number, params: AsteroidParams, index: number, view: AutopilotParams['view']): number {
+    {
+      const travel = createTravel(asteroidsOnly(level, { asteroidFor: () => params, view }), DEFAULT_SHIP_PARAMS);
       let rock: Vec3 | null = null;
       let prev = Number.NaN;
       let peak = 0;
@@ -454,17 +489,18 @@ describe('asteroid flybys never whip by', () => {
         started = true;
         // Where the rock is drawn: its offset in the encounter frame (checked against the drawn
         // meshes above). The view draws the trip's own seed, so the chooser's rocks are placed here.
-        rock ??= rockPosition(params.rocks[worst.rock]!.offset, encounter.plan, { x: 0, y: 0, z: 0 });
+        rock ??= rockPosition(params.rocks[index]!.offset, encounter.plan, { x: 0, y: 0, z: 0 });
         encounterOffset(encounter.plan, travel.ship.position, rel);
         const to = { x: rel.x + rock.x, y: rel.y + rock.y, z: rel.z + rock.z };
         const bearing = Math.acos(Math.min(1, dot(to, encounter.plan.direction) / len(to)));
-        if (!Number.isNaN(prev)) peak = Math.max(peak, ((Math.abs(bearing - prev) / dt) * 180) / Math.PI);
+        if (!Number.isNaN(prev) && onSomeScreen(bearing, len(to), params.rocks[index]!.radius)) {
+          peak = Math.max(peak, ((Math.abs(bearing - prev) / dt) * 180) / Math.PI);
+        }
         prev = bearing;
       }
-      expect(peak).toBeCloseTo(worst.peak, 4);
-    },
-    120_000,
-  );
+      return peak;
+    }
+  }
 });
 
 describe('Asteroid', () => {

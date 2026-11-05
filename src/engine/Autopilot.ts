@@ -24,13 +24,15 @@
  * (`cruiseTargetSpeed`), so the encounter itself is the same at every speed level at or above the
  * arrival speed. Both eases are cruise time and count toward the encounter interval.
  *
- * Speed driven by visibility (docs/PLAN.md section 9, Phase 4; config.ts, VIEW_WIDEST_ASPECT): after
- * the closest approach, DEPARTURE ends as soon as the object is out of view at the widest supported
- * aspect ratio (`encounterViewMargin`; wider screens narrow the vertical field of view, so it holds on
- * every screen), or at the profile's despawn distance if that comes first. The
- * next cruise eases the target speed up from where the encounter left it, and the heading drift
- * likewise, so neither jumps. Until the object is out of view nothing changes: the target speed is
- * the distance-based profile throughout the encounter.
+ * Speed driven by visibility (docs/PLAN.md section 9, Phase 4; config.ts, VIEW_WIDEST_ASPECT): as
+ * soon as the object is wholly off the live camera view (`AutopilotParams.view`, which the engine
+ * replaces on every resize; `encounterViewMargin`), before or after the closest approach, the
+ * encounter moves on through the rest of its cycle, one state per step, and ends; otherwise DEPARTURE
+ * ends at the profile's despawn distance. The next cruise returns to warp from the speed and
+ * acceleration the ship had then (the quick entry, `viewEntryDuration`), and the heading drift eases
+ * up from where the encounter left it, so neither jumps. Until the object is off screen nothing
+ * changes: the target speed is the distance-based profile throughout the encounter. Encounter timing
+ * therefore depends on the screen's shape; the schedule (kinds, sides, cruise lengths) does not.
  *
  * Heading: `planEncounter` assumes the ship holds the planned heading. Shrinking the drift
  * amplitudes would turn the heading back toward -Z and move the path sideways, eating into the
@@ -87,6 +89,8 @@ import {
   ENCOUNTER_PLANET_RADIUS,
   ENCOUNTER_SIDE_ELEVATION_RANGE,
   ENCOUNTER_SIDE_OFFSET_FACTOR,
+  ENCOUNTER_VIEW_ENTRY_MAX_RATE,
+  ENCOUNTER_VIEW_ENTRY_SECONDS,
   ENCOUNTER_WARP_ENTRY_MAX_RATE,
   ENCOUNTER_WARP_ENTRY_SECONDS,
   ENCOUNTER_WARP_EXIT_LEAD_SECONDS,
@@ -104,6 +108,8 @@ import {
   NEBULA_SPEEDUP_DISTANCE,
   SHIP_DEFAULT_SPEED_LEVEL,
   SHIP_SPEED_LEVELS,
+  SHIP_SPEED_TAU_SECONDS,
+  VIEW_DEFAULT_ASPECT,
   VIEW_WIDEST_ASPECT,
 } from '../config';
 import {
@@ -113,13 +119,14 @@ import {
   encounterOpacity,
   encounterRemaining,
   encounterTargetSpeed,
+  frustumConeHalfAngle,
+  frustumSphereMargin,
   planEncounter,
   smoothstep,
-  sphereViewMargin,
-  viewConeHalfAngle,
   type Encounter,
   type EncounterProfile,
 } from './encounter';
+import { cameraFrustum, type ViewFrustum } from './renderSize';
 import { hash, hashUnit } from './seed';
 import { clampDt, createShipState, updateShip, type ShipParams, type ShipState, type Vec3 } from './Ship';
 
@@ -274,22 +281,41 @@ export interface AutopilotParams {
   warpExitLead: number;
   /**
    * Seconds at the start of each cruise over which the target speed eases back up to the cruise speed
-   * (warp entry), at least; see `warpEntryMaxRate`.
+   * (the gentle warp entry, after an encounter that ran to its despawn distance), at least; see
+   * `warpEntryMaxRate`. After one that ended off screen the quick entry applies (`viewEntryTime`).
    */
   warpEntryTime: number;
   /**
-   * Steepest slope of the warp entry, in units per second per second: an entry from further below the
-   * cruise speed (an encounter that ended out of view, near its minimum speed) is stretched beyond
-   * `warpEntryTime` until no steeper than this. `Infinity` never stretches it.
+   * Steepest slope of the gentle warp entry, in units per second per second: an entry from further
+   * below the cruise speed is stretched beyond `warpEntryTime` until no steeper than this. `Infinity`
+   * never stretches it.
    */
   warpEntryMaxRate: number;
   /**
-   * Half-angle, in radians, of the cone around the camera's forward axis that holds the view at the
-   * widest supported aspect ratio (`viewConeHalfAngle`). After the closest approach, an encounter ends
-   * once its object is outside it (`encounterViewMargin`). π or more never ends one early: DEPARTURE
+   * Seconds the quick warp entry takes at least: the return to the cruise speed after an encounter
+   * that ended out of view (`viewEntryDuration`), stretched by `viewEntryMaxRate`.
+   */
+  viewEntryTime: number;
+  /**
+   * Steepest acceleration of the ship in the quick warp entry, in units per second per second: an
+   * entry with more to rise is stretched beyond `viewEntryTime` until no steeper than this.
+   */
+  viewEntryMaxRate: number;
+  /**
+   * The ship's speed time constant (`ShipParams.speedTau`), in seconds. The quick warp entry leads
+   * the ship's lag by it, so the ship's speed itself follows the ease (`cruiseTargetSpeed`).
+   */
+  shipSpeedTau: number;
+  /**
+   * The live camera view (the screen's aspect ratio and the camera's vertical field of view; see
+   * `cameraFrustum`). An encounter's slow phase ends as soon as its object is wholly outside it
+   * (`encounterViewMargin`), before or after the closest approach. The engine replaces it on every
+   * resize, so encounter timing depends on the screen: a shared trip seed replays the same objects in
+   * the same order, but not frame-identical timing. The default is a 16:9 screen
+   * (VIEW_DEFAULT_ASPECT), so tests are deterministic. `null` never ends an encounter early: DEPARTURE
    * then lasts to the despawn distance, as it did before Phase 4.
    */
-  viewHalfAngle: number;
+  view: Readonly<ViewFrustum> | null;
   /**
    * Mean seconds of cruise before each encounter starts (the encounter interval). The warp entry,
    * exit and lead are part of the cruise, so they count toward it.
@@ -349,7 +375,10 @@ export const DEFAULT_AUTOPILOT_PARAMS: Readonly<AutopilotParams> = {
   warpExitLead: ENCOUNTER_WARP_EXIT_LEAD_SECONDS,
   warpEntryTime: ENCOUNTER_WARP_ENTRY_SECONDS,
   warpEntryMaxRate: ENCOUNTER_WARP_ENTRY_MAX_RATE,
-  viewHalfAngle: viewConeHalfAngle(CAMERA_FOV_DEG, VIEW_WIDEST_ASPECT),
+  viewEntryTime: ENCOUNTER_VIEW_ENTRY_SECONDS,
+  viewEntryMaxRate: ENCOUNTER_VIEW_ENTRY_MAX_RATE,
+  shipSpeedTau: SHIP_SPEED_TAU_SECONDS,
+  view: cameraFrustum(CAMERA_FOV_DEG, VIEW_DEFAULT_ASPECT, VIEW_WIDEST_ASPECT),
   interval: ENCOUNTER_INTERVAL_SECONDS,
   intervalJitter: ENCOUNTER_INTERVAL_JITTER,
   driftSettleTime: ENCOUNTER_DRIFT_SETTLE_SECONDS,
@@ -403,12 +432,30 @@ export interface AutopilotState {
    */
   viewMargin: number;
   /**
+   * Seconds since the encounter object went out of view (interpolated within the step it did), or
+   * `-Infinity` while it may be in view and with no encounter.
+   */
+  outOfViewTime: number;
+  /**
    * Target speed the latest encounter ended at, which the cruise after it eases up from
    * (`cruiseTargetSpeed`); `Infinity` before the first encounter.
    */
   entrySpeed: number;
   /** Drift rate the latest encounter ended at, which the cruise after it eases up from; 1 before the first. */
   entryDrift: number;
+  /**
+   * Whether the latest encounter ended out of view, so the cruise after it returns to warp with the
+   * quick entry (`viewEntryDuration`) rather than the gentle one (`warpEntryDuration`).
+   */
+  entryQuick: boolean;
+  /**
+   * Where the quick entry starts (see `cruiseTargetSpeed`): the cruise time at which the latest
+   * encounter ended (the lateness carried into the cruise), and the ship's speed and acceleration
+   * then. 0 before the first encounter.
+   */
+  entryAt: number;
+  entryShipSpeed: number;
+  entryShipAccel: number;
   /** Planet opacity in [0, 1]; 0 with no encounter. */
   fade: number;
   /** Target speed for the ship's next step, in world units per second. */
@@ -648,23 +695,83 @@ export function warpEntryDuration(
 }
 
 /**
+ * Seconds the quick warp entry (after an encounter that ended out of view) takes from the ship's
+ * `entrySpeed` and `entryAccel` up to the cruise speed (`cruiseTargetSpeed`): `viewEntryTime`,
+ * stretched until the ship's steepest acceleration in it is at most `viewEntryMaxRate`. That is at
+ * most 1.875 × the rise / the time (the steepest slope of a smootherstep) plus 0.52 × any
+ * deceleration it starts with (which the curve turns around), so the stretch keeps their sum within
+ * the rate (or within twice the time a start at rest would take, for a start braking harder than the
+ * rate itself).
+ */
+export function viewEntryDuration(
+  params: Readonly<Pick<AutopilotParams, 'cruiseSpeed' | 'viewEntryTime' | 'viewEntryMaxRate'>>,
+  entrySpeed: number,
+  entryAccel = 0,
+): number {
+  const rise = params.cruiseSpeed - entrySpeed;
+  const rate = params.viewEntryMaxRate;
+  const room = Math.max(rate / 2, rate - 0.52 * Math.max(0, -entryAccel));
+  const stretched = rise > 0 && rate > 0 ? (1.875 * rise) / room : 0;
+  return Math.max(params.viewEntryTime, stretched);
+}
+
+/**
+ * The ship's speed in the quick warp entry, and its rate of change, `u` of the way through an entry
+ * lasting `duration` seconds from `speed` and `accel` (the ship's speed and acceleration where it
+ * starts) to `cruise`: the quintic Hermite curve that starts with that speed, that acceleration and no
+ * jerk, and ends at the cruise speed with no acceleration and no jerk. With no acceleration at the
+ * start it is a smootherstep. Writes `[speed, rate]` into `out`.
+ */
+function quickEntryCurve(u: number, duration: number, speed: number, accel: number, cruise: number, out: [number, number]): [number, number] {
+  const u2 = u * u;
+  const u3 = u2 * u;
+  // 1 - smootherstep, and the basis that carries the starting slope: h1 = u - 6u³ + 8u⁴ - 3u⁵.
+  const h0 = 1 - u3 * (10 + u * (6 * u - 15));
+  const h1 = u - u3 * (6 - u * (8 - 3 * u));
+  const w = u * (1 - u);
+  const dh0 = -30 * w * w;
+  const dh1 = (1 - u) * (1 - u) * (1 + u * (2 - 15 * u));
+  const slope = accel * duration;
+  out[0] = cruise + (speed - cruise) * h0 + slope * h1;
+  out[1] = ((speed - cruise) * dh0 + slope * dh1) / duration;
+  return out;
+}
+
+const curveScratch: [number, number] = [0, 0];
+
+/**
  * Target speed after `cruiseTime` seconds of a cruise lasting `interval`; `afterEncounter` tells
  * whether the cruise follows an encounter (every cruise but the first, from load), and `entrySpeed`
  * is the target speed that encounter ended at (by default `encounterCruiseSpeed`, where an encounter
- * that runs to its despawn distance ends).
+ * that runs to its despawn distance ends). `quick` tells whether that encounter ended out of view,
+ * and then the quick entry starts at cruise time `quickAt` (the lateness carried from the encounter's
+ * end) from the ship's speed and acceleration then, `quickSpeed` and `quickAccel`.
  *
- * After an encounter, the target starts at the entry speed (capped at the cruise speed) and eases
- * (smoothstep) up to the cruise speed over `warpEntryDuration` (back into warp); the first cruise has
- * no encounter to return from (the ship accelerates from rest at load), so it starts at the cruise
- * speed. Above the arrival speed, from `warpExitLead + warpExitTime` before the encounter starts, it
- * then eases back down to the arrival speed, which it reaches `warpExitLead` before the encounter
- * starts (out of warp). Where the two eases overlap (a short cruise) the lower one applies, so the
- * target is continuous and never jumps, it never reaches the cruise speed, and it is still at the
- * arrival speed from `warpExitLead` before the encounter starts (throughout, for a cruise no longer
- * than that). An entry from below the arrival speed (an encounter that ended out of view) is cut
- * short to end by then too, so the next encounter still starts at the arrival speed; only a cruise
- * no longer than the lead (shorter than any configured interval) starts it at the arrival speed at
- * once.
+ * After an encounter that ended out of view (`quick`), the warp entry is quick, since nothing on
+ * screen is left to watch: the ship's speed itself eases from where it was, with the acceleration it
+ * had, up to the cruise speed over `viewEntryDuration` (a quintic Hermite curve, a smootherstep from
+ * rest; no jerk at either end), and the target leads it by the ship's lag
+ * (`target = v + shipSpeedTau × v'`, which the ship's exponential approach turns back into `v`). It
+ * starts where the encounter's target speed was (the ship's speed plus its lag) and ends at the
+ * cruise speed, so there is no step, the ship's acceleration is continuous and its jerk bounded; in
+ * between the target runs ahead of the ship's speed, and may run above the cruise speed while the ship
+ * catches up (with one target per frame, the ship can end up to about half a frame's worth of its
+ * starting acceleration × e^(-duration / shipSpeedTau) over the cruise speed: a few hundredths of a
+ * unit per second at the capped dt).
+ *
+ * After any other encounter (one that ran to its despawn distance), the target starts at the entry
+ * speed (capped at the cruise speed) and eases (smoothstep) up to the cruise speed over
+ * `warpEntryDuration` (back into warp); the first cruise has no encounter to return from (the ship
+ * accelerates from rest at load), so it starts at the cruise speed. Above the arrival speed, from
+ * `warpExitLead + warpExitTime` before the encounter starts, it then eases back down to the arrival
+ * speed, which it reaches `warpExitLead` before the encounter starts (out of warp). Where the eases
+ * overlap (a short cruise) the lower one applies (with the quick entry's lead on top, which is 0 by
+ * then), so the target is continuous and never jumps, it never reaches the cruise speed, and it is
+ * still at the arrival speed from `warpExitLead` before the encounter starts (throughout, for a
+ * cruise no longer than that). A gentle entry from below the arrival speed is cut short to end by
+ * then too, as the quick entry always is, so the next encounter still starts at the arrival speed;
+ * only a cruise no longer than the lead (shorter than any configured interval) starts it at the
+ * arrival speed at once.
  *
  * Continuous with the encounter's target speed at both ends: an encounter starts at
  * `encounterCruiseSpeed` (see `encounterTargetSpeed`) and ends at the entry speed.
@@ -675,23 +782,39 @@ export function cruiseTargetSpeed(
   params: Readonly<AutopilotParams>,
   afterEncounter: boolean,
   entrySpeed: number = encounterCruiseSpeed(params),
+  quick = false,
+  quickAt = 0,
+  quickSpeed: number = entrySpeed,
+  quickAccel = 0,
 ): number {
   const cruise = params.cruiseSpeed;
   const arrival = encounterCruiseSpeed(params);
   const exitEnd = interval - params.warpExitLead;
   let target = cruise;
-  const from = afterEncounter ? Math.min(entrySpeed, cruise) : cruise;
-  if (from < cruise) {
-    let entryTime = warpEntryDuration(params, from);
-    if (from < arrival) entryTime = Math.min(entryTime, Math.max(0, exitEnd));
-    target = entryTime > 0 ? from + (cruise - from) * smoothstep(0, entryTime, cruiseTime) : cruise;
+  // The quick entry's lead over the ship's lag, added on top of any drop out of warp.
+  let lead = 0;
+  if (afterEncounter && quick) {
+    const entryTime = Math.min(viewEntryDuration(params, Math.min(quickSpeed, cruise), quickAccel), Math.max(0, exitEnd - quickAt));
+    const t = cruiseTime - quickAt;
+    if (entryTime > 0 && t < entryTime) {
+      const [speed, rate] = quickEntryCurve(Math.max(0, t) / entryTime, entryTime, quickSpeed, quickAccel, cruise, curveScratch);
+      target = speed;
+      lead = params.shipSpeedTau * rate;
+    }
+  } else {
+    const from = afterEncounter ? Math.min(entrySpeed, cruise) : cruise;
+    if (from < cruise) {
+      let entryTime = warpEntryDuration(params, from);
+      if (from < arrival) entryTime = Math.min(entryTime, Math.max(0, exitEnd));
+      target = entryTime > 0 ? from + (cruise - from) * smoothstep(0, entryTime, cruiseTime) : cruise;
+    }
   }
   if (cruise > arrival) {
     const exitTime = params.warpExitTime;
     const exit = exitTime > 0 ? smoothstep(exitEnd, exitEnd - exitTime, cruiseTime) : cruiseTime >= exitEnd ? 0 : 1;
     target = Math.min(target, arrival + (cruise - arrival) * exit);
   }
-  return target;
+  return target + lead;
 }
 
 /**
@@ -753,40 +876,48 @@ export function nebulaViewExtent(radius: number, closestDistance: number): { dep
 const viewScratch: Vec3 = { x: 0, y: 0, z: 0 };
 
 /**
- * How far the encounter's object is out of view (config.ts, VIEW_WIDEST_ASPECT) with the ship at
- * `ship` (its position and heading, the camera's forward axis) and the view inside the cone of
- * half-angle `halfAngle`: positive once it is out of view, zero or negative while it may be in view.
- * `remaining` is the ship's remaining distance (`encounterRemaining`). Pure and allocation-free.
+ * How far the encounter's object is out of `view` (the live camera view, `AutopilotParams.view`) with
+ * the ship at `ship` (its position and heading, the camera's forward axis, with world +Y up as the
+ * engine's `lookAt` sets it): positive once no part of it is on screen, zero or negative while some
+ * part may be. `null` never puts it out of view (`-Infinity`). `remaining` is the ship's remaining
+ * distance (`encounterRemaining`). Pure and allocation-free. Kind-generic: each kind names the
+ * spheres (or bound) that hold everything drawn for it, and the screen test is the same for all.
  *
- * - Planet: `sphereViewMargin` of the sphere of `radius × planetViewRadiusFactor(planet)` (the
- *   atmosphere, or the ring), in radians.
- * - Asteroid: `sphereViewMargin` of the field's bounding sphere (`radius`, which holds every rock
- *   whatever its tumble), in radians.
- * - Nebula: in world units, how far the ship is past every layer (`-(remaining + depth)`, from
+ * - Planet: `frustumSphereMargin` of the sphere of `radius × planetViewRadiusFactor(planet)` (the
+ *   atmosphere, or the ring), in world units.
+ * - Asteroid: `frustumSphereMargin` of the field's bounding sphere (`radius`, which holds every rock
+ *   whatever its tumble), in world units.
+ * - Nebula: its layers reach across the path, so every layer is on screen until the ship is past it.
+ *   In world units, how far the ship is past every layer (`-(remaining + depth)`, from
  *   `nebulaViewExtent`), and only once the heading has not turned so far from the planned direction
- *   that the cone could reach a layer: every point of a layer is then at least
+ *   that the view could reach a layer: every point of a layer is then at least
  *   π/2 + atan(past / lateral) from the planned direction, so at least that minus the heading's turn
- *   from the forward axis, which must exceed `halfAngle`.
+ *   from the forward axis, which must exceed the view's corner half-angle (`frustumConeHalfAngle`).
+ *
+ * With the heading held (APPROACH and FLYBY), the margin only grows as the ship moves on, for every
+ * kind (`frustumSphereMargin`; a nebula's `past` grows with the distance travelled): once out of view,
+ * the object would never come back into view.
  */
 export function encounterViewMargin(
   encounter: Readonly<ActiveEncounter>,
   ship: Readonly<ShipState>,
-  halfAngle: number,
+  view: Readonly<ViewFrustum> | null,
   remaining: number = encounterRemaining(encounter.plan, ship.position),
 ): number {
+  if (view === null) return Number.NEGATIVE_INFINITY;
   const { plan } = encounter;
   if (encounter.kind === 'planet') {
     const offset = encounterOffset(plan, ship.position, viewScratch);
-    return sphereViewMargin(offset, ship.heading, plan.radius * planetViewRadiusFactor(encounter.planet), halfAngle);
+    return frustumSphereMargin(offset, ship.heading, plan.radius * planetViewRadiusFactor(encounter.planet), view);
   }
   if (encounter.kind === 'asteroid') {
-    return sphereViewMargin(encounterOffset(plan, ship.position, viewScratch), ship.heading, plan.radius, halfAngle);
+    return frustumSphereMargin(encounterOffset(plan, ship.position, viewScratch), ship.heading, plan.radius, view);
   }
   const { depth, lateral } = nebulaViewExtent(plan.radius, plan.closestDistance);
   const past = -(remaining + depth);
   if (!(past > 0)) return past;
   const nearest = Math.PI / 2 + Math.atan(past / lateral);
-  return nearest - angleBetween(ship.heading, plan.direction) > halfAngle ? past : 0;
+  return nearest - angleBetween(ship.heading, plan.direction) > frustumConeHalfAngle(view) ? past : 0;
 }
 
 /** Starting autopilot state: CRUISE from the beginning, with no encounter yet. */
@@ -800,8 +931,13 @@ export function createAutopilotState(params: Readonly<AutopilotParams> = DEFAULT
     encounter: null,
     remaining: Number.POSITIVE_INFINITY,
     viewMargin: Number.NEGATIVE_INFINITY,
+    outOfViewTime: Number.NEGATIVE_INFINITY,
     entrySpeed: Number.POSITIVE_INFINITY,
     entryDrift: 1,
+    entryQuick: false,
+    entryAt: 0,
+    entryShipSpeed: 0,
+    entryShipAccel: 0,
     fade: 0,
     targetSpeed: cruiseTargetSpeed(0, cruiseInterval(params, 0), params, false),
     driftRate: cruiseDriftRate(0, cruiseInterval(params, 0), params),
@@ -824,18 +960,20 @@ export function createAutopilotState(params: Readonly<AutopilotParams> = DEFAULT
  *   encounter remains, because the target speed is updated only once per frame.
  * - APPROACH becomes FLYBY once the remaining distance is at most `flybyDistance`, FLYBY becomes
  *   DEPARTURE once the closest approach is passed (remaining ≤ 0), and DEPARTURE returns to CRUISE
- *   as soon as the object is out of view (`encounterViewMargin` > 0), or once the ship is the
- *   profile's despawn distance past it, where the fade has reached 0, whichever comes first, but
- *   never on the step that reached DEPARTURE: every encounter spends at least one step in it (a
- *   planet passed far off can be out of view at its closest approach already). An object out of view
- *   is removed whatever its fade, which no one sees.
+ *   once the ship is the profile's despawn distance past it, where the fade has reached 0.
+ * - As soon as the object is out of the live view (`encounterViewMargin` > 0 with `params.view`),
+ *   before or after the closest approach, the encounter moves on one state per step from the state it
+ *   was in on the step before (APPROACH → FLYBY → DEPARTURE → CRUISE), so it ends within three steps
+ *   and every encounter still shows the whole cycle. It would not come back into view: the heading
+ *   is held until the closest approach (see `encounterViewMargin`). An object out of view is removed
+ *   whatever its fade, which no one sees.
  * - The lateness carried from the end of DEPARTURE is the time since the first of those held: since
- *   the despawn distance was passed, or since both the closest approach was passed and the view
- *   margin turned positive (interpolated between the last two steps), up to two steps.
+ *   the despawn distance was passed, or since the view margin turned positive (interpolated between
+ *   the two steps either side), up to three steps.
  * - The target speed follows the encounter speed profile from `encounterCruiseSpeed`, and is
  *   `cruiseTargetSpeed` in CRUISE: after an encounter, the return to warp from the target speed the
- *   encounter ended at, and the drop out of warp at the end of the cruise when the cruise speed is
- *   above the arrival speed.
+ *   encounter ended at (quick when it ended out of view), and the drop out of warp at the end of the
+ *   cruise when the cruise speed is above the arrival speed.
  * - The drift rate eases to 0 at the end of CRUISE, stays 0 through APPROACH and FLYBY, and eases
  *   back toward 1 over DEPARTURE as the ship recedes (reaching 1 at the despawn distance), then on
  *   to 1 at the start of CRUISE from wherever DEPARTURE left it.
@@ -856,7 +994,12 @@ export function updateAutopilot(
   let encounter = state.encounter;
   let entrySpeed = state.entrySpeed;
   let entryDrift = state.entryDrift;
+  let entryQuick = state.entryQuick;
+  let entryAt = state.entryAt;
+  let entryShipSpeed = state.entryShipSpeed;
+  let entryShipAccel = state.entryShipAccel;
   let viewMargin = Number.NEGATIVE_INFINITY;
+  let outOfViewTime = Number.NEGATIVE_INFINITY;
 
   if (travel === 'CRUISE') {
     cruiseTime += dt;
@@ -900,37 +1043,51 @@ export function updateAutopilot(
     if (travel === 'APPROACH' && remaining <= params.flybyDistance) travel = 'FLYBY';
     if (travel === 'FLYBY' && remaining <= 0) travel = 'DEPARTURE';
     // Only the step that started the encounter has no margin of its own from the step before.
-    const prevMargin = state.encounter === encounter ? state.viewMargin : Number.NEGATIVE_INFINITY;
-    viewMargin = encounterViewMargin(encounter, ship, params.viewHalfAngle, remaining);
-    // DEPARTURE lasts at least one step: a planet passed far off (a large k) can already be out of
-    // view at its closest approach, and the step that reaches DEPARTURE keeps it, so every encounter
-    // shows the whole cycle. That step's time is carried with the rest of the lateness below.
-    if (travel === 'DEPARTURE' && state.state === 'DEPARTURE' && state.encounter === encounter) {
+    const continuing = state.encounter === encounter;
+    const prevMargin = continuing ? state.viewMargin : Number.NEGATIVE_INFINITY;
+    viewMargin = encounterViewMargin(encounter, ship, params.view, remaining);
+    if (viewMargin > 0) {
+      // Since it went out of view: interpolated within the step it did, then counted on.
+      outOfViewTime =
+        continuing && state.outOfViewTime >= 0
+          ? state.outOfViewTime + dt
+          : prevMargin > Number.NEGATIVE_INFINITY
+            ? (dt * viewMargin) / (viewMargin - prevMargin)
+            : 0;
+      // Out of view: on to the next state, one per step, so every encounter shows the whole cycle
+      // (and DEPARTURE lasts at least one step). That step's time is carried with the lateness below.
+      if (continuing && travel === state.state) {
+        if (travel === 'APPROACH') travel = 'FLYBY';
+        else if (travel === 'FLYBY') travel = 'DEPARTURE';
+      }
+    }
+    if (travel === 'DEPARTURE' && state.state === 'DEPARTURE' && continuing) {
       // How long ago DEPARTURE could have ended, by each rule; -Infinity where it cannot yet. At most
-      // two steps: the one before may have been the one held.
-      const cap = 2 * dt;
+      // three steps: the ones before may have been the ones held.
+      const cap = 3 * dt;
       let late = Number.NEGATIVE_INFINITY;
       if (remaining <= -profile.despawnDistance) {
         // Time since the ship passed the despawn distance.
         const past = ship.speed > 0 ? (-profile.despawnDistance - remaining) / ship.speed : 0;
         late = Math.min(past, cap);
       }
-      if (viewMargin > 0) {
-        // Out of view after the closest approach: since the later of passing it and leaving the view
-        // (before the step before this one when it was already out of view then: the step held).
-        const sincePass = ship.speed > 0 ? -remaining / ship.speed : 0;
-        const sinceView = prevMargin > 0 ? cap : (dt * viewMargin) / (viewMargin - prevMargin);
-        late = Math.max(late, Math.min(sincePass, sinceView, cap));
-      }
+      const outOfView = viewMargin > 0;
+      if (outOfView) late = Math.max(late, Math.min(outOfViewTime, cap));
       if (late > Number.NEGATIVE_INFINITY) {
         // Carried with the encounter's late start. The next cruise eases up from where this ends.
         cruiseTime += late;
         entrySpeed = encounterTargetSpeed(remaining, encounterCruiseSpeed(params), profile);
         entryDrift = smoothstep(0, -profile.despawnDistance, remaining);
+        entryQuick = outOfView;
+        // The ship's acceleration with the encounter's last target, so the quick entry carries it on.
+        entryShipAccel = (entrySpeed - ship.speed) / params.shipSpeedTau;
+        entryShipSpeed = ship.speed;
+        entryAt = cruiseTime;
         travel = 'CRUISE';
         encounter = null;
         remaining = Number.POSITIVE_INFINITY;
         viewMargin = Number.NEGATIVE_INFINITY;
+        outOfViewTime = Number.NEGATIVE_INFINITY;
       }
     }
   }
@@ -943,12 +1100,17 @@ export function updateAutopilot(
   out.encounter = encounter;
   out.remaining = remaining;
   out.viewMargin = viewMargin;
+  out.outOfViewTime = outOfViewTime;
   out.entrySpeed = entrySpeed;
   out.entryDrift = entryDrift;
+  out.entryQuick = entryQuick;
+  out.entryAt = entryAt;
+  out.entryShipSpeed = entryShipSpeed;
+  out.entryShipAccel = entryShipAccel;
   if (encounter === null) {
     const interval = cruiseInterval(params, encounterCount);
     out.fade = 0;
-    out.targetSpeed = cruiseTargetSpeed(cruiseTime, interval, params, encounterCount > 0, entrySpeed);
+    out.targetSpeed = cruiseTargetSpeed(cruiseTime, interval, params, encounterCount > 0, entrySpeed, entryQuick, entryAt, entryShipSpeed, entryShipAccel);
     out.driftRate = cruiseDriftRate(cruiseTime, interval, params, encounterCount > 0 ? entryDrift : 1);
   } else {
     const profile = encounterProfile(params, encounter.kind);
