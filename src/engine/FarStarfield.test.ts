@@ -11,13 +11,19 @@ import {
   FAR_STAR_SIZE_MAX,
   FAR_STAR_SIZE_MIN,
   SHIP_SPEED_LEVELS,
+  STAR_COUNT,
   STAR_CUBE_SIZE,
+  STAR_DIM_DISTANCE,
+  STAR_EDGE_FADE_WIDTH,
+  STAR_NEAR_FADE_DISTANCE,
 } from '../config';
 import { DEFAULT_AUTOPILOT_PARAMS, createTravel, setCruiseSpeed, stepTravel } from './Autopilot';
 import {
   DEFAULT_FAR_STARFIELD_OPTIONS,
   FAR_STARFIELD_RENDER_ORDER,
+  FAR_STAR_TINTS,
   FarStarfield,
+  farStarTint,
   farStarViewDirection,
   generateFarStars,
 } from './FarStarfield';
@@ -25,12 +31,49 @@ import { NEBULA_RENDER_ORDER } from './Nebula';
 import { ATMOSPHERE_RENDER_ORDER, SURFACE_RENDER_ORDER } from './Planet';
 import { computeRenderSize } from './renderSize';
 import { DEFAULT_SHIP_PARAMS, type Vec3 } from './Ship';
-import { STARFIELD_RENDER_ORDER, computeWrapOffset, wrapStarCoordinate } from './Starfield';
+import {
+  DEFAULT_STARFIELD_OPTIONS,
+  STARFIELD_RENDER_ORDER,
+  computeWrapOffset,
+  generateStars,
+  starDim,
+  starFade,
+  wrapStarCoordinate,
+} from './Starfield';
 
 /** The first `n` far-star directions. */
 function directions(n: number): Vec3[] {
   const { directions: d } = generateFarStars(DEFAULT_FAR_STARFIELD_OPTIONS);
   return Array.from({ length: n }, (_, i) => ({ x: d[i * 3]!, y: d[i * 3 + 1]!, z: d[i * 3 + 2]! }));
+}
+
+/** Rec. 709 luminance of star `i`'s colour (rgb triples in `colors`). */
+function luminance(colors: Float32Array, i: number): number {
+  return 0.2126 * colors[i * 3]! + 0.7152 * colors[i * 3 + 1]! + 0.0722 * colors[i * 3 + 2]!;
+}
+
+/**
+ * Colour temperature of star `i`: (red - blue) / brightest channel. 0 is neutral, negative is
+ * bluish, positive is warm (yellow to orange).
+ */
+function warmth(colors: Float32Array, i: number): number {
+  const [r, g, b] = [colors[i * 3]!, colors[i * 3 + 1]!, colors[i * 3 + 2]!];
+  return (r - b) / Math.max(r, g, b);
+}
+
+function mean(values: readonly number[]): number {
+  return values.reduce((sum, v) => sum + v, 0) / values.length;
+}
+
+function standardDeviation(values: readonly number[]): number {
+  const m = mean(values);
+  return Math.sqrt(mean(values.map((v) => (v - m) ** 2)));
+}
+
+/** The value below which a fraction `p` of `values` lies. */
+function quantile(values: readonly number[], p: number): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor(p * (sorted.length - 1))]!;
 }
 
 /** A camera like the engine's: at the origin, looking along `heading`, matrices up to date. */
@@ -71,6 +114,82 @@ describe('far star layout', () => {
     expect(Math.max(...s) - Math.min(...s)).toBeGreaterThan((FAR_STAR_SIZE_MAX - FAR_STAR_SIZE_MIN) / 2);
     const brightness = Array.from({ length: FAR_STAR_COUNT }, (_, i) => Math.max(colors[i * 3]!, colors[i * 3 + 1]!, colors[i * 3 + 2]!));
     expect(Math.max(...brightness) - Math.min(...brightness)).toBeGreaterThan(0.5);
+  });
+});
+
+describe('far star colours', () => {
+  it('have tints whose shares sum to 1 and that keep the brightest channel at 1', () => {
+    expect(FAR_STAR_TINTS.reduce((sum, t) => sum + t.weight, 0)).toBeCloseTo(1, 12);
+    for (const { rgb, weight } of FAR_STAR_TINTS) {
+      expect(Math.max(...rgb)).toBe(1);
+      expect(weight).toBeGreaterThan(0);
+    }
+    // farStarTint gives each tint a share of [0, 1) equal to its weight.
+    const counts = new Map<readonly number[], number>();
+    for (let i = 0; i < 10_000; i++) {
+      const tint = farStarTint((i + 0.5) / 10_000);
+      counts.set(tint, (counts.get(tint) ?? 0) + 1);
+    }
+    for (const { rgb, weight } of FAR_STAR_TINTS) expect((counts.get(rgb) ?? 0) / 10_000).toBeCloseTo(weight, 3);
+    expect(farStarTint(1 - 1e-15)).toBe(FAR_STAR_TINTS[FAR_STAR_TINTS.length - 1]!.rgb);
+  });
+});
+
+/**
+ * Sky legibility (docs/PLAN.md section 9, Phase 4): the near dust is drawn dimmer than the far stars,
+ * which have a visible colour variance, so the far stars read as the sky. These check the generated
+ * per-star colour attributes (aColor, the shader's only colour input for both layers) and, for the
+ * near layer, the colour after the shader's own dimming in a static frame at rest.
+ */
+describe('sky legibility', () => {
+  const near = generateStars(DEFAULT_STARFIELD_OPTIONS);
+  const far = generateFarStars(DEFAULT_FAR_STARFIELD_OPTIONS);
+  const nearLuminance = Array.from({ length: STAR_COUNT }, (_, i) => luminance(near.colors, i));
+  const farLuminance = Array.from({ length: FAR_STAR_COUNT }, (_, i) => luminance(far.colors, i));
+
+  /**
+   * Near-star luminance as the vertex shader outputs it at rest (the ship at the origin, so the wrap
+   * offset is 0): aColor × starFade × starDim, with the TS mirrors of the shader's fade and
+   * distance dimming. The far layer's shader outputs aColor as is (no fade, no dimming).
+   */
+  const nearAtRest = Array.from({ length: STAR_COUNT }, (_, i) => {
+    const [x, y, z] = [0, 1, 2].map((c) => wrapStarCoordinate(near.positions[i * 3 + c]!, 0, STAR_CUBE_SIZE)) as [number, number, number];
+    const fade = starFade(x, y, z, {
+      cubeSize: STAR_CUBE_SIZE,
+      edgeFadeWidth: STAR_EDGE_FADE_WIDTH,
+      nearFadeDistance: STAR_NEAR_FADE_DISTANCE,
+    });
+    return nearLuminance[i]! * fade * starDim(Math.hypot(x, y, z), STAR_DIM_DISTANCE);
+  });
+
+  it('the mean per-star luminance of the near dust is clearly below the far stars, before and after the shader dims it', () => {
+    const farMean = mean(farLuminance);
+    // In the colour attributes alone, the dust averages under 60% of the far stars (about 46%).
+    expect(mean(nearLuminance)).toBeLessThan(0.6 * farMean);
+    // As drawn in a static frame at rest, under a quarter (about 12%).
+    expect(mean(nearAtRest)).toBeLessThan(0.25 * farMean);
+    // Not just on average: at rest 99% of the dust is dimmer than the median far star.
+    expect(quantile(nearAtRest, 0.99)).toBeLessThan(quantile(farLuminance, 0.5));
+  });
+
+  it('the far stars have a bright tail that stands out from the dust', () => {
+    // A few far stars are bright: at least 5% at 0.8 or more (about 7%), and the brightest reach
+    // well past anything the dust shows at rest.
+    expect(farLuminance.filter((l) => l >= 0.8).length / FAR_STAR_COUNT).toBeGreaterThan(0.05);
+    expect(quantile(farLuminance, 0.99)).toBeGreaterThan(1.5 * Math.max(...nearAtRest));
+  });
+
+  it('the far stars have visible colour variance, while the dust is nearly neutral', () => {
+    const farWarmth = Array.from({ length: FAR_STAR_COUNT }, (_, i) => warmth(far.colors, i));
+    const nearWarmth = Array.from({ length: STAR_COUNT }, (_, i) => warmth(near.colors, i));
+    // Blue-white through orange: a clear spread, with both cool and warm stars well represented.
+    expect(standardDeviation(farWarmth)).toBeGreaterThan(0.2);
+    expect(farWarmth.filter((w) => w < -0.2).length / FAR_STAR_COUNT).toBeGreaterThan(0.1);
+    expect(farWarmth.filter((w) => w > 0.3).length / FAR_STAR_COUNT).toBeGreaterThan(0.1);
+    expect(farWarmth.filter((w) => w > 0.45).length / FAR_STAR_COUNT).toBeGreaterThan(0.05);
+    // The dust keeps only a trace of tint.
+    for (const w of nearWarmth) expect(Math.abs(w)).toBeLessThanOrEqual(0.1);
+    expect(standardDeviation(farWarmth)).toBeGreaterThan(3 * standardDeviation(nearWarmth));
   });
 });
 
@@ -152,7 +271,8 @@ describe('FarStarfield', () => {
     expect(geometry.getAttribute('aDirection').count).toBe(FAR_STAR_COUNT);
     expect(far.mesh.frustumCulled).toBe(false);
     // Nothing about the ship's position or velocity reaches the far layer, and the shader turns the
-    // directions by the view rotation only (mirrored by farStarViewDirection).
+    // directions by the view rotation only (mirrored by farStarViewDirection). There is no time
+    // uniform either: the far stars never twinkle, so reduced motion has nothing to turn off.
     expect(Object.keys(far.uniforms).sort()).toEqual(['uDepth', 'uDpr', 'uPixelSize', 'uViewport']);
     const vertex = far.mesh.material.vertexShader;
     expect(vertex).toContain('mat3(viewMatrix) * aDirection');

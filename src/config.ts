@@ -65,10 +65,12 @@ export const SHIP_MAX_TURN_RATE_RAD_PER_S = 0.03;
  *
  * The sky has two layers. The STAR_* settings are the near layer: fine dust and near stars in a
  * wrapped cube around the camera, which streak with speed and give the sense of motion. They are
- * kept small and mostly dim, with a few bright ones whose streaks carry the warp feel, so they read
- * as stars rushing past rather than as the sky. The FAR_STAR_*
- * settings below are the far layer: stars at effectively infinite distance, which only turn with the
- * camera, so they give a fixed backdrop that planets and nebulae are seen against.
+ * faint, small and nearly colourless dust, with an occasional brighter mote, and carry the speed
+ * mostly through the length of their streaks, so they read as dust rushing past rather than as the
+ * sky. The FAR_STAR_* settings below are the far layer: stars at effectively infinite distance,
+ * which only turn with the camera, so they give a fixed backdrop that planets and nebulae are seen
+ * against. The far stars are drawn brighter than the dust, with a subtle colour temperature, so they
+ * read as the sky (docs/PLAN.md section 9, Phase 4: sky legibility).
  */
 
 /** Number of near stars (one instanced quad each). */
@@ -87,9 +89,22 @@ export const STAR_BASE_SIZE_PX = 1.4;
 export const STAR_SIZE_MIN = 0.7;
 export const STAR_SIZE_MAX = 1.5;
 
-/** Range of the per-star brightness. Skewed toward the dim end, with a few bright stars. */
-export const STAR_BRIGHTNESS_MIN = 0.3;
-export const STAR_BRIGHTNESS_MAX = 1;
+/**
+ * Range of the dust brightness, skewed toward the dim end. It is well below the far stars'
+ * (FAR_STAR_BRIGHTNESS_*), and the shader dims it further with distance (STAR_DIM_DISTANCE).
+ */
+export const STAR_BRIGHTNESS_MIN = 0.1;
+export const STAR_BRIGHTNESS_MAX = 0.4;
+
+/**
+ * The brightest STAR_MOTE_FRACTION of the near stars are brighter motes, from STAR_BRIGHTNESS_MAX up
+ * to STAR_MOTE_BRIGHTNESS_MAX, so a few streaks still catch the eye at speed.
+ */
+export const STAR_MOTE_FRACTION = 0.04;
+export const STAR_MOTE_BRIGHTNESS_MAX = 0.75;
+
+/** How much of the star colour tints the dust keeps: 0 is grey, 1 the full tint. Mostly neutral. */
+export const STAR_TINT_STRENGTH = 0.3;
 
 /**
  * Fading, so wrapping never pops a star in or out. A star fades to 0 over the last
@@ -126,9 +141,14 @@ export const FAR_STAR_BASE_SIZE_PX = 1.4;
 export const FAR_STAR_SIZE_MIN = 0.7;
 export const FAR_STAR_SIZE_MAX = 2;
 
-/** Range of the far stars' brightness. Strongly skewed toward the dim end, with a few bright stars. */
-export const FAR_STAR_BRIGHTNESS_MIN = 0.2;
+/**
+ * Range of the far stars' brightness: min + (max - min) × u^FAR_STAR_BRIGHTNESS_EXPONENT for u
+ * uniform in [0, 1). Skewed toward the faint end, with a heavier bright tail than the dust, so a few
+ * stars stand out. Even the faintest is about as bright as typical dust before its distance dimming.
+ */
+export const FAR_STAR_BRIGHTNESS_MIN = 0.25;
 export const FAR_STAR_BRIGHTNESS_MAX = 1;
+export const FAR_STAR_BRIGHTNESS_EXPONENT = 2;
 
 /** Seed for the far star layout. */
 export const FAR_STAR_SEED = 0xfa7_5ea5;

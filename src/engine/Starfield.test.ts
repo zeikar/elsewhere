@@ -2,9 +2,14 @@ import { describe, expect, it } from 'vitest';
 import {
   DPR_CAP,
   STAR_BASE_SIZE_PX,
+  STAR_BRIGHTNESS_MAX,
+  STAR_BRIGHTNESS_MIN,
   STAR_COUNT,
   STAR_CUBE_SIZE,
+  STAR_DIM_DISTANCE,
   STAR_EDGE_FADE_WIDTH,
+  STAR_MOTE_BRIGHTNESS_MAX,
+  STAR_MOTE_FRACTION,
   STAR_NEAR_FADE_DISTANCE,
   STAR_SIZE_MAX,
   STAR_SIZE_MIN,
@@ -15,7 +20,9 @@ import {
   Starfield,
   computeWrapOffset,
   generateStars,
+  nearStarBrightness,
   resizeUniformValues,
+  starDim,
   starFade,
   wrapCoordinate,
   wrapStarCoordinate,
@@ -158,6 +165,48 @@ describe('resize uniforms', () => {
   });
 });
 
+describe('near star brightness', () => {
+  const params = DEFAULT_STARFIELD_OPTIONS;
+
+  it('is dust from the minimum to the maximum, then motes up to the mote maximum, increasing and continuous', () => {
+    expect(nearStarBrightness(0, params)).toBe(STAR_BRIGHTNESS_MIN);
+    expect(nearStarBrightness(1 - STAR_MOTE_FRACTION, params)).toBeCloseTo(STAR_BRIGHTNESS_MAX, 12);
+    expect(nearStarBrightness(1 - 1e-12, params)).toBeCloseTo(STAR_MOTE_BRIGHTNESS_MAX, 9);
+    let previous = -Infinity;
+    for (let i = 0; i < 10_000; i++) {
+      const b = nearStarBrightness(i / 10_000, params);
+      expect(b).toBeGreaterThanOrEqual(previous);
+      // No step bigger than the slope allows at this resolution (the motes' linear ramp is steepest).
+      if (i > 0) expect(b - previous).toBeLessThan(0.01);
+      previous = b;
+    }
+  });
+
+  it('is skewed toward the dim end of the dust range', () => {
+    // Quadratic: the median dust star is a quarter of the way up the dust range.
+    const median = nearStarBrightness(0.5 * (1 - STAR_MOTE_FRACTION), params);
+    expect(median).toBeCloseTo(STAR_BRIGHTNESS_MIN + 0.25 * (STAR_BRIGHTNESS_MAX - STAR_BRIGHTNESS_MIN), 12);
+  });
+});
+
+describe('starDim', () => {
+  it('is 1 at the camera, 1/2 at the dim distance and falls off with distance', () => {
+    expect(starDim(0, STAR_DIM_DISTANCE)).toBe(1);
+    expect(starDim(STAR_DIM_DISTANCE, STAR_DIM_DISTANCE)).toBe(0.5);
+    expect(starDim(2 * STAR_DIM_DISTANCE, STAR_DIM_DISTANCE)).toBeCloseTo(0.2, 12);
+    expect(starDim(0.5 * L, STAR_DIM_DISTANCE)).toBeLessThan(starDim(0.25 * L, STAR_DIM_DISTANCE));
+  });
+
+  it('mirrors the vertex shader', () => {
+    const starfield = new Starfield();
+    expect(starfield.mesh.material.vertexShader).toContain(
+      'float dim = 1.0 / (1.0 + (dist / uDimDistance) * (dist / uDimDistance));',
+    );
+    expect(starfield.mesh.material.vertexShader).toContain('vColor = aColor * fade * dim;');
+    starfield.dispose();
+  });
+});
+
 describe('Starfield', () => {
   it('builds one instanced quad per star with positions inside the cube', () => {
     const starfield = new Starfield();
@@ -187,6 +236,12 @@ describe('Starfield', () => {
     expect(Math.max(...sizes) - Math.min(...sizes)).toBeGreaterThan((STAR_SIZE_MAX - STAR_SIZE_MIN) / 2);
     const brightness = Array.from({ length: STAR_COUNT }, (_, i) => Math.max(a.colors[i * 3]!, a.colors[i * 3 + 1]!, a.colors[i * 3 + 2]!));
     expect(Math.max(...brightness) - Math.min(...brightness)).toBeGreaterThan(0.3);
+    expect(Math.min(...brightness)).toBeGreaterThanOrEqual(Math.fround(STAR_BRIGHTNESS_MIN) - 1e-6);
+    expect(Math.max(...brightness)).toBeLessThanOrEqual(Math.fround(STAR_MOTE_BRIGHTNESS_MAX) + 1e-6);
+    // Mostly dust: only about STAR_MOTE_FRACTION of the stars are motes brighter than the dust range.
+    const motes = brightness.filter((b) => b > STAR_BRIGHTNESS_MAX + 1e-6).length / STAR_COUNT;
+    expect(motes).toBeGreaterThan(0.5 * STAR_MOTE_FRACTION);
+    expect(motes).toBeLessThan(1.5 * STAR_MOTE_FRACTION);
   });
 
   it('update() passes the float64 wrap offset and the ship velocity without reallocating', () => {

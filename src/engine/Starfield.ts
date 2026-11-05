@@ -4,9 +4,10 @@
  *
  * The sky has two layers. This one is fine dust and near stars in a cube around the camera: they
  * stream past with the ship's travel and carry the sense of speed ("stars rush toward the camera",
- * docs/PLAN.md section 4), so they are kept small and mostly dim, with a few bright ones whose
- * streaks carry the warp feel. The other, FarStarfield.ts, is stars at infinity that only turn with
- * the camera: the fixed backdrop.
+ * docs/PLAN.md section 4). They are faint, small and nearly colourless dust, with an occasional
+ * brighter mote, so they read as dimmer than the far stars and carry the speed mostly through the
+ * length of their streaks. The other, FarStarfield.ts, is stars at infinity that only turn with the
+ * camera: the fixed backdrop, drawn brighter and with a subtle colour temperature.
  *
  * - Each star is an instance of one quad (InstancedBufferGeometry + ShaderMaterial); no Points or
  *   Lines. The vertex shader projects the head and the tail (head + ship velocity × streak time) and
@@ -60,11 +61,14 @@ import {
   STAR_GROWTH_DISTANCE,
   STAR_MAX_GROWTH,
   STAR_MAX_STREAK_PX,
+  STAR_MOTE_BRIGHTNESS_MAX,
+  STAR_MOTE_FRACTION,
   STAR_NEAR_FADE_DISTANCE,
   STAR_SEED,
   STAR_SIZE_MAX,
   STAR_SIZE_MIN,
   STAR_STREAK_TIME_SECONDS,
+  STAR_TINT_STRENGTH,
 } from '../config';
 import type { RenderSize } from './renderSize';
 import { mulberry32 } from './seed';
@@ -79,8 +83,14 @@ export interface StarfieldOptions {
   baseSizePx: number;
   sizeMin: number;
   sizeMax: number;
+  /** Dust brightness range (all but the motes), skewed toward brightnessMin. */
   brightnessMin: number;
   brightnessMax: number;
+  /** Fraction of the stars that are brighter motes, from brightnessMax up to moteBrightnessMax. */
+  moteFraction: number;
+  moteBrightnessMax: number;
+  /** How much of STAR_TINTS the stars keep: 0 is grey, 1 the full tint. */
+  tintStrength: number;
   edgeFadeWidth: number;
   nearFadeDistance: number;
   dimDistance: number;
@@ -101,6 +111,9 @@ export const DEFAULT_STARFIELD_OPTIONS: Readonly<StarfieldOptions> = {
   sizeMax: STAR_SIZE_MAX,
   brightnessMin: STAR_BRIGHTNESS_MIN,
   brightnessMax: STAR_BRIGHTNESS_MAX,
+  moteFraction: STAR_MOTE_FRACTION,
+  moteBrightnessMax: STAR_MOTE_BRIGHTNESS_MAX,
+  tintStrength: STAR_TINT_STRENGTH,
   edgeFadeWidth: STAR_EDGE_FADE_WIDTH,
   nearFadeDistance: STAR_NEAR_FADE_DISTANCE,
   dimDistance: STAR_DIM_DISTANCE,
@@ -170,6 +183,15 @@ export function starFade(x: number, y: number, z: number, params: Readonly<FadeP
   return edge * near;
 }
 
+/**
+ * TS mirror of the shader's distance dimming: brightness × 1 / (1 + (distance / dimDistance)²).
+ * The far stars have none.
+ */
+export function starDim(distance: number, dimDistance: number): number {
+  const r = distance / dimDistance;
+  return 1 / (1 + r * r);
+}
+
 /** Uniform values that depend on the render size. */
 export interface ResizeUniformValues {
   /** Applied DPR. */
@@ -199,7 +221,11 @@ export interface StarData {
   colors: Float32Array;
 }
 
-/** Star colour tints, from blue-white through white to warm (shared with the far layer). */
+/**
+ * Star colour tints, from blue-white through white to warm. The near layer keeps only
+ * STAR_TINT_STRENGTH of them, so the dust is nearly neutral; the far layer has its own, stronger
+ * tints (FAR_STAR_TINTS in FarStarfield.ts).
+ */
 export const STAR_TINTS: readonly (readonly [number, number, number])[] = [
   [0.72, 0.82, 1.0],
   [0.86, 0.91, 1.0],
@@ -208,9 +234,26 @@ export const STAR_TINTS: readonly (readonly [number, number, number])[] = [
   [1.0, 0.84, 0.68],
 ];
 
+export type BrightnessParams = Pick<StarfieldOptions, 'brightnessMin' | 'brightnessMax' | 'moteFraction' | 'moteBrightnessMax'>;
+
+/**
+ * A star's brightness from `u`, uniform in [0, 1): increasing and continuous. The first
+ * 1 - moteFraction of the range is dust, from brightnessMin to brightnessMax and skewed toward the
+ * dim end (quadratic); the rest is the brighter motes, linear from brightnessMax to moteBrightnessMax.
+ */
+export function nearStarBrightness(u: number, params: Readonly<BrightnessParams>): number {
+  const { brightnessMin, brightnessMax, moteFraction, moteBrightnessMax } = params;
+  const dust = 1 - moteFraction;
+  if (u < dust) {
+    const t = u / dust;
+    return brightnessMin + (brightnessMax - brightnessMin) * t * t;
+  }
+  return brightnessMax + (moteBrightnessMax - brightnessMax) * ((u - dust) / moteFraction);
+}
+
 /** Generates the fixed star layout: positions, size factors and colours. */
 export function generateStars(options: Readonly<StarfieldOptions>): StarData {
-  const { count, cubeSize, sizeMin, sizeMax, brightnessMin, brightnessMax } = options;
+  const { count, cubeSize, sizeMin, sizeMax, tintStrength } = options;
   const random = mulberry32(options.seed);
   const positions = new Float32Array(count * 3);
   const sizes = new Float32Array(count);
@@ -222,14 +265,11 @@ export function generateStars(options: Readonly<StarfieldOptions>): StarData {
     // Mostly small stars with a few larger ones.
     const s = random();
     sizes[i] = sizeMin + (sizeMax - sizeMin) * s * s * s;
-    // Mostly dim stars with a few bright ones.
-    const b = random();
-    const brightness = brightnessMin + (brightnessMax - brightnessMin) * b * b;
-    // Mostly white, with blue and warm tints toward the ends.
+    // Mostly faint dust, with a few brighter motes.
+    const brightness = nearStarBrightness(random(), options);
+    // Nearly neutral: a faint trace of the blue and warm tints.
     const tint = STAR_TINTS[Math.min(STAR_TINTS.length - 1, Math.floor(random() * STAR_TINTS.length))] ?? [1, 1, 1];
-    colors[i * 3] = tint[0] * brightness;
-    colors[i * 3 + 1] = tint[1] * brightness;
-    colors[i * 3 + 2] = tint[2] * brightness;
+    for (let c = 0; c < 3; c++) colors[i * 3 + c] = (1 + (tint[c]! - 1) * tintStrength) * brightness;
   }
   return { positions, sizes, colors };
 }
@@ -320,6 +360,7 @@ void main() {
   vLocal = vec2(along, across);
   vLength = len;
   vRadius = radius;
+  // Mirrored by starDim() in Starfield.ts.
   float dim = 1.0 / (1.0 + (dist / uDimDistance) * (dist / uDimDistance));
   vColor = aColor * fade * dim;
 }
