@@ -174,6 +174,40 @@ export const DEFAULT_ENCOUNTER_PROFILE: Readonly<EncounterProfile> = {
   despawnDistance: ENCOUNTER_DESPAWN_DISTANCE,
 };
 
+/**
+ * Half-angle, in radians, of the narrowest cone around the camera's forward axis that contains the
+ * whole view of a camera with vertical field of view `fovDeg` (degrees) at aspect ratio `aspect`
+ * (width / height): the angle from the forward axis to the view's corners. The cone does not depend
+ * on the camera's roll, and contains the view at every narrower aspect ratio too, since the vertical
+ * field of view is fixed and a narrower screen only shows less at the sides. At `aspect` = 21:9
+ * (config.ts, VIEW_WIDEST_ASPECT) it also contains the view at every wider aspect ratio, where the
+ * engine narrows the vertical field of view instead (`cameraFovDeg` in renderSize.ts).
+ */
+export function viewConeHalfAngle(fovDeg: number, aspect: number): number {
+  const tanHalf = Math.tan((fovDeg * Math.PI) / 360);
+  return Math.atan(tanHalf * Math.hypot(1, aspect));
+}
+
+/** Angle between `a` and `b`, in radians (neither need be normalised; 0 if either is zero). */
+export function angleBetween(a: Readonly<Vec3>, b: Readonly<Vec3>): number {
+  const cx = a.y * b.z - a.z * b.y;
+  const cy = a.z * b.x - a.x * b.z;
+  const cz = a.x * b.y - a.y * b.x;
+  return Math.atan2(Math.hypot(cx, cy, cz), a.x * b.x + a.y * b.y + a.z * b.z);
+}
+
+/**
+ * How far, in radians, a sphere of radius `radius` centred at `offset` from the camera lies outside
+ * the cone of half-angle `halfAngle` around `forward`: the angle between `forward` and the centre,
+ * minus the sphere's angular radius, minus `halfAngle`. Positive means no part of the sphere is in the
+ * cone; zero or negative means some part may be. A camera inside the sphere gives -π.
+ */
+export function sphereViewMargin(offset: Readonly<Vec3>, forward: Readonly<Vec3>, radius: number, halfAngle: number): number {
+  const distance = Math.hypot(offset.x, offset.y, offset.z);
+  if (!(distance > radius)) return -Math.PI;
+  return angleBetween(forward, offset) - Math.asin(radius / distance) - halfAngle;
+}
+
 /** Smoothstep: 0 at or below `edge0`, 1 at or beyond `edge1`, C¹ in between. `edge0 > edge1` is allowed. */
 export function smoothstep(edge0: number, edge1: number, x: number): number {
   const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)));

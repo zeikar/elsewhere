@@ -355,7 +355,7 @@ test('after the ship translates with no rotation, far-star pixels stay put while
   const viewport = page.viewportSize()!;
   const spiralCentre = { x: ((spiral.ndc.x + 1) / 2) * viewport.width, y: ((1 - spiral.ndc.y) / 2) * viewport.height };
   // Its quad's half-height (vertical field of view in the camera's projection, as the engine applies it).
-  const focal = viewport.height / 2 / Math.tan((far.snaps[0].cameraFovDeg / 2) * (Math.PI / 180));
+  const focal = viewport.height / 2 / Math.tan((far.snaps[0].cameraFov / 2) * (Math.PI / 180));
   const spiralRadius = Math.tan(((spiral.sizeDeg / 2) * Math.PI) / 180) * focal;
   const spiralLit = await litWithin(page, far.shots[0], spiralCentre, spiralRadius);
   // Far more lit pixels than the far stars alone would give such a small patch of sky (about 2 at

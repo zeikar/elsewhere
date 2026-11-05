@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import type { E2EHookSnapshot } from '../src/e2eHook';
-import { DT_CAP_SECONDS } from '../src/config';
+import { CAMERA_FOV_DEG, DT_CAP_SECONDS, VIEW_WIDEST_ASPECT } from '../src/config';
 import { appUrl } from './app';
 
 /** Collects console errors and uncaught page errors from the moment it is called. */
@@ -74,6 +74,7 @@ test.describe('at deviceScaleFactor 2', () => {
     const snap = await snapshot(page);
     expect(snap.dpr).toBe(2);
     expect(snap.cameraAspect).toBeCloseTo(initial.innerWidth / initial.innerHeight, 6);
+    expect(snap.cameraFov).toBe(CAMERA_FOV_DEG);
 
     await page.setViewportSize({ width: 800, height: 600 });
     await expect
@@ -87,6 +88,16 @@ test.describe('at deviceScaleFactor 2', () => {
     const resized = await canvasSize(page);
     expect(resized.cssWidth).toBe(800);
     expect(resized.cssHeight).toBe(600);
+    expect((await snapshot(page)).cameraFov).toBe(CAMERA_FOV_DEG);
+
+    // 32:9, wider than the widest supported 21:9: the vertical field of view narrows so the
+    // horizontal one stays at the 21:9 one (config.ts, VIEW_WIDEST_ASPECT).
+    await page.setViewportSize({ width: 1280, height: 360 });
+    await expect.poll(async () => (await snapshot(page)).cameraAspect).toBeCloseTo(32 / 9, 6);
+    const wide = await snapshot(page);
+    const tanHalf = (deg: number): number => Math.tan((deg * Math.PI) / 360);
+    expect(wide.cameraFov).toBeLessThan(CAMERA_FOV_DEG);
+    expect(tanHalf(wide.cameraFov) * wide.cameraAspect).toBeCloseTo(tanHalf(CAMERA_FOV_DEG) * VIEW_WIDEST_ASPECT, 6);
     expect(errors).toEqual([]);
   });
 });

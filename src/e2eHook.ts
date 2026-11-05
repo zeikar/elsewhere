@@ -84,8 +84,8 @@ export interface E2EHookSnapshot {
   dpr: number;
   frames: number;
   cameraAspect: number;
-  /** The camera's vertical field of view, in degrees. */
-  cameraFovDeg: number;
+  /** The camera's live vertical field of view, in degrees. */
+  cameraFov: number;
   ship: {
     time: number;
     speed: number;
@@ -369,7 +369,7 @@ export function installE2EHook(engine: Engine): void {
         dpr: engine.getAppliedDpr(),
         frames: engine.getFrameCount(),
         cameraAspect: engine.getCameraAspect(),
-        cameraFovDeg: engine.getCamera().fov,
+        cameraFov: engine.getCameraFov(),
         ship: {
           time: ship.time,
           speed: ship.speed,
