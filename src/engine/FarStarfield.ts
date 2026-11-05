@@ -14,6 +14,10 @@
  *   `farStarViewDirection` is its TypeScript mirror.
  * - Stars are always round dots of a fixed pixel size (no streaks, no growth, no distance dimming),
  *   multiplied by the applied DPR (a uniform, updated on resize).
+ * - They are brighter than the near dust, with a heavier bright tail so a few stand out, and a subtle
+ *   colour temperature (blue-white, white, yellow-white, yellow, orange: FAR_STAR_TINTS), so they
+ *   read as the sky. The brightness never changes over time (no twinkle), so there is nothing to
+ *   turn off under reduced motion.
  * - Nothing is uploaded or allocated per frame; there is no per-frame update at all.
  * - Render order (the contract in Starfield.ts): the far layer draws first of everything
  *   (FAR_STARFIELD_RENDER_ORDER), additively, just inside the far plane, depth-tested and without
@@ -32,6 +36,7 @@ import {
 } from 'three';
 import {
   FAR_STAR_BASE_SIZE_PX,
+  FAR_STAR_BRIGHTNESS_EXPONENT,
   FAR_STAR_BRIGHTNESS_MAX,
   FAR_STAR_BRIGHTNESS_MIN,
   FAR_STAR_COUNT,
@@ -42,7 +47,7 @@ import {
 import type { RenderSize } from './renderSize';
 import { mulberry32 } from './seed';
 import type { Vec3 } from './Ship';
-import { STARFIELD_RENDER_ORDER, STAR_TINTS, resizeUniformValues } from './Starfield';
+import { STARFIELD_RENDER_ORDER, resizeUniformValues } from './Starfield';
 
 export interface FarStarfieldOptions {
   count: number;
@@ -50,8 +55,10 @@ export interface FarStarfieldOptions {
   baseSizePx: number;
   sizeMin: number;
   sizeMax: number;
+  /** Brightness = brightnessMin + (brightnessMax - brightnessMin) × u^brightnessExponent, u uniform. */
   brightnessMin: number;
   brightnessMax: number;
+  brightnessExponent: number;
   seed: number;
 }
 
@@ -62,6 +69,7 @@ export const DEFAULT_FAR_STARFIELD_OPTIONS: Readonly<FarStarfieldOptions> = {
   sizeMax: FAR_STAR_SIZE_MAX,
   brightnessMin: FAR_STAR_BRIGHTNESS_MIN,
   brightnessMax: FAR_STAR_BRIGHTNESS_MAX,
+  brightnessExponent: FAR_STAR_BRIGHTNESS_EXPONENT,
   seed: FAR_STAR_SEED,
 };
 
@@ -82,6 +90,35 @@ export const FAR_STAR_NDC_DEPTH = 0.999999;
 // Pure CPU-side maths
 // ---------------------------------------------------------------------------------------------
 
+/** A far-star colour tint and the share of the stars that get it. */
+export interface FarStarTint {
+  rgb: readonly [number, number, number];
+  weight: number;
+}
+
+/**
+ * The far stars' colour temperatures, coolest first, with their shares (the weights sum to 1).
+ * Subtle, but stronger than the near dust's: every tint keeps its brightest channel at 1, so it
+ * changes the hue and not the brightness.
+ */
+export const FAR_STAR_TINTS: readonly FarStarTint[] = [
+  { rgb: [0.7, 0.8, 1.0], weight: 0.2 }, // blue-white
+  { rgb: [1.0, 1.0, 1.0], weight: 0.3 }, // white
+  { rgb: [1.0, 0.95, 0.82], weight: 0.2 }, // yellow-white
+  { rgb: [1.0, 0.87, 0.62], weight: 0.17 }, // yellow
+  { rgb: [1.0, 0.74, 0.48], weight: 0.13 }, // orange
+];
+
+/** The tint for `u`, uniform in [0, 1): each tint covers a share of [0, 1) equal to its weight. */
+export function farStarTint(u: number): readonly [number, number, number] {
+  let acc = 0;
+  for (const tint of FAR_STAR_TINTS) {
+    acc += tint.weight;
+    if (u < acc) return tint.rgb;
+  }
+  return FAR_STAR_TINTS[FAR_STAR_TINTS.length - 1]!.rgb;
+}
+
 export interface FarStarData {
   /** Unit direction xyz per star. */
   directions: Float32Array;
@@ -93,7 +130,7 @@ export interface FarStarData {
 
 /** Generates the fixed far-star layout: directions uniform on the unit sphere, sizes and colours. */
 export function generateFarStars(options: Readonly<FarStarfieldOptions>): FarStarData {
-  const { count, sizeMin, sizeMax, brightnessMin, brightnessMax } = options;
+  const { count, sizeMin, sizeMax, brightnessMin, brightnessMax, brightnessExponent } = options;
   const random = mulberry32(options.seed);
   const directions = new Float32Array(count * 3);
   const sizes = new Float32Array(count);
@@ -109,10 +146,9 @@ export function generateFarStars(options: Readonly<FarStarfieldOptions>): FarSta
     // Mostly small stars with a few larger ones.
     const s = random();
     sizes[i] = sizeMin + (sizeMax - sizeMin) * s * s * s;
-    // Mostly faint stars with a few bright ones.
-    const b = random();
-    const brightness = brightnessMin + (brightnessMax - brightnessMin) * b * b * b;
-    const tint = STAR_TINTS[Math.min(STAR_TINTS.length - 1, Math.floor(random() * STAR_TINTS.length))] ?? [1, 1, 1];
+    // Mostly faint stars with a bright tail.
+    const brightness = brightnessMin + (brightnessMax - brightnessMin) * random() ** brightnessExponent;
+    const tint = farStarTint(random());
     colors[i * 3] = tint[0] * brightness;
     colors[i * 3 + 1] = tint[1] * brightness;
     colors[i * 3 + 2] = tint[2] * brightness;
