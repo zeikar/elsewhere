@@ -49,6 +49,7 @@ import { encounterOffset, encounterRemaining, planEncounter, type Encounter } fr
 import { EncounterView, encounterCometParams } from './EncounterView';
 import { ATMOSPHERE_RENDER_ORDER, DEFAULT_PLANET_FRAME, SURFACE_RENDER_ORDER, planetProgramMaterials } from './Planet';
 import { cameraFovDeg, cameraFrustum } from './renderSize';
+import { MIN_RELATIVE_RADIUS, irregularBodyGeometry, irregularBodyRadii } from './irregularBody';
 import { hash, mulberry32 } from './seed';
 import { DEFAULT_SHIP_PARAMS, type Vec3 } from './Ship';
 
@@ -126,6 +127,33 @@ describe('cometParams', () => {
     expect(new Set(SEEDED.map((p) => p.family))).toEqual(new Set(COMET_FAMILY_NAMES));
     expect(new Set(SEEDED.map((p) => p.radius)).size).toBe(SEEDED.length);
   });
+
+  it('never folds the nucleus through its centre: every vertex of 300 seeded nuclei keeps at least the soft floor over the farthest radius, with every normal facing out', () => {
+    for (const [i, p] of SEEDED.slice(0, 300).entries()) {
+      const label = `seed ${i}`;
+      const { shape } = p.nucleus;
+      const [a, b, c] = shape.axes;
+      const before = irregularBodyRadii(shape);
+      const farthest = Math.max(...before);
+      const geometry = irregularBodyGeometry(shape);
+      const position = geometry.getAttribute('position');
+      const normal = geometry.getAttribute('normal');
+      expect(position.count, label).toBe(before.length);
+      let worst = Infinity;
+      let inward = 0;
+      for (let v = 0; v < position.count; v++) {
+        const q = { x: position.getX(v), y: position.getY(v), z: position.getZ(v) };
+        const r = len(q);
+        // The ellipsoid's radius along this vertex's own direction (the longest axis is 1).
+        const ellipsoid = 1 / Math.hypot(q.x / r / a, q.y / r / b, q.z / r / c);
+        worst = Math.min(worst, r / ((ellipsoid * MIN_RELATIVE_RADIUS) / farthest));
+        if (normal.getX(v) * q.x + normal.getY(v) * q.y + normal.getZ(v) * q.z <= 0) inward++;
+      }
+      expect(worst, label).toBeGreaterThanOrEqual(1 - 1e-6);
+      expect(inward, label).toBe(0);
+      geometry.dispose();
+    }
+  }, 30_000);
 
   it('passes the nucleus at the minimum pass distance or a little more, well beyond the coma', () => {
     const closest = SEEDED.map((p) => p.radius * p.passFactor);
@@ -397,11 +425,14 @@ describe('comet flybys never whip by', () => {
       // Measured at the default and top levels: at most about 3.1°/s for the nucleus (passed at the
       // minimum speed, at least 110 off) and 4.3°/s for a tail (the dust tail's far end, which the ship
       // passes about 430 short of the closest approach, still slowing down, but about 500 off the
-      // path); about 2.1°/s and 1.5°/s at the slowest level. COMET_SLOWDOWN_DISTANCE is what keeps
-      // the tails under the guard: with a planet's (520) they swept past at up to 7.5°/s.
-      expect(worstNucleus).toBeLessThanOrEqual(BEARING_GUARD_DEG_PER_S);
-      expect(worstTail).toBeLessThanOrEqual(BEARING_GUARD_DEG_PER_S);
+      // path); about 2.1°/s and 1.5°/s at the slowest level. So a tail sweeps past faster than the
+      // nucleus; COMET_SLOWDOWN_DISTANCE is what keeps it under the guard: with a planet's (520) the
+      // tails swept past at up to 7.5°/s.
+      const label = JSON.stringify({ worstNucleus, worstTail });
+      expect(worstNucleus, label).toBeLessThanOrEqual(BEARING_GUARD_DEG_PER_S);
+      expect(worstTail, label).toBeLessThanOrEqual(BEARING_GUARD_DEG_PER_S);
       if (level >= SHIP_DEFAULT_SPEED_LEVEL) {
+        expect(worstTail, label).toBeGreaterThan(worstNucleus);
         expect(speedAtClosest).toBeGreaterThanOrEqual(COMET_MIN_SPEED);
         expect(speedAtClosest).toBeLessThan(COMET_MIN_SPEED * 1.5);
       }

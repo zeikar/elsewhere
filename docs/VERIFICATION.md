@@ -64,6 +64,7 @@ Each automated check is written as `file` — `test title`, using the title as i
 - `src/engine/Comet.test.ts` — `for 2,000 seeded comets the path passes the nucleus at least the minimum pass distance off, outside the coma, and never meets a tail`
 - `src/engine/Comet.test.ts` — `the ship, flown frame by frame at every level, keeps the planned distance from the nucleus and never enters the coma or a tail: 30 comet encounters`
 - `src/engine/Comet.test.ts` — `at speed level $level ($cruiseSpeed u/s) neither the nucleus nor any point of a tail of 2,000 seeded comets sweeps past faster in angle than the planet guard (5.1°/s)`
+- `src/engine/Comet.test.ts` — `never folds the nucleus through its centre: every vertex of 300 seeded nuclei keeps at least the soft floor over the farthest radius, with every normal facing out`
 - `src/engine/Comet.test.ts` — `over 40 seeded comets at 4:3, 16:9 and 21:9, from the spawn to the end of the encounter, the glow never fills the view`
 - `e2e/comet.spec.ts` — `a forced comet encounter draws its coma and tails, runs the full cycle, compiles nothing and frees its GPU resources`
 - `src/engine/EncounterView.test.ts` — `a ringed planet is drawn with its ring turned toward its encounter, and a ring that does not fit the plan is not drawn`

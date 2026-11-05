@@ -928,7 +928,8 @@ export const ASTEROID_DETAIL = { main: 8, satellite: 3 } as const;
  * pixel of the view, is at most about 0.19 (COMET_MAX_FILL bounds it): each piece covers a pixel
  * about once. Outside the coma's core the glow adds at most the tails' peak brightness (0.32 or less,
  * linear) to a pixel, so the stars and the sky stay visible through it; in the browser
- * (e2e/comet.spec.ts) about 0.03% of the view, the coma's core, is washed out.
+ * (e2e/comet.spec.ts, 640×360, 250 short of the closest approach) about 0.06% of the view is washed
+ * out, against 0.04% for the stars alone at cruise: the comet adds about 0.02%, the coma's core.
  */
 
 /** Share of all encounters that are comets, in the long run (see the section comment). */
@@ -964,11 +965,17 @@ export const COMET_MIN_PASS_DISTANCE = 110;
 export const COMET_PASS_EXTRA = 0.5;
 
 /**
- * Comet speed profile: a planet's (see ENCOUNTER_MIN_SPEED), so the ship slows to the same minimum
- * speed and the nucleus, at least COMET_MIN_PASS_DISTANCE off, sweeps past at under 5°/s, inside the
- * 5.1°/s guard at every level (checked in Comet.test.ts); so does every point of the tails, which lie
- * farther from the path. Like the other kinds, a comet encounter is flown from the arrival speed at
- * the faster levels.
+ * Comet speed profile: the planets' minimum speed, floor, band and speed-up distance (see
+ * ENCOUNTER_MIN_SPEED), but a longer slowdown, COMET_SLOWDOWN_DISTANCE = 1,000 against the planets'
+ * 520 (ENCOUNTER_SLOWDOWN_DISTANCE). That is what keeps the tails under the 5.1°/s bearing-rate guard:
+ * the ship passes the tails' far parts several hundred units short of the closest approach, and with
+ * the planets' slowdown it would still be fast there (the tails measured up to 7.5°/s; no aim of the
+ * comet's sun fixes that). Slowing from 1,000 out, the nucleus, at least COMET_MIN_PASS_DISTANCE off,
+ * peaks at about 3.1°/s and the tails at about 4.3°/s at the default and top levels (Comet.test.ts).
+ * The cost is a longer approach, a deliberate choice for a passively watched view: about 72 s from the
+ * spawn to the closest approach at the default level and above (a planet takes about 54 s), 180 s at
+ * the slowest. Like the other kinds, a comet encounter is flown from the arrival speed at the faster
+ * levels.
  */
 export const COMET_MIN_SPEED = 6;
 /** Lowest comet minimum speed at any speed level (see ENCOUNTER_MIN_SPEED_FLOOR). */
@@ -990,9 +997,10 @@ export const COMET_DESPAWN_DISTANCE = 1200;
  * axes): `ahead` along the planned direction, `inward` from the comet toward the path, `up`. The tails
  * point the opposite way: mostly away from the path, back along it and a little down, about 66° off
  * the line of sight from the spawn, so they show at length on the approach. Mostly sideways, so a
- * tail's far part, which the ship passes while it is still slowing down, is far enough off the path
- * that it never sweeps past faster in angle than the nucleus does (Comet.test.ts). Normalised when
- * applied.
+ * tail's far part, which the ship passes while it is still slowing down, stays well off the path. It
+ * still sweeps past faster in angle than the nucleus does (measured up to about 4.3°/s against
+ * 3.1°/s), and aiming the sun otherwise barely changes that: the longer comet slowdown
+ * (COMET_SLOWDOWN_DISTANCE) is what keeps it under the guard (Comet.test.ts). Normalised when applied.
  */
 export const COMET_ENCOUNTER_LIGHT = { ahead: 0.35, inward: 0.75, up: 0.3 } as const;
 
