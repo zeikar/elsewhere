@@ -308,7 +308,8 @@ void main() {
   float disc = mix(exp(-5.0 * r * r), exp(-3.5 * r), arms) * edge;
   // Two logarithmic arms (crests where 2 (theta + winding ln r) + phase = 0 mod 2 pi), brightening
   // the disc along them and darkening it between, from just outside the core.
-  float theta = atan(vLocal.y, vLocal.x);
+  // atan(0, 0) is undefined in GLSL ES; the small x offset keeps the centre pixel defined.
+  float theta = atan(vLocal.y, vLocal.x + 1e-6);
   float wave = 0.5 + 0.5 * cos(2.0 * (theta + vShape.y * log(max(r, 0.02))) + vShape.z);
   float armLight = mix(1.0, 0.2 + 1.6 * wave * wave, arms * smoothstep(0.05, 0.3, r));
   gl_FragColor = vec4(vCoreColor * core + vDiscColor * disc * armLight, 1.0);

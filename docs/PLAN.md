@@ -174,6 +174,7 @@ src/
 │   ├── Ship.ts        # Travel position (float64), speed, heading (pure update)
 │   ├── Starfield.ts   # Instanced quads, shaders, wrapping (near layer)
 │   ├── FarStarfield.ts # Far stars at infinity (camera rotation only)
+│   ├── Galaxies.ts    # Distant galaxies on the far layer (trip-seeded, rotation only)
 │   ├── Autopilot.ts   # Phase 2: travel state machine
 │   ├── Planet.ts      # Phase 2
 │   └── Nebula.ts      # Phase 3
