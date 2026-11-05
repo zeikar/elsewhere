@@ -62,7 +62,15 @@ npm run test:e2e    # end-to-end tests (Playwright, Chromium)
 npm run typecheck   # type check the app and the e2e suite
 ```
 
-Before the first e2e run, install the browser with `npx playwright install chromium`. The e2e suite builds the site in e2e mode into `dist-e2e/` and runs against `vite preview`. In that build only, `?encounterInterval=<seconds>` overrides the mean encounter interval (each cruise is still seeded-jittered around it) so encounters come quickly, and `?encounterKind=planet`, `?encounterKind=nebula`, `?encounterKind=asteroid` or `?encounterKind=comet` makes every encounter that kind (`npm run check:hook` checks that production reads none of these). The specs load the app through `appUrl` (e2e/app.ts), which pins the test default trip seed `?seed=91b3a5ba` (`ENCOUNTER_BASE_SEED`), so the suite stays deterministic. The unit tests default to the same seed.
+Before the first e2e run, install the browser with `npx playwright install chromium`. The e2e suite builds the site in e2e mode into `dist-e2e/` and runs against `vite preview`. In that build only, `?encounterInterval=<seconds>` overrides the mean encounter interval (each cruise is still seeded-jittered around it) so encounters come quickly, and `?encounterKind=planet`, `?encounterKind=nebula`, `?encounterKind=asteroid` or `?encounterKind=comet` makes every encounter that kind, `?frameRateCap=<fps>` replaces the 60 FPS frame-rate cap (`0` for none), `?gpuTiming=1` times every frame on the GPU where the browser has `EXT_disjoint_timer_query_webgl2` (reported by the test hook), and `?perfOverlay=1` (which implies `?gpuTiming=1`) shows a small readout of the frame rate, the frame and GPU times and the GPU cost estimate in the top-left corner (`npm run check:hook` checks that production reads none of these). The specs load the app through `appUrl` (e2e/app.ts), which pins the test default trip seed `?seed=91b3a5ba` (`ENCOUNTER_BASE_SEED`), so the suite stays deterministic. The unit tests default to the same seed.
+
+To measure the GPU cost on real hardware (a Mac, say), build the e2e site and serve it:
+
+```sh
+npm run build:e2e && npx vite preview --outDir dist-e2e
+```
+
+Then open <http://localhost:4173/elsewhere/?perfOverlay=1&encounterKind=planet&encounterInterval=5> in the browser to measure (Chrome has the GPU timer; Safari does not, and the overlay then shows only the estimate). Every encounter is then a planet, after about 5 s of cruise. Note the overlay's `gpu` line (GPU ms per frame, and GPU-seconds per second) during cruise and again while the planet is at its closest, largest on screen, and compare the two, before and after a change (build and serve each version the same way).
 
 A long-run soak travels through many planet, nebula, asteroid and comet encounters at a short interval and fails if the JS heap (after a forced GC) grows, if the frame time late in the run is worse than early on, or if the renderer's resource counts drift:
 

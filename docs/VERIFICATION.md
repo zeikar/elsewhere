@@ -102,7 +102,7 @@ Each automated check is written as `file` — `test title`, using the title as i
 - `src/engine/Nebula.test.ts` — `is 0 up to the minimum distance, 1 from the end of the fade, monotonic and continuous`
 - `src/engine/Nebula.test.ts` — `every layer fades out continuously and is 0 before the camera is within the minimum of its plane (dt $dt, level $level)`
 - `src/engine/EncounterView.test.ts` — `keeps a new planet hidden until its compile settles, then follows the fade`
-- `e2e/planet.spec.ts` — `a baked planet looks as the procedural one does, apart from filtering, framed as usual and close up`
+- `e2e/planet.spec.ts` — `a baked planet looks as the procedural one does over its disc, apart from filtering, framed as usual and close up`
 - `e2e/gpuCost.spec.ts` — `a planet bakes its surface while it is still a dot, from warmed programs, and frees the cube maps with it`
 - `src/engine/EncounterView.test.ts` — `keeps a new nebula hidden until its compile settles`
 - `src/engine/Autopilot.test.ts` — `planets at level %i, k from 1.6 to 6, elevations from -0.6 to 0.6, at every aspect: while on screen the ship is never faster than on main, and it is never on screen again after the encounter ends`

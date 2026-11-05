@@ -19,8 +19,9 @@
  *   gas giants. Shader programs depend only on the type, so all planets of one type share them.
  * - Surface bake (issue #65; `PlanetOptions.bake`, `SurfaceBake`, PlanetBake.ts): what of the look
  *   depends only on the point of the surface is rendered once into cube maps, and the planet is then
- *   drawn from them (`bakedSurfaceFragmentShader`), with only the seas and the lighting done per
- *   pixel; until then it is drawn procedurally, with the same look. See the shaders' comment below.
+ *   drawn from them (`bakedSurfaceFragmentShader`), with only the bump, the seas and the lighting
+ *   done per pixel; until then it is drawn procedurally, with the same look. See the shaders'
+ *   comment below.
  * - The atmosphere is a slightly larger shell drawn additively. Its glow is computed analytically
  *   from how close each view ray passes to the planet, so it brightens toward the limb and fades out
  *   at the shell's edge, and it is brighter on the day side. It is drawn on a camera-facing annulus
@@ -70,6 +71,7 @@ import {
   NoBlending,
   NormalBlending,
   Quaternion,
+  RedFormat,
   RingGeometry,
   SRGBColorSpace,
   ShaderMaterial,
@@ -714,12 +716,11 @@ void main() {
  *   program, and a planet draws with it until its bake is done.
  * - The bake (`bakeFragmentShader`) renders the part of the look that depends only on the point of
  *   the surface into a cube map once per planet (PlanetBake.ts): for a gas giant its colour; for a
- *   rocky world the land colour and the ice cover (one cube map), and the bump vector and the terrain
- *   height (another).
+ *   rocky world the land colour and the ice cover (one cube map), and the terrain height (another).
  * - The baked surface (`bakedSurfaceFragmentShader`) samples those cube maps at the fragment's
  *   object-space direction (so they turn with the planet's spin) and does only what depends on the
- *   view: the seas from the height (antialiased over the pixel, so coastlines stay sharp however
- *   close), and the lighting.
+ *   view: the bump from the height's slope, the seas from the height (antialiased over the pixel, so
+ *   coastlines stay sharp however close), and the lighting.
  */
 
 /** Uniforms and varyings shared by the procedural, baked and bake surface shaders. */
@@ -929,16 +930,21 @@ vec3 rockySurface(vec3 land, float ice, float h, float fw, out float sea) {
   vec3 albedo = mix(land, seaColor, sea);
   return mix(albedo, vec3(0.85, 0.89, 0.94), ice);
 }
+#endif
+`;
 
+/**
+ * The lighting shared by the procedural and baked surfaces (it depends on the view and the light),
+ * and the bump that leans a rocky world's shading normal.
+ */
+const surfaceShadeChunk = /* glsl */ `
+#ifndef PLANET_GAS
 // The bump vector: how far the shading normal leans (object space) for a terrain gradient, on land.
 vec3 bumpVector(vec3 gradient) {
   return 0.045 * uRelief * gradient;
 }
 #endif
-`;
 
-/** The lighting shared by the procedural and baked surfaces (it depends on the view and the light). */
-const surfaceShadeChunk = /* glsl */ `
 // Lighting: Lambert with a narrow, soft terminator. The day mask uses the geometric normal ng, so
 // bumps (in the shading normal n) never light up the night side.
 vec3 shade(vec3 albedo, vec3 n, vec3 ng, vec3 v, vec3 l, float specular) {
@@ -1029,10 +1035,25 @@ void main() {
 
 /**
  * The baked surface: samples the planet's cube maps (PlanetBake.ts) at the object-space direction,
- * so they turn with the planet, and does the seas and the lighting. `uAlbedoMap` holds the gas
- * giant's colour, or the rocky world's land colour (rgb) and ice cover (a); `uReliefMap` (rocky only)
- * the bump vector (rgb, object space) and the terrain height (a). The albedo map is sRGB-encoded,
- * so it is filtered, and read, in linear colour.
+ * so they turn with the planet, and does the bump, the seas and the lighting. `uAlbedoMap` holds the
+ * gas giant's colour, or the rocky world's land colour (rgb) and ice cover (a); `uReliefMap` (rocky
+ * only) the terrain height (r). The albedo map is sRGB-encoded, so it is filtered, and read, in
+ * linear colour.
+ *
+ * The bump: the height's slope along the surface, from central differences of four more height
+ * taps, half a step east and west, north and south of the fragment's direction. The step is a texel
+ * of the mip level the fragment reads (its footprint on the unit sphere, or a level-0 texel when
+ * magnified), so the slope is of the height as filtered there: the finest relief at the closest
+ * pass, and the broad shapes when the planet is small (as the procedural surface's footprint filter
+ * does). The taps read that step's mip level (`textureLod`: trilinear, without the anisotropic
+ * filtering of the centre tap, which they do not need as the step is the whole footprint), so the
+ * east/north basis turning near the poles cannot change their mip level, and they can be skipped
+ * over seas and ice, which are flat. Being centred, the difference does not shift the bump against
+ * the colour. Against the analytic gradient it weakens the finest relief (about 6 texels a period)
+ * by about 5% (sin x / x at x = π/6); that is not compensated: scaling the bump by 1.08 (or 0.95)
+ * made the baked surface differ more from the procedural one, not less (e2e/planet.spec.ts compares
+ * the two). Six texture reads a fragment in all: cheap on a GPU's texture units, though a software
+ * renderer (SwiftShader) pays for each.
  */
 const bakedSurfaceFragmentShader = /* glsl */ `
 ${surfaceUniformsChunk}
@@ -1053,18 +1074,35 @@ void main() {
   vec4 look = textureCube(uAlbedoMap, p);
   vec3 albedo = look.rgb;
 #ifndef PLANET_GAS
-  vec4 relief = textureCube(uReliefMap, p);
-  float h = relief.a;
+  float h = textureCube(uReliefMap, p).r;
   float ice = look.a;
+  // The pixel's footprint on the unit sphere (outside the branch below, as derivatives must be).
+  float footprint = max(length(dFdx(p)), length(dFdy(p)));
   // The seas from the height, antialiased over this pixel, as the procedural surface does.
   float fw = max(fwidth(h), 1e-4);
   float sea = 1.0 - smoothstep(uSeaLevel - fw, uSeaLevel + fw, h);
   float depth = clamp((uSeaLevel - h) / 0.3, 0.0, 1.0);
   albedo = mix(albedo, mix(uColor0 * 1.3, uColor0 * 0.55, depth), sea);
   albedo = mix(albedo, vec3(0.85, 0.89, 0.94), ice);
-  // Seas and ice are flat.
-  vec3 bump = relief.rgb * ((1.0 - sea) * (1.0 - ice));
-  n = normalize(ng - (bump.x * vRotX + bump.y * vRotY + bump.z * vRotZ));
+  // The bump (see above), on land only: seas and ice are flat, so their pixels skip the taps. The
+  // step is a level-0 texel (2/size × the major axis component², a cube face texel's angle there)
+  // or the pixel's footprint, whichever is larger, and the taps read the mip level of that step.
+  float land = (1.0 - sea) * (1.0 - ice);
+  if (land > 0.0) {
+    vec3 east = abs(p.y) < 0.9999 ? normalize(cross(vec3(0.0, 1.0, 0.0), p)) : vec3(1.0, 0.0, 0.0);
+    vec3 north = cross(p, east);
+    vec3 a = abs(p);
+    float major = max(a.x, max(a.y, a.z));
+    float texel = 2.0 / float(textureSize(uReliefMap, 0).x) * major * major;
+    float stepSize = max(texel, footprint);
+    float lod = log2(stepSize / texel);
+    vec3 de = 0.5 * stepSize * east;
+    vec3 dn = 0.5 * stepSize * north;
+    float dhEast = textureLod(uReliefMap, p + de, lod).r - textureLod(uReliefMap, p - de, lod).r;
+    float dhNorth = textureLod(uReliefMap, p + dn, lod).r - textureLod(uReliefMap, p - dn, lod).r;
+    vec3 bump = bumpVector((dhEast * east + dhNorth * north) / stepSize) * land;
+    n = normalize(ng - (bump.x * vRotX + bump.y * vRotY + bump.z * vRotZ));
+  }
   specular = uSpecular * sea * (1.0 - ice);
 #endif
   gl_FragColor = vec4(shade(albedo, n, ng, v, l, specular), uOpacity);
@@ -1084,8 +1122,8 @@ void main() {
  * The bake: one texel of one cube face per fragment (PlanetBake.ts). `uFace` is the face (+X, −X,
  * +Y, −Y, +Z, −Z, Three.js' and WebGL's order) and `uFaceSize` its size in texels; a texel's
  * direction follows WebGL's cube map layout. `uPass` picks what a rocky world's bake writes: 0 the
- * land colour and ice (the albedo map), 1 the bump vector and height (the relief map). Written as is:
- * the albedo map's sRGB encoding is done by the GPU on write.
+ * land colour and ice (the albedo map), 1 the terrain height (the relief map, one channel). Written
+ * as is: the albedo map's sRGB encoding is done by the GPU on write.
  */
 const bakeFragmentShader = /* glsl */ `
 ${surfaceUniformsChunk}
@@ -1112,14 +1150,14 @@ void main() {
 #ifdef PLANET_GAS
   gl_FragColor = vec4(gasAlbedo(p), 1.0);
 #else
-  // A texel's footprint on the unit sphere filters the bump vector, as a pixel's does on screen;
-  // mipmaps filter it further when the planet is small.
+  // The height is unfiltered (only the gradient, unused here, depends on the footprint); mipmaps
+  // filter it when the planet is small.
   vec3 land;
   float ice;
   float h;
   vec3 gradient;
-  rockyLand(p, max(length(dFdx(p)), length(dFdy(p))), land, ice, h, gradient);
-  gl_FragColor = uPass == 0 ? vec4(land, ice) : vec4(bumpVector(gradient), h);
+  rockyLand(p, 0.0, land, ice, h, gradient);
+  gl_FragColor = uPass == 0 ? vec4(land, ice) : vec4(h, 0.0, 0.0, 1.0);
 #endif
 }
 `;
@@ -1697,11 +1735,17 @@ export function ringAxis(ring: Readonly<Pick<PlanetRing, 'opening' | 'roll'>>, f
  * it is made (and freed) without a renderer.
  *
  * - `targets`: the albedo map (sRGB, 8 bits a channel: a gas giant's colour, or a rocky world's land
- *   colour and ice cover) and, for a rocky world, the relief map (half float: the bump vector and the
- *   terrain height). Each is a cube map of PLANET_BAKE_FACE_SIZE texels a side with a full mip chain,
- *   filtered trilinearly and anisotropically (PLANET_BAKE_ANISOTROPY). Memory: 4 bytes a texel for
- *   the albedo map and 8 for the relief map, × 6 faces × 4/3 for the mips: at 1024, 33.6 MB for a gas
- *   giant and 100.7 MB for a rocky world, while the planet lives; `dispose()` frees them.
+ *   colour and ice cover) and, for a rocky world, the relief map (the terrain height alone, one half
+ *   float channel, R16F: the baked surface derives the bump from its slope). Each is a cube map of
+ *   PLANET_BAKE_FACE_SIZE texels a side with a full mip chain, filtered trilinearly and
+ *   anisotropically (PLANET_BAKE_ANISOTROPY). R16F is filterable in WebGL2 without an extension, and
+ *   renderable (so it can be baked and its mips made) with the same extension the bake needs anyway
+ *   (`EXT_color_buffer_float`, or `EXT_color_buffer_half_float`). Its precision, 11 significant
+ *   bits, rounds the height (mostly within ±0.6) by at most 2.4e-4, which shows in no comparison
+ *   with the procedural surface (e2e/planet.spec.ts).
+ *   Memory: 4 bytes a texel for the albedo map and 2 for the relief map, × 6 faces × 4/3 for the
+ *   mips: at 1024, 33.6 MB for a gas giant and 50.3 MB for a rocky world, while the planet lives;
+ *   `dispose()` frees them.
  * - The bake goes target by target, face by face (+X, −X, +Y, −Y, +Z, −Z), row by row from the bottom;
  *   `rowsDone` counts the rows drawn, over all of them. A target's mips are made when its last rows
  *   are drawn.
@@ -1730,7 +1774,9 @@ export class SurfaceBake {
     } as const;
     const albedo = new WebGLCubeRenderTarget(this.size, { ...options, type: UnsignedByteType, colorSpace: SRGBColorSpace });
     const targets = [albedo];
-    if (type === 'rocky') targets.push(new WebGLCubeRenderTarget(this.size, { ...options, type: HalfFloatType, colorSpace: LinearSRGBColorSpace }));
+    if (type === 'rocky') {
+      targets.push(new WebGLCubeRenderTarget(this.size, { ...options, format: RedFormat, type: HalfFloatType, colorSpace: LinearSRGBColorSpace }));
+    }
     for (const target of targets) target.texture.anisotropy = PLANET_BAKE_ANISOTROPY;
     this.targets = targets;
     this.rowsTotal = targets.length * 6 * this.size;
@@ -1752,7 +1798,7 @@ export class SurfaceBake {
   /** Bytes the cube maps take on the GPU, mips included. */
   get bytes(): number {
     const texels = 6 * this.size * this.size * (4 / 3);
-    return texels * 4 + (this.targets.length > 1 ? texels * 8 : 0);
+    return texels * 4 + (this.targets.length > 1 ? texels * 2 : 0);
   }
 
   dispose(): void {

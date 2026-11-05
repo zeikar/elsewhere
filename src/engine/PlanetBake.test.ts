@@ -1,4 +1,4 @@
-import { type Camera, type Mesh, type Scene, type WebGLRenderTarget } from 'three';
+import { HalfFloatType, RGBAFormat, RedFormat, SRGBColorSpace, UnsignedByteType, type Camera, type Mesh, type Scene, type WebGLRenderTarget } from 'three';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ENCOUNTER_BASE_SEED, PLANET_BAKE_FACE_SIZE, PLANET_BAKE_ROWS_PER_FRAME } from '../config';
 import { Planet, disposePlanetGeometry, planetParams, type PlanetType } from './Planet';
@@ -144,6 +144,27 @@ describe('PlanetBaker', () => {
     planet.dispose();
   });
 
+  it('after a context restore makes a new quad, and never frees the old one (its buffers belong to the lost context)', () => {
+    const planet = new Planet(planetParams(seedOf('gas')), undefined, undefined, { bake: true });
+    const { renderer } = fakeRenderer();
+    const baker = new PlanetBaker(renderer);
+    const scene = (baker as unknown as { scene: Scene }).scene;
+    baker.step(planet);
+    const old = scene.children[0] as Mesh;
+    let freed = 0;
+    old.geometry.addEventListener('dispose', () => freed++);
+    planet.restartBake();
+    baker.contextRestored();
+    expect(scene.children).toHaveLength(0);
+    baker.step(planet);
+    expect(scene.children).toHaveLength(1);
+    expect(scene.children[0]).not.toBe(old);
+    baker.complete(planet);
+    baker.dispose();
+    expect(freed).toBe(0);
+    planet.dispose();
+  });
+
   it('a planet without a bake is drawn procedurally throughout, and the baker leaves it alone', () => {
     const planet = new Planet(planetParams(seedOf('rocky')));
     expect(planet.bake).toBeNull();
@@ -161,8 +182,13 @@ describe('PlanetBaker', () => {
       for (const target of planet.bake!.targets) target.addEventListener('dispose', () => freed++);
       for (const material of planet.materials()) material.addEventListener('dispose', () => freed++);
       const expected = planet.bake!.targets.length + planet.materials().length;
+      // The albedo map is RGBA8 sRGB; a rocky world's relief map holds the height alone, in R16F.
+      const [albedo, relief] = planet.bake!.targets;
+      expect([albedo!.texture.format, albedo!.texture.type, albedo!.texture.colorSpace]).toEqual([RGBAFormat, UnsignedByteType, SRGBColorSpace]);
+      if (type === 'rocky') expect([relief!.texture.format, relief!.texture.type]).toEqual([RedFormat, HalfFloatType]);
+      else expect(relief).toBeUndefined();
       const mb = planet.bake!.bytes / 1e6;
-      expect(mb).toBeCloseTo(type === 'rocky' ? 100.7 : 33.6, 1);
+      expect(mb).toBeCloseTo(type === 'rocky' ? 50.3 : 33.6, 1);
       planet.dispose();
       planet.dispose();
       expect(freed).toBe(expected);

@@ -5,7 +5,8 @@
  * GPU work (the encounter bake slice, if any, and the render) with a `TIME_ELAPSED` query. A query's
  * result is ready a few frames later, so `poll()` reads every finished query, oldest first, and hands
  * each frame's GPU time in milliseconds to a callback (the engine records them in a `FrameStats`).
- * Results that a disjoint event spoilt (the GPU was reset, throttled or switched) are dropped.
+ * Results that a disjoint event spoilt (the GPU was reset, throttled or switched) are dropped: a
+ * disjoint event spoils every query in flight, so on one, `poll()` drops them all.
  *
  * Off by default: the engine makes one only on request (`EngineOptions.gpuTiming`, which the e2e
  * build reads from `?gpuTiming=1`). Where the extension is missing (Safari, for one) `supported` is
@@ -86,12 +87,29 @@ export class GpuTimer {
     while (this.pending > 0) {
       const query = this.ring[this.head]!;
       if (!(gl.getQueryParameter(query, gl.QUERY_RESULT_AVAILABLE) as boolean)) break;
-      const disjoint = gl.getParameter(ext.GPU_DISJOINT_EXT) as boolean;
+      if (gl.getParameter(ext.GPU_DISJOINT_EXT) as boolean) {
+        // Every query in flight is spoilt, finished or not: drop them all (their queries are reused,
+        // which discards any result still to come).
+        this.head = (this.head + this.pending) % RING_SIZE;
+        this.pending = 0;
+        break;
+      }
       const ns = gl.getQueryParameter(query, gl.QUERY_RESULT) as number;
       this.head = (this.head + 1) % RING_SIZE;
       this.pending--;
-      if (!disjoint) record(ns / 1e6);
+      record(ns / 1e6);
     }
+  }
+
+  /**
+   * Stops timing without a WebGL call: after a context restore the queries belong to the lost
+   * context, and deleting them there is an INVALID_OPERATION. They are simply dropped.
+   */
+  abandon(): void {
+    this.disposed = true;
+    this.active = false;
+    this.pending = 0;
+    this.ring.fill(null);
   }
 
   /** Deletes the queries. Idempotent. */

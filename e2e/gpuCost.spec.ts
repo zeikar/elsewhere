@@ -135,8 +135,8 @@ test('a planet bakes its surface while it is still a dot, from warmed programs, 
   const workP95 = sorted[Math.ceil(0.95 * sorted.length) - 1]!;
   console.log(`bake: ${JSON.stringify({ ...log, work: undefined, workP95, textures: [...new Set(log.textures)], programs: [...new Set(log.programs)] })}`);
   // Spread over frames: a rocky world (the test default trip's first planet) takes 96 slices of
-  // 1/96 each (the first drawn in the frame that creates the planet), drawn procedurally until the
-  // last.
+  // 1/96 each (the first drawn in the frame after the one that first draws the planet), drawn
+  // procedurally until the last.
   expect(log.maxProgressStep).toBeLessThanOrEqual(1 / 96 + 1e-9);
   expect(log.procedural).toBeGreaterThanOrEqual(95);
   // Done while the planet is a dot (well under 2° across).
@@ -158,6 +158,75 @@ test('a planet bakes its surface while it is still a dot, from warmed programs, 
   expect(after.renderer.textures).toBe(cruise.renderer.textures);
   expect(after.renderer.geometries).toBe(cruise.renderer.geometries);
   expect(after.renderer.programs).toBe(cruise.renderer.programs);
+  expect(errors).toEqual([]);
+});
+
+test('after a WebGL context loss mid-bake, the warm-ups compile again first, and the planet bakes again without compiling anything', async ({ page }) => {
+  test.setTimeout(600_000);
+  const errors = collectErrors(page);
+  // WebGL reports misuse (such as deleting a lost context's queries) as console warnings.
+  page.on('console', (msg) => {
+    if (msg.type() === 'warning' && /INVALID_OPERATION|INVALID_VALUE/.test(msg.text())) errors.push(`console.warning: ${msg.text()}`);
+  });
+  await page.setViewportSize({ width: 320, height: 180 });
+  // GPU timing on too, so the timer's restore path runs.
+  await page.goto(appUrl('encounterInterval=1&encounterKind=planet&gpuTiming=1'));
+  const cruisePrograms = CRUISE_PROGRAMS.withGalaxies;
+  await expect
+    .poll(async () => (await page.evaluate(() => window.__elsewhere!.snapshot())).renderer.programs, { timeout: 60_000 })
+    .toBe(cruisePrograms);
+  // Lose the context a few slices into the planet's bake, restore it a little later, and watch
+  // every frame from then until the bake is done again.
+  const log = await page.evaluate(
+    () =>
+      new Promise<{ lostAt: number; restored: boolean; frames: { programs: number; progress: number; baked: boolean }[] }>((resolve) => {
+        const hook = window.__elsewhere!;
+        const canvas = document.getElementById('scene') as HTMLCanvasElement;
+        const lose = (canvas.getContext('webgl2') as WebGL2RenderingContext).getExtension('WEBGL_lose_context')!;
+        const out = { lostAt: -1, restored: false, frames: [] as { programs: number; progress: number; baked: boolean }[] };
+        canvas.addEventListener('webglcontextlost', () => setTimeout(() => lose.restoreContext(), 300), { once: true });
+        canvas.addEventListener('webglcontextrestored', () => (out.restored = true), { once: true });
+        let last = -1;
+        const tick = () => {
+          const s = hook.snapshot();
+          const bake = s.planet?.bake ?? null;
+          if (out.lostAt < 0 && bake !== null && bake.progress >= 0.05 && !bake.baked) {
+            out.lostAt = bake.progress;
+            lose.loseContext();
+          } else if (out.restored && s.frames !== last) {
+            last = s.frames;
+            out.frames.push({ programs: s.renderer.programs, progress: bake?.progress ?? -1, baked: bake?.baked ?? false });
+            if (bake === null || bake.baked) {
+              resolve(out);
+              return;
+            }
+          }
+          requestAnimationFrame(tick);
+        };
+        tick();
+      }),
+  );
+  const programs = log.frames.map((f) => f.programs);
+  test.info().annotations.push({
+    type: 'context loss mid-bake (SwiftShader, 320×180)',
+    description: JSON.stringify({ lostAt: log.lostAt, frames: log.frames.length, programs: [...new Set(programs)] }),
+  });
+  expect(log.lostAt).toBeGreaterThan(0);
+  expect(log.lostAt).toBeLessThan(1);
+  // The planet is still there, and its bake started over and finished.
+  const end = log.frames.at(-1)!;
+  expect(end.baked).toBe(true);
+  expect(Math.min(...log.frames.map((f) => f.progress))).toBeLessThan(log.lostAt);
+  // Every bake slice was drawn with the warm-ups' programs already compiled: from the first frame
+  // the bake advances in, the program count is the cruise count, and never grows (no program is
+  // compiled mid-encounter, the bake's or the baked surface's).
+  const firstSlice = log.frames.findIndex((f, i) => i > 0 && f.progress > log.frames[i - 1]!.progress);
+  expect(firstSlice).toBeGreaterThan(0);
+  expect(new Set(programs.slice(firstSlice - 1))).toEqual(new Set([cruisePrograms]));
+  expect(Math.max(...programs)).toBe(cruisePrograms);
+  // GPU timing still works on the new context.
+  const timed = await page.evaluate(() => window.__elsewhere!.snapshot().perf.gpuMs?.total ?? 0);
+  await page.waitForFunction((n) => (window.__elsewhere!.snapshot().perf.gpuMs?.total ?? 0) > n, timed, { timeout: 60_000 });
   expect(errors).toEqual([]);
 });
 

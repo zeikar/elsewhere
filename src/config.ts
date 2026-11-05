@@ -722,7 +722,7 @@ export const PLANET_SPHERE_SEGMENTS = [96, 64] as const;
  * per pixel from the baked height, so they stay as sharp as before however close. Magnified, at the
  * closest pass (k = 1.6) at 1512×982 @2×, a texel is at most about 6.6 device pixels (3.3 CSS
  * pixels) across, at the very edge of the screen, and that finest detail about 38. Twice the size
- * would quadruple the memory (see `SurfaceBake` in engine/Planet.ts: 100.7 MB for a rocky world at
+ * would quadruple the memory (see `SurfaceBake` in engine/Planet.ts: 50.3 MB for a rocky world at
  * 1024) for detail the surface does not have.
  */
 export const PLANET_BAKE_FACE_SIZE = 1024;

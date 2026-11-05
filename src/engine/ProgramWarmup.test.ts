@@ -210,6 +210,28 @@ describe('ProgramWarmup', () => {
     previous.dispose();
   });
 
+  it('after invalidate() (a context restore) is not ready until compiled again; a compile from before it is ignored', async () => {
+    const materials = planetBakeProgramMaterials();
+    const warmup = new ProgramWarmup(materials);
+    const { renderer, uses, compiled } = fakeRenderer();
+    await warmup.compile(renderer, new PerspectiveCamera(), new Scene());
+    expect(warmup.isReady()).toBe(true);
+    // The context is lost while a compile is pending: it settles later, but must not count.
+    const stale = warmup.compile(renderer, new PerspectiveCamera(), new Scene());
+    warmup.invalidate();
+    await stale;
+    expect(warmup.isReady()).toBe(false);
+    for (const material of materials) expect(uses.get(material)).toBe(1);
+    // Compiled again, it is ready again, and primed again.
+    const again = warmup.compile(renderer, new PerspectiveCamera(), new Scene());
+    expect(warmup.isReady()).toBe(false);
+    await again;
+    expect(warmup.isReady()).toBe(true);
+    expect(compiled).toHaveLength(3);
+    for (const material of materials) expect(uses.get(material)).toBe(2);
+    warmup.dispose();
+  });
+
   it('never rejects, and primes nothing once disposed or when the compile fails', async () => {
     for (const settle of ['reject', 'throw'] as const) {
       const warmup = new ProgramWarmup(nebulaProgramMaterials());

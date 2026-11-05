@@ -18,9 +18,9 @@
  *
  * Planet surface bake (issue #65, PlanetBake.ts): where the GPU can render to half-float textures,
  * each planet's surface is baked into cube maps a slice a frame, just before the frame's render,
- * once the bake programs (compiled at start-up with a render target bound) and the planet's own
- * compile are ready; until the bake is done the planet is drawn procedurally. After a WebGL context
- * restore the planet bakes again.
+ * once the bake programs (compiled at start-up with a render target bound, after the screen
+ * programs) and the planet's own compile are ready; until the bake is done the planet is drawn
+ * procedurally. After a WebGL context restore the warm-ups compile again and the planet bakes again.
  *
  * Frame-rate cap (docs/PLAN.md section 6, Performance): the loop draws at most about FRAME_RATE_CAP
  * frames a second (FrameCap.ts), skipping display frames on faster displays; a skipped frame runs
@@ -161,6 +161,8 @@ export class Engine {
   private rafId = 0;
   private frameCount = 0;
   private appliedDpr = 1;
+  /** Counts `warmUp` calls, so a warm-up superseded by a context restore does not go on to the bake programs. */
+  private warmupGeneration = 0;
 
   constructor(canvas: HTMLCanvasElement, options: EngineOptions = {}) {
     this.canvas = canvas;
@@ -201,25 +203,9 @@ export class Engine {
     // and tails with the planets' halo program, so they need no holder of their own; their CPU-side
     // building blocks are made now too, so the first asteroid's or comet's frame does not.
     this.programWarmup = new ProgramWarmup([...planetProgramMaterials(), ...nebulaProgramMaterials()]);
-    void this.programWarmup.compile(this.renderer, this.camera, this.scene);
-    // The bake programs draw into a render target, so they are compiled with one bound (a 1×1
-    // stand-in, freed as soon as the compile has started).
-    if (canBake) {
-      this.bakeWarmup = new ProgramWarmup(planetBakeProgramMaterials());
-      const stand = new WebGLRenderTarget(1, 1, { depthBuffer: false });
-      void this.bakeWarmup.compile(this.renderer, this.camera, this.scene, stand);
-      stand.dispose();
-      // Make a one-texel stand-in of a rocky planet's cube maps once, now: Three.js' first cube map
-      // of each kind queries the GPU (its anisotropy limit, among others) with calls that wait for it
-      // to finish everything queued, which in an encounter's first bake slice stalled the frame.
-      const probe = new SurfaceBake('rocky', {}, 1);
-      for (const target of probe.targets) this.renderer.initRenderTarget(target);
-      probe.dispose();
-      this.planetBaker = new PlanetBaker(this.renderer);
-    } else {
-      this.bakeWarmup = null;
-      this.planetBaker = null;
-    }
+    this.bakeWarmup = canBake ? new ProgramWarmup(planetBakeProgramMaterials()) : null;
+    this.planetBaker = canBake ? new PlanetBaker(this.renderer) : null;
+    this.warmUp();
     this.canvas.addEventListener('webglcontextrestored', this.onContextRestored);
     prepareAsteroids();
     prepareComets();
@@ -598,15 +584,50 @@ export class Engine {
   }
 
   /**
-   * After a WebGL context loss and restore, Three.js rebuilds its GPU resources as they are next
-   * used, but a render target's contents are gone: the current planet goes back to its procedural
-   * surface and bakes again. The GPU timer's queries died with the context too.
+   * Compiles the warm-ups' programs (at start-up, and again after a context restore): the screen
+   * programs first, then, once they have settled, the bake programs and the cube-map stand-in, so
+   * the two sets' first-use waits (where `KHR_parallel_shader_compile` is missing, a link each) fall
+   * in separate tasks rather than all before the first frame. The bake starts only once its
+   * programs are ready (`render`), so it never compiles anything.
+   */
+  private warmUp(): void {
+    const bakeWarmup = this.bakeWarmup;
+    // Not ready until compiled again (after a restore), even while the screen programs compile.
+    bakeWarmup?.invalidate();
+    const generation = ++this.warmupGeneration;
+    const screen = this.programWarmup.compile(this.renderer, this.camera, this.scene);
+    if (bakeWarmup === null) return;
+    void screen.then(() => {
+      if (this.disposed || generation !== this.warmupGeneration || this.renderer.getContext().isContextLost()) return;
+      // The bake programs draw into a render target, so they are compiled with one bound (a 1×1
+      // stand-in, freed as soon as the compile has started).
+      const stand = new WebGLRenderTarget(1, 1, { depthBuffer: false });
+      void bakeWarmup.compile(this.renderer, this.camera, this.scene, stand);
+      stand.dispose();
+      // Make a one-texel stand-in of a rocky planet's cube maps, now: Three.js' first cube map of
+      // each kind queries the GPU (its anisotropy limit, among others) with calls that wait for it
+      // to finish everything queued, which in an encounter's first bake slice stalled the frame.
+      const probe = new SurfaceBake('rocky', {}, 1);
+      for (const target of probe.targets) this.renderer.initRenderTarget(target);
+      probe.dispose();
+    });
+  }
+
+  /**
+   * After a WebGL context loss and restore, Three.js rebuilds its renderer state from scratch, and
+   * with it every shader program, and a render target's contents are gone: the warm-ups compile
+   * again (so neither the restarted bake nor the next encounter compiles mid-encounter), and the
+   * current planet goes back to its procedural surface and bakes again once the bake programs are
+   * ready. The GPU timer's queries died with the context: they are dropped, not deleted (they
+   * belong to the lost context).
    */
   private readonly onContextRestored = (): void => {
     if (this.disposed) return;
+    this.warmUp();
     this.encounterView.getPlanet()?.restartBake();
+    this.planetBaker?.contextRestored();
     if (this.gpuTimer !== null) {
-      this.gpuTimer.dispose();
+      this.gpuTimer.abandon();
       this.gpuTimer = new GpuTimer(this.renderer.getContext() as WebGL2RenderingContext);
     }
   };

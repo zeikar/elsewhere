@@ -44,8 +44,9 @@ export const SHADER_COST_OPS: Readonly<Record<ShaderKind, number>> = {
   'rocky surface (procedural)': 2000,
   // 4–5 turbulence octaves, a streak noise, 3 fine streak octaves, the storm and band trigonometry.
   'gas surface (procedural)': 1000,
-  // Two cube-map fetches (albedo and ice; relief and height), the sea mask from the height, lighting.
-  'rocky surface (baked)': 110,
+  // Six cube-map fetches (albedo and ice; the height, and four more height taps for the bump's
+  // slope), the slope's basis and step, the sea mask from the height, lighting.
+  'rocky surface (baked)': 210,
   // One cube-map fetch (albedo), lighting and limb darkening.
   'gas surface (baked)': 70,
   // The analytic rim glow along the view ray.

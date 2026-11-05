@@ -24,6 +24,9 @@
  * those that draw on screen (Three.js writes linear colour there, so it builds them apart), so they
  * are held by a warm-up of their own, compiled with a render target bound (`compile`'s `target`).
  *
+ * A WebGL context restore drops every program Three.js had (it rebuilds its renderer state from
+ * scratch), so the engine then calls `invalidate()` and `compile` again (Engine.ts).
+ *
  * Three.js derives part of a program from the geometry's attributes (whether it has normals, for
  * one), so the holders' geometry has the same attributes as the planet sphere and the nebula plane
  * (`position`, `normal`, `uv`), but empty: no buffers are uploaded (or counted in
@@ -58,6 +61,8 @@ export class ProgramWarmup {
   private readonly materials: readonly Material[];
   private disposed = false;
   private ready = false;
+  /** Counts `compile` and `invalidate` calls, so a compile that settles after a newer one or an invalidation is ignored. */
+  private generation = 0;
 
   constructor(materials: readonly Material[]) {
     this.materials = materials;
@@ -72,10 +77,13 @@ export class ProgramWarmup {
    * here it happens once, at start-up. With `target`, the programs are built for drawing into a
    * render target: it is bound while the compile starts (Three.js reads which target is bound when
    * it builds a program), then the previous one is bound again. Settles when done, after which
-   * `isReady()` is true; never rejects.
+   * `isReady()` is true (unless `compile` or `invalidate` was called again meanwhile); never rejects.
+   * Can be called again (after a context restore): `isReady()` is false until the new compile settles.
    */
   compile(renderer: ProgramCompiler, camera: Camera, scene: Scene, target: WebGLRenderTarget | null = null): Promise<void> {
     if (this.disposed) return Promise.resolve();
+    const generation = ++this.generation;
+    this.ready = false;
     let pending: PromiseLike<unknown>;
     const previous = target === null ? null : (renderer.getRenderTarget?.() ?? null);
     try {
@@ -89,13 +97,23 @@ export class ProgramWarmup {
     }
     return Promise.resolve(pending).then(
       () => {
+        if (generation !== this.generation) return;
         if (!this.disposed) this.prime(renderer);
         this.ready = true;
       },
       () => {
-        this.ready = true;
+        if (generation === this.generation) this.ready = true;
       },
     );
+  }
+
+  /**
+   * The held programs are gone (a WebGL context loss drops them): `isReady()` is false until
+   * `compile` is called and settles again, and a compile still pending is ignored.
+   */
+  invalidate(): void {
+    this.generation++;
+    this.ready = false;
   }
 
   /** Whether `compile` has settled (successfully or not), so drawing with the held programs no longer compiles. */

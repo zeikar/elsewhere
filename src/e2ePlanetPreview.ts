@@ -79,6 +79,12 @@ export interface PlanetPreviewInfo {
   /** The planet's disc on the canvas, in CSS pixels from the top-left corner (approximately a circle). */
   disc: { x: number; y: number; radius: number };
   /**
+   * The planet's sphere as the camera sees it, for telling which pixels are on its disc however the
+   * camera is turned (close up, say): its centre in the camera's view space (looking down -Z), its
+   * drawn radius, and the camera's vertical field of view in degrees.
+   */
+  sphere: { centre: { x: number; y: number; z: number }; radius: number; fovDeg: number };
+  /**
    * With the far stars drawn: how many far stars lie behind the inner 80% of the disc's radius
    * (their direction within 0.8 × the disc's angular radius of its centre). `null` without them.
    */
@@ -220,7 +226,7 @@ function farStarsWithin(stars: FarStarfield, centre: { x: number; y: number; z: 
 function drawPlanet(
   seed: number,
   options: Readonly<PlanetPreviewOptions> = {},
-): Pick<PlanetPreviewInfo, 'disc' | 'farStarsBehindDisc' | 'galaxies'> & { planet: Planet } {
+): Pick<PlanetPreviewInfo, 'disc' | 'sphere' | 'farStarsBehindDisc' | 'galaxies'> & { planet: Planet } {
   const { renderer: r, scene: s, camera: c } = prepare();
   const params = planetParams(seed);
   const planet = new Planet(params, undefined, undefined, { bake: options.surface !== 'procedural' });
@@ -305,7 +311,9 @@ function drawPlanet(
   };
   const farStarsBehindDisc =
     stars === null ? null : farStarsWithin(stars, { x: p.x / distance, y: p.y / distance, z: p.z / distance }, 0.8 * angularRadius);
-  return { planet, disc, farStarsBehindDisc, galaxies: galaxyInfo };
+  const inView = p.clone().applyMatrix4(c.matrixWorldInverse);
+  const sphere = { centre: { x: inView.x, y: inView.y, z: inView.z }, radius: planet.object.scale.x, fovDeg: c.fov };
+  return { planet, disc, sphere, farStarsBehindDisc, galaxies: galaxyInfo };
 }
 
 /** Draws the nebula for appearance seed `seed` as seen mid-APPROACH, replacing anything shown. */
@@ -375,7 +383,7 @@ function drawComet(seed: number): Comet {
  */
 export function showPlanetPreview(type: PlanetType, nth = 0, options: Readonly<PlanetPreviewOptions> = {}): PlanetPreviewInfo {
   const { index, seed } = findSeed(type, Math.max(0, Math.floor(nth)));
-  const { planet, disc, farStarsBehindDisc, galaxies: galaxyInfo } = drawPlanet(seed, options);
+  const { planet, disc, sphere, farStarsBehindDisc, galaxies: galaxyInfo } = drawPlanet(seed, options);
   const { params } = planet;
   return {
     index,
@@ -385,6 +393,7 @@ export function showPlanetPreview(type: PlanetType, nth = 0, options: Readonly<P
     radius: params.radius,
     programs: renderer?.info.programs?.length ?? 0,
     disc,
+    sphere,
     farStarsBehindDisc,
     galaxies: galaxyInfo,
   };

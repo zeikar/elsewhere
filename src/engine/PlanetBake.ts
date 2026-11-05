@@ -19,7 +19,7 @@
  * - No pop: until the bake is done the planet draws with its procedural surface, which looks the
  *   same; the frame its last slice is drawn (and its mips made) it switches to the baked surface.
  * - After a WebGL context loss the cube maps' contents are gone: `restartBake` puts the planet back
- *   on its procedural surface and the bake starts over.
+ *   on its procedural surface and the bake starts over, and `contextRestored` drops the quad.
  *
  * The baker owns only a quad and a camera; the cube maps belong to the planet and are freed with it.
  * The quad's geometry exists only while a bake is under way (it is made for the first slice and
@@ -105,6 +105,17 @@ export class PlanetBaker {
   complete(planet: Planet): void {
     const bake = planet.bake;
     if (bake !== null) this.step(planet, bake.rowsTotal);
+  }
+
+  /**
+   * After a WebGL context restore: forgets the quad without freeing it. Its GPU buffers died with the
+   * old context, and freeing it would have Three.js delete them there (an INVALID_OPERATION); the
+   * next slice makes a new one.
+   */
+  contextRestored(): void {
+    if (this.quad === null) return;
+    this.scene.remove(this.quad);
+    this.quad = null;
   }
 
   /** Frees the quad. Idempotent. */
