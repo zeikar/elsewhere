@@ -65,13 +65,14 @@ export const SHIP_MAX_TURN_RATE_RAD_PER_S = 0.03;
  *
  * The sky has two layers. The STAR_* settings are the near layer: fine dust and near stars in a
  * wrapped cube around the camera, which streak with speed and give the sense of motion. They are
- * kept small and dim, so they read as dust rushing past rather than as the sky. The FAR_STAR_*
+ * kept small and mostly dim, with a few bright ones whose streaks carry the warp feel, so they read
+ * as stars rushing past rather than as the sky. The FAR_STAR_*
  * settings below are the far layer: stars at effectively infinite distance, which only turn with the
  * camera, so they give a fixed backdrop that planets and nebulae are seen against.
  */
 
 /** Number of near stars (one instanced quad each). */
-export const STAR_COUNT = 6000;
+export const STAR_COUNT = 8000;
 
 /** Side `L` of the cube the stars live in, centred on the camera and wrapped as the ship moves. */
 export const STAR_CUBE_SIZE = 1200;
@@ -88,7 +89,7 @@ export const STAR_SIZE_MAX = 1.5;
 
 /** Range of the per-star brightness. Skewed toward the dim end, with a few bright stars. */
 export const STAR_BRIGHTNESS_MIN = 0.3;
-export const STAR_BRIGHTNESS_MAX = 0.8;
+export const STAR_BRIGHTNESS_MAX = 1;
 
 /**
  * Fading, so wrapping never pops a star in or out. A star fades to 0 over the last

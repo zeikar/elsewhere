@@ -58,6 +58,7 @@ Each automated check is written as `file` — `test title`, using the title as i
 - `src/engine/Starfield.test.ts` — `is 0 on the cube boundary`
 - `src/engine/Starfield.test.ts` — `is 0 at the camera`
 - `src/engine/Starfield.test.ts` — `stays within [0, 1] and is continuous: no big step across a fine sample grid`
+- `e2e/starfield.spec.ts` — `after the ship translates with no rotation, far-star pixels stay put while near stars move`
 - `src/engine/encounter.test.ts` — `starts at opacity 0 and at full size for a non-default D (no pop-in)`
 - `src/engine/encounter.test.ts` — `opacity is 0 at the spawn and despawn distances, and 1 around the closest approach`
 - `src/engine/encounter.test.ts` — `changes by less than ${FADE_EPSILON} over a 0.1 s capped frame at the top speed`

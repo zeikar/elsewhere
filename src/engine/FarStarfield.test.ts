@@ -106,6 +106,10 @@ describe('far star view directions', () => {
 
     // Camera at the origin (floating origin), and also a camera actually moved to the ship's
     // position: the far stars use the rotation only, so neither moves them by any amount.
+    // This bit-identical check is structural: it runs the TypeScript mirror (farStarViewDirection),
+    // which only ever reads the rotation part of the view matrix. What guards the GPU is the
+    // shader-source check below ('builds one instanced quad per star, with no ship-dependent
+    // uniform') and the pixel e2e in e2e/starfield.spec.ts.
     const atOrigin = engineCamera(ship.heading);
     const translated = engineCamera(ship.heading);
     translated.position.set(ship.position.x, ship.position.y, ship.position.z);

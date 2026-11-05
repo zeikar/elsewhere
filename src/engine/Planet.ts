@@ -886,8 +886,9 @@ function createSurfaceMaterial(type: PlanetType, uniforms: Uniforms): ShaderMate
     vertexShader: surfaceVertexShader,
     fragmentShader: surfaceFragmentShader,
     side: FrontSide,
-    // Transparent so the fade blends it over the background. Drawn before the starfield and writes
-    // depth, so the stars behind it fail their depth test (see SURFACE_RENDER_ORDER).
+    // Transparent so the fade blends it over the background. Drawn after the far stars and before the
+    // near starfield, and writes depth, so the near stars behind it fail their depth test (see
+    // SURFACE_RENDER_ORDER).
     transparent: true,
     blending: NormalBlending,
     depthTest: true,
