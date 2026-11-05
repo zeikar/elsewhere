@@ -405,8 +405,11 @@ describe('encounter schedule', () => {
       expect(share('asteroid'), label).toBeLessThanOrEqual(aHigh);
       expect(share('comet'), label).toBeGreaterThanOrEqual(cLow);
       expect(share('comet'), label).toBeLessThanOrEqual(cHigh);
-      expect(share('planet'), label).toBeGreaterThan(share('comet'));
+      // Planets stay the most common kind (0.40 against 0.35 nebulae; measured at least 0.36 against
+      // at most 0.354 for these trips), and comets the rarest.
+      expect(share('planet'), label).toBeGreaterThan(share('nebula'));
       expect(share('planet'), label).toBeGreaterThan(share('asteroid'));
+      expect(share('asteroid'), label).toBeGreaterThan(share('comet'));
       // No kind runs longer than the cap, and nor do planets, asteroids and comets together (the run class).
       expect(longestRun(kinds), label).toBeLessThanOrEqual(ENCOUNTER_MAX_SAME_KIND_RUN);
       const classes = kinds.map(runClass);
