@@ -880,6 +880,15 @@ describe('dropping out of warp', () => {
   });
 
   it('cruiseTargetSpeed is the cruise speed up to the arrival speed; above it, it eases back into warp after an encounter and out of it before the next', () => {
+    // The first cruise, from load, has no encounter to return from: it starts at the cruise speed.
+    for (const cruiseSpeed of SHIP_SPEED_LEVELS) {
+      const params = atSpeed(cruiseSpeed);
+      expect(cruiseTargetSpeed(0, ENCOUNTER_INTERVAL_SECONDS, params, false)).toBe(cruiseSpeed);
+      expect(createAutopilotState(params).targetSpeed).toBe(cruiseSpeed);
+      expect(cruiseTargetSpeed(ENCOUNTER_INTERVAL_SECONDS, ENCOUNTER_INTERVAL_SECONDS, params, false)).toBe(
+        Math.min(cruiseSpeed, ENCOUNTER_ARRIVAL_SPEED),
+      );
+    }
     const interval = ENCOUNTER_INTERVAL_SECONDS;
     const h = 0.01;
     const exitStart = interval - ENCOUNTER_WARP_EXIT_LEAD_SECONDS - ENCOUNTER_WARP_EXIT_SECONDS;
@@ -888,11 +897,11 @@ describe('dropping out of warp', () => {
       const arrival = Math.min(cruiseSpeed, ENCOUNTER_ARRIVAL_SPEED);
       // A smoothstep's slope is at most 1.5 × range / width.
       const maxStep = (1.5 * (cruiseSpeed - arrival) * h) / Math.min(ENCOUNTER_WARP_ENTRY_SECONDS, ENCOUNTER_WARP_EXIT_SECONDS);
-      let prev = cruiseTargetSpeed(0, interval, params);
+      let prev = cruiseTargetSpeed(0, interval, params, true);
       expect(prev).toBe(arrival);
       for (let i = 1; i * h <= interval + 1; i++) {
         const t = i * h;
-        const v = cruiseTargetSpeed(t, interval, params);
+        const v = cruiseTargetSpeed(t, interval, params, true);
         if (cruiseSpeed <= ENCOUNTER_ARRIVAL_SPEED) {
           // The default level and below: unchanged, the cruise speed throughout.
           expect(v).toBe(cruiseSpeed);
@@ -913,10 +922,10 @@ describe('dropping out of warp', () => {
     // speed by the lead before the encounter; one no longer than the lead stays at the arrival speed.
     const top = atSpeed(TOP_SPEED);
     for (const short of [5, ENCOUNTER_WARP_ENTRY_SECONDS + ENCOUNTER_WARP_EXIT_SECONDS]) {
-      let prev = cruiseTargetSpeed(0, short, top);
+      let prev = cruiseTargetSpeed(0, short, top, true);
       for (let i = 0; i * h <= short; i++) {
         const t = i * h;
-        const v = cruiseTargetSpeed(t, short, top);
+        const v = cruiseTargetSpeed(t, short, top, true);
         expect(v).toBeLessThan(TOP_SPEED);
         expect(Math.abs(v - prev)).toBeLessThan(0.2);
         if (t >= short - ENCOUNTER_WARP_EXIT_LEAD_SECONDS + h / 2) expect(v).toBe(ENCOUNTER_ARRIVAL_SPEED);
@@ -924,7 +933,7 @@ describe('dropping out of warp', () => {
       }
     }
     for (let t = 0; t <= 5; t += 0.05) {
-      expect(cruiseTargetSpeed(t, ENCOUNTER_WARP_EXIT_LEAD_SECONDS, top)).toBe(ENCOUNTER_ARRIVAL_SPEED);
+      expect(cruiseTargetSpeed(t, ENCOUNTER_WARP_EXIT_LEAD_SECONDS, top, true)).toBe(ENCOUNTER_ARRIVAL_SPEED);
     }
   });
 

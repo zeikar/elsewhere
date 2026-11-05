@@ -434,25 +434,33 @@ export function encounterCruiseSpeed(params: Readonly<Pick<AutopilotParams, 'cru
 }
 
 /**
- * Target speed after `cruiseTime` seconds of a cruise lasting `interval`. The cruise speed when it
- * is at most the arrival speed. Above it: the arrival speed at the start of the cruise, easing
- * (smoothstep) up to the cruise speed over `warpEntryTime` (back into warp), and from `warpExitLead
- * + warpExitTime` before the encounter starts, easing back down to the arrival speed, which it
- * reaches `warpExitLead` before the encounter starts (out of warp). Where the two eases overlap (a
- * short cruise) the lower one applies, so the target is continuous and never jumps, it never
- * reaches the cruise speed, and it is still at the arrival speed from `warpExitLead` before the
- * encounter starts (throughout, for a cruise no longer than that).
+ * Target speed after `cruiseTime` seconds of a cruise lasting `interval`; `afterEncounter` tells
+ * whether the cruise follows an encounter (every cruise but the first, from load). The cruise speed
+ * when it is at most the arrival speed. Above it: after an encounter, the arrival speed at the start
+ * of the cruise, easing (smoothstep) up to the cruise speed over `warpEntryTime` (back into warp);
+ * the first cruise has no encounter to return from (the ship accelerates from rest at load), so it
+ * starts at the cruise speed. Then, from `warpExitLead + warpExitTime` before the encounter starts,
+ * easing back down to the arrival speed, which it reaches `warpExitLead` before the encounter starts
+ * (out of warp). Where the two eases overlap (a short cruise) the lower one applies, so the target
+ * is continuous and never jumps, it never reaches the cruise speed, and it is still at the arrival
+ * speed from `warpExitLead` before the encounter starts (throughout, for a cruise no longer than
+ * that).
  *
  * Continuous with the encounter's target speed at both ends: an encounter starts and ends at
  * `encounterCruiseSpeed` (see `encounterTargetSpeed`).
  */
-export function cruiseTargetSpeed(cruiseTime: number, interval: number, params: Readonly<AutopilotParams>): number {
+export function cruiseTargetSpeed(
+  cruiseTime: number,
+  interval: number,
+  params: Readonly<AutopilotParams>,
+  afterEncounter: boolean,
+): number {
   const cruise = params.cruiseSpeed;
   const arrival = encounterCruiseSpeed(params);
   if (!(cruise > arrival)) return cruise;
   const { warpEntryTime: entryTime, warpExitTime: exitTime } = params;
   const exitEnd = interval - params.warpExitLead;
-  const entry = entryTime > 0 ? smoothstep(0, entryTime, cruiseTime) : 1;
+  const entry = afterEncounter && entryTime > 0 ? smoothstep(0, entryTime, cruiseTime) : 1;
   const exit = exitTime > 0 ? smoothstep(exitEnd, exitEnd - exitTime, cruiseTime) : cruiseTime >= exitEnd ? 0 : 1;
   return arrival + (cruise - arrival) * Math.min(entry, exit);
 }
@@ -468,7 +476,7 @@ export function createAutopilotState(params: Readonly<AutopilotParams> = DEFAULT
     encounter: null,
     remaining: Number.POSITIVE_INFINITY,
     fade: 0,
-    targetSpeed: cruiseTargetSpeed(0, cruiseInterval(params, 0), params),
+    targetSpeed: cruiseTargetSpeed(0, cruiseInterval(params, 0), params, false),
     driftRate: cruiseDriftRate(0, cruiseInterval(params, 0), params),
   };
 }
@@ -492,7 +500,8 @@ export function createAutopilotState(params: Readonly<AutopilotParams> = DEFAULT
  *   once the ship is the profile's despawn distance past it, where the fade has reached 0.
  * - The target speed follows the encounter speed profile from `encounterCruiseSpeed`, and is
  *   `cruiseTargetSpeed` in CRUISE: the cruise speed, with the drop out of warp at the end of the
- *   cruise and the return to warp at its start when the cruise speed is above the arrival speed.
+ *   cruise and, after an encounter, the return to warp at its start when the cruise speed is above
+ *   the arrival speed.
  * - The drift rate eases to 0 at the end of CRUISE, stays 0 through APPROACH and FLYBY, and eases
  *   back to 1 over DEPARTURE as the ship recedes, reaching 1 as CRUISE resumes.
  */
@@ -567,7 +576,7 @@ export function updateAutopilot(
   if (encounter === null) {
     const interval = cruiseInterval(params, encounterCount);
     out.fade = 0;
-    out.targetSpeed = cruiseTargetSpeed(cruiseTime, interval, params);
+    out.targetSpeed = cruiseTargetSpeed(cruiseTime, interval, params, encounterCount > 0);
     out.driftRate = cruiseDriftRate(cruiseTime, interval, params);
   } else {
     const profile = encounterProfile(params, encounter.kind);
