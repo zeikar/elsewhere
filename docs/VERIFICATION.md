@@ -16,7 +16,7 @@ Each automated check is written as `file` — `test title`, using the title as i
 ## 1. Travel starts on page load with no interaction.
 
 - `e2e/engine.spec.ts` — `loads at /elsewhere/ without errors, fills the viewport and travels on its own`
-- `src/engine/Autopilot.test.ts` — `starts in CRUISE at cruise speed with full drift and no encounter`
+- `src/engine/Autopilot.test.ts` — `starts in CRUISE at cruise speed with no encounter`
 
 ## 2. Stars are crisp and correctly sized on high-DPI screens.
 
@@ -51,7 +51,10 @@ Each automated check is written as `file` — `test title`, using the title as i
 
 - `src/engine/encounter.test.ts` — `places the centre D ahead and radius × k to the side, so the closest approach is radius × k`
 - `src/engine/encounter.test.ts` — `a ship flying the straight path never gets closer than radius × k`
-- `src/engine/Autopilot.test.ts` — `keeps clear of the planet, never jumps and turns smoothly (radius $radius, cruise $cruiseSpeed)`
+- `src/engine/Autopilot.test.ts` — `keeps clear of the planet, never jumps and never turns (radius $radius, cruise $cruiseSpeed)`
+- `src/engine/Autopilot.test.ts` — `the heading is the fixed -Z at every step, in every state and at every state change`
+- `src/engine/fixedHeading.test.ts` — `every %s target (the planet, each asteroid rock, the comet nucleus) is passed at its planned closest distance, within half a percent, at every level and screen shape`
+- `src/engine/fixedHeading.test.ts` — `over 600 s of the default trip, through planet and nebula encounters, every state and speed-level changes, the camera's world rotation never changes, so neither do the far stars and galaxies on screen`
 - `src/engine/Autopilot.test.ts` — `%s: clearance ≥ radius × (1 + margin) and no frame jumps`
 - `src/engine/Autopilot.test.ts` — `the drop out of warp and the return to it are smooth around $kind encounters: no step in the target speed or the speed at any frame (dt $dt)`
 - `src/engine/Autopilot.test.ts` — `the quick entry (after an object left the screen): the ship itself follows a smootherstep to the cruise speed, no steeper than its max rate, with no step and a bounded jerk`
@@ -72,6 +75,7 @@ Each automated check is written as `file` — `test title`, using the title as i
 - `e2e/asteroid.spec.ts` — `a forced asteroid encounter draws lit rocks, runs the full cycle, compiles nothing and frees its GPU resources`
 - `src/engine/Comet.test.ts` — `for 2,000 seeded comets the path passes the nucleus at least the minimum pass distance off, outside the coma, and never meets a tail`
 - `src/engine/Comet.test.ts` — `the ship, flown frame by frame at every level, keeps the planned distance from the nucleus and never enters the coma or a tail: 30 comet encounters`
+- `src/engine/Comet.test.ts` — `the real pass, flown with the live view at every level, past the end of the encounter: the nucleus at the planned distance (within 0.5%) and the camera out of the coma and the tails`
 - `src/engine/Comet.test.ts` — `at speed level $level ($cruiseSpeed u/s) neither the nucleus nor any point of a tail of 2,000 seeded comets sweeps past faster in angle than the planet guard (5.1°/s)`
 - `src/engine/Comet.test.ts` — `never folds the nucleus through its centre: every vertex of 300 seeded nuclei keeps at least the soft floor over the farthest radius, with every normal facing out`
 - `src/engine/Comet.test.ts` — `over 40 seeded comets at 4:3, 16:9 and 21:9, from the spawn to the end of the encounter, the glow never fills the view`
@@ -86,7 +90,8 @@ Each automated check is written as `file` — `test title`, using the title as i
 - `src/engine/Starfield.test.ts` — `is 0 on the cube boundary`
 - `src/engine/Starfield.test.ts` — `is 0 at the camera and at the near plane, so no mote is cut off by it while still visible`
 - `src/engine/Starfield.test.ts` — `stays within [0, 1] and is continuous: no big step across a fine sample grid`
-- `e2e/starfield.spec.ts` — `after the ship translates with no rotation, far-star pixels stay put while near stars move`
+- `e2e/starfield.spec.ts` — `over seconds of cruise the camera never turns: far-star and galaxy pixels stay put while near stars move`
+- `e2e/starfield.spec.ts` — `in the default view the galaxies are on screen from the first frame, and over seconds of cruise and a speed change the camera, the heading and their screen positions never change`
 - `src/engine/encounter.test.ts` — `starts at opacity 0 and at full size for a non-default D (no pop-in)`
 - `src/engine/encounter.test.ts` — `opacity is 0 at the spawn and despawn distances, and 1 around the closest approach`
 - `src/engine/encounter.test.ts` — `changes by less than ${FADE_EPSILON} over a 0.1 s capped frame at the top speed`

@@ -110,10 +110,10 @@ interface CometLog {
   remainingAtMin: number | null;
   /**
    * The real pass, measured on past the end of the encounter: the nucleus's world position and the
-   * planned path's direction (the heading, held during the encounter), as last seen while the comet
-   * was in the scene; the remaining distance when it left the scene; the smallest distance from the
-   * camera to the nucleus from the spawn until the ship is a coma radius past the closest approach;
-   * and whether it has got that far.
+   * planned path's direction (the fixed heading), as last seen while the comet was in the scene; the
+   * remaining distance when it left the scene; the smallest distance from the camera to the nucleus
+   * from the spawn until the ship is a coma radius past the closest approach; and whether it has got
+   * that far.
    */
   nucleus: { x: number; y: number; z: number } | null;
   pathDirection: { x: number; y: number; z: number } | null;
@@ -329,17 +329,15 @@ test('a forced comet encounter draws its coma and tails, runs the full cycle, co
   expect(log.remainingAtMin).not.toBeNull();
   expect(log.minDistance).toBeLessThan(Math.hypot(params.radius * params.passFactor, log.remainingAtMin!) * 1.01);
   // The real pass, measured on until the ship is a coma radius past the closest approach: the comet
-  // left the scene short of it, and the next cruise eases the heading drift back up while the ship is
-  // still short of the nucleus, so the real pass can be a little nearer than the planned one (issue
-  // #62 removes the drift), and well outside the coma. A smoke check of the measurement: this flies
-  // at the top level with encounterInterval=1 (measured 0.998 × the planned distance);
-  // Comet.test.ts covers the dip at level 0. The upper bound fails unless the post-end samples
-  // reach the closest approach: the in-encounter ones alone stay near hypot(planned,
-  // remainingAtEnd), well above it (the widest real pass is 1.013 × at level 0, 1.004 × at the top).
+  // left the scene short of it, but the heading is fixed, so the ship flies on along the planned path
+  // and passes the nucleus at the planned distance, to within 0.5% (the frames are samples of the
+  // path, a few units apart at most; Comet.test.ts checks every level and screen shape). The upper
+  // bound fails unless the post-end samples reach the closest approach: the in-encounter ones alone
+  // stay near hypot(planned, remainingAtEnd), well above it.
   expect(log.remainingAtEnd).not.toBeNull();
   expect(log.remainingAtEnd!).toBeGreaterThan(0);
-  expect(log.realMinDistance).toBeGreaterThanOrEqual(0.95 * params.radius * params.passFactor);
-  expect(log.realMinDistance).toBeLessThan(1.02 * params.radius * params.passFactor);
+  expect(log.realMinDistance).toBeGreaterThanOrEqual(0.995 * params.radius * params.passFactor);
+  expect(log.realMinDistance).toBeLessThanOrEqual(1.005 * params.radius * params.passFactor);
   expect(log.realMinDistance).toBeGreaterThan(params.radius * (1 + ENCOUNTER_CLEARANCE_MARGIN));
   // While it lasts: two geometries (the nucleus and the glow), at most two draw calls more, no program.
   expect(log.peak.geometries).toBe(log.baseline.geometries + 2);

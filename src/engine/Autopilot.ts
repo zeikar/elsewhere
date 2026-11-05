@@ -4,14 +4,13 @@
  *
  * A pure update with no Three.js or DOM dependencies. Each simulation step, after `updateShip` has
  * advanced the ship, `updateAutopilot` reads the new ship state and returns the travel state, the
- * active encounter and the planet's fade, plus the `targetSpeed` and `driftRate` to copy into the
- * ship's params for the next step:
+ * active encounter and the planet's fade, plus the `targetSpeed` to copy into the ship's params for
+ * the next step:
  *
  * ```ts
  * updateShip(ship, dt, shipParams, ship);
  * updateAutopilot(autopilot, ship, dt, autopilotParams, autopilot);
  * shipParams.targetSpeed = autopilot.targetSpeed;
- * shipParams.driftRate = autopilot.driftRate;
  * ```
  *
  * `stepTravel` is that step, and is what the engine runs each frame. The user's speed setting goes
@@ -29,10 +28,10 @@
  * replaces on every resize; `encounterViewMargin`), before or after the closest approach, the
  * encounter moves on through the rest of its cycle, one state per step, and ends; otherwise DEPARTURE
  * ends at the profile's despawn distance. The next cruise returns to warp from the speed and
- * acceleration the ship had then (the quick entry, `viewEntryDuration`), and the heading drift eases
- * up from where the encounter left it, so neither jumps. Until the object is off screen nothing
- * changes: the target speed is the distance-based profile throughout the encounter. Encounter timing
- * therefore depends on the screen's shape; the schedule (kinds, sides, cruise lengths) does not.
+ * acceleration the ship had then (the quick entry, `viewEntryDuration`), so the speed never jumps.
+ * Until the object is off screen nothing changes: the target speed is the distance-based profile
+ * throughout the encounter. Encounter timing therefore depends on the screen's shape; the schedule
+ * (kinds, sides, cruise lengths) does not.
  *
  * The far stretch (config.ts, ENCOUNTER_FAR_SPEED): planets, asteroids and comets spawn far out, and
  * the first part of their approach, while the object is still small, is flown faster
@@ -47,12 +46,10 @@
  * before. So the cruise needs to know the next object before it is planned: it chooses it once
  * (`chooseEncounter`, kept in `AutopilotState.next`), and the encounter starts with that choice.
  *
- * Heading: `planEncounter` assumes the ship holds the planned heading. Shrinking the drift
- * amplitudes would turn the heading back toward -Z and move the path sideways, eating into the
- * clearance. Instead the autopilot slows the ship's drift clock to a stop over the end of the
- * cruise, plans the encounter along the now still heading, holds it through APPROACH and FLYBY, and
- * restarts the clock gradually in DEPARTURE. The heading continues from where it stopped, so it
- * never jumps, and the ship flies the planned straight line past the planet.
+ * Heading: `planEncounter` assumes the ship holds the planned heading. The heading is fixed
+ * (SHIP_HEADING, -Z, in Ship.ts), so the ship flies the planned straight line past the object, all
+ * the way to and past the closest approach, even when the encounter ends off screen before it: the
+ * real pass is the planned one.
  *
  * Kinds (docs/PLAN.md section 6, Nebulae and Variety): each encounter is a planet, a nebula, an
  * asteroid or a comet, chosen from its appearance seed `hash(baseSeed, index)` (`encounterKindAt`),
@@ -104,7 +101,6 @@ import {
   ENCOUNTER_CLEARANCE_MARGIN,
   ENCOUNTER_COMET_SHARE,
   ENCOUNTER_DISTANCE,
-  ENCOUNTER_DRIFT_SETTLE_SECONDS,
   ENCOUNTER_FADE_IN_SECONDS,
   ENCOUNTER_FLYBY_DISTANCE,
   ENCOUNTER_INTERVAL_JITTER,
@@ -139,7 +135,6 @@ import {
 } from '../config';
 import {
   DEFAULT_ENCOUNTER_PROFILE,
-  angleBetween,
   encounterOffset,
   encounterOpacity,
   encounterRemaining,
@@ -147,7 +142,6 @@ import {
   farHandoverSpeed,
   farStretchRoom,
   farStretchTargetSpeed,
-  frustumConeHalfAngle,
   frustumSphereMargin,
   planEncounter,
   smoothstep,
@@ -441,8 +435,6 @@ export interface AutopilotParams {
   interval: number;
   /** Seeded jitter on each cruise, as a fraction of `interval`, in [0, 1] (see `cruiseInterval`). */
   intervalJitter: number;
-  /** Seconds at the end of the cruise over which the heading drift eases to a stop. */
-  driftSettleTime: number;
   /** Remaining distance at which APPROACH becomes FLYBY. */
   flybyDistance: number;
   /** `D` for planets: how far ahead the planet is placed, which is also the spawn distance. */
@@ -510,7 +502,6 @@ export const DEFAULT_AUTOPILOT_PARAMS: Readonly<AutopilotParams> = {
   view: cameraFrustum(CAMERA_FOV_DEG, VIEW_DEFAULT_ASPECT, VIEW_WIDEST_ASPECT),
   interval: ENCOUNTER_INTERVAL_SECONDS,
   intervalJitter: ENCOUNTER_INTERVAL_JITTER,
-  driftSettleTime: ENCOUNTER_DRIFT_SETTLE_SECONDS,
   flybyDistance: ENCOUNTER_FLYBY_DISTANCE,
   encounterDistance: ENCOUNTER_DISTANCE,
   sideOffsetFactor: ENCOUNTER_SIDE_OFFSET_FACTOR,
@@ -588,8 +579,6 @@ export interface AutopilotState {
    * (`cruiseTargetSpeed`); `Infinity` before the first encounter.
    */
   entrySpeed: number;
-  /** Drift rate the latest encounter ended at, which the cruise after it eases up from; 1 before the first. */
-  entryDrift: number;
   /**
    * Whether the latest encounter ended out of view, so the cruise after it returns to warp with the
    * quick entry (`viewEntryDuration`) rather than the gentle one (`warpEntryDuration`).
@@ -607,8 +596,6 @@ export interface AutopilotState {
   fade: number;
   /** Target speed for the ship's next step, in world units per second. */
   targetSpeed: number;
-  /** Drift rate for the ship's next step, in [0, 1]. */
-  driftRate: number;
 }
 
 /** Salts for values drawn from the appearance seed, independent of each other and of the appearance. */
@@ -839,21 +826,6 @@ export function encounterProfile(params: Readonly<AutopilotParams>, kind: Encoun
   if (kind === 'nebula') return params.nebula.profile;
   if (kind === 'asteroid') return params.asteroid.profile;
   return kind === 'comet' ? params.comet.profile : params.profile;
-}
-
-/**
- * Drift rate after `cruiseTime` seconds of a cruise lasting `interval`, starting from `entryDrift`
- * (the rate the encounter before it ended at; 1 for the first cruise and after an encounter that ran
- * to its despawn distance): easing (smoothstep) up from `entryDrift` to 1 over the first
- * `driftSettleTime` seconds, and down to 0 over the last `driftSettleTime` seconds before the
- * encounter starts, whichever is lower. The settle time is capped at the interval, so with an entry
- * rate of 1 the rate is 1 when a cruise begins and the drift never stalls or restarts abruptly.
- */
-function cruiseDriftRate(cruiseTime: number, interval: number, params: Readonly<AutopilotParams>, entryDrift = 1): number {
-  const settle = Math.min(params.driftSettleTime, interval);
-  if (!(settle > 0)) return cruiseTime >= interval ? 0 : 1;
-  const resume = entryDrift < 1 ? entryDrift + (1 - entryDrift) * smoothstep(0, settle, cruiseTime) : 1;
-  return Math.min(resume, smoothstep(interval, interval - settle, cruiseTime));
 }
 
 /**
@@ -1156,14 +1128,12 @@ const viewScratch: Vec3 = { x: 0, y: 0, z: 0 };
  *   them: it is out of view only once every one of those spheres is.
  * - Nebula: its layers reach across the path, so every layer is on screen until the ship is past it.
  *   In world units, how far the ship is past every layer (`-(remaining + depth)`, from
- *   `nebulaViewExtent`), and only once the heading has not turned so far from the planned direction
- *   that the view could reach a layer: every point of a layer is then at least
- *   π/2 + atan(past / lateral) from the planned direction, so at least that minus the heading's turn
- *   from the forward axis, which must exceed the view's corner half-angle (`frustumConeHalfAngle`).
+ *   `nebulaViewExtent`). The heading is fixed, so it is the planned direction, and every layer is then
+ *   behind the camera.
  *
- * With the heading held (APPROACH and FLYBY), the margin only grows as the ship moves on, for every
- * kind (`frustumSphereMargin`; a nebula's `past` grows with the distance travelled): once out of view,
- * the object would never come back into view.
+ * The heading is fixed (SHIP_HEADING), so the margin only grows as the ship moves on, for every kind
+ * (`frustumSphereMargin`; a nebula's `past` grows with the distance travelled): once out of view, the
+ * object would never come back into view, before or after the closest approach.
  */
 export function encounterViewMargin(
   encounter: Readonly<ActiveEncounter>,
@@ -1182,11 +1152,7 @@ export function encounterViewMargin(
   }
   if (encounter.kind === 'comet') return cometViewMargin(encounter, ship, view);
   if (encounter.kind === 'nebula') {
-    const { depth, lateral } = nebulaViewExtent(plan.radius, plan.closestDistance);
-    const past = -(remaining + depth);
-    if (!(past > 0)) return past;
-    const nearest = Math.PI / 2 + Math.atan(past / lateral);
-    return nearest - angleBetween(ship.heading, plan.direction) > frustumConeHalfAngle(view) ? past : 0;
+    return -(remaining + nebulaViewExtent(plan.radius, plan.closestDistance).depth);
   }
   // Every kind is handled above: a new kind fails to compile here until it names its bounds.
   const unhandled: never = encounter;
@@ -1251,14 +1217,12 @@ export function createAutopilotState(params: Readonly<AutopilotParams> = DEFAULT
     viewMargin: Number.NEGATIVE_INFINITY,
     outOfViewTime: Number.NEGATIVE_INFINITY,
     entrySpeed: Number.POSITIVE_INFINITY,
-    entryDrift: 1,
     entryQuick: false,
     entryAt: 0,
     entryShipSpeed: 0,
     entryShipAccel: 0,
     fade: 0,
     targetSpeed: cruiseTargetSpeed(0, cruiseInterval(params, 0), params, false),
-    driftRate: cruiseDriftRate(0, cruiseInterval(params, 0), params),
   };
 }
 
@@ -1283,8 +1247,8 @@ export function createAutopilotState(params: Readonly<AutopilotParams> = DEFAULT
  *   before or after the closest approach, the encounter moves on one state per step from the state it
  *   was in on the step before (APPROACH → FLYBY → DEPARTURE → CRUISE), so it ends within three steps
  *   and every encounter still shows the whole cycle. It would not come back into view: the heading
- *   is held until the closest approach (see `encounterViewMargin`). An object out of view is removed
- *   whatever its fade, which no one sees.
+ *   is fixed (see `encounterViewMargin`). An object out of view is removed whatever its fade, which
+ *   no one sees.
  * - The lateness carried from the end of DEPARTURE is the time since the first of those held: since
  *   the despawn distance was passed, or since the view margin turned positive (interpolated between
  *   the two steps either side), up to three steps.
@@ -1295,9 +1259,6 @@ export function createAutopilotState(params: Readonly<AutopilotParams> = DEFAULT
  *   the cruise speed is above the arrival speed (which chooses the next object, `next`, once).
  * - The fade follows the encounter's own time (`encounterTime`) for the fade-in of a planet, an
  *   asteroid or a comet, and the remaining distance otherwise (`encounterOpacity`).
- * - The drift rate eases to 0 at the end of CRUISE, stays 0 through APPROACH and FLYBY, and eases
- *   back toward 1 over DEPARTURE as the ship recedes (reaching 1 at the despawn distance), then on
- *   to 1 at the start of CRUISE from wherever DEPARTURE left it.
  */
 export function updateAutopilot(
   state: Readonly<AutopilotState>,
@@ -1316,7 +1277,6 @@ export function updateAutopilot(
   let next = state.next;
   let encounterTime = travel === 'CRUISE' ? 0 : state.encounterTime + dt;
   let entrySpeed = state.entrySpeed;
-  let entryDrift = state.entryDrift;
   let entryQuick = state.entryQuick;
   let entryAt = state.entryAt;
   let entryShipSpeed = state.entryShipSpeed;
@@ -1396,7 +1356,6 @@ export function updateAutopilot(
         // Carried with the encounter's late start. The next cruise eases up from where this ends.
         cruiseTime += late;
         entrySpeed = encounterTargetSpeed(remaining, encounterCruiseSpeed(params), profile);
-        entryDrift = smoothstep(0, -profile.despawnDistance, remaining);
         entryQuick = outOfView;
         // The ship's acceleration with the encounter's last target, so the quick entry carries it on.
         entryShipAccel = (entrySpeed - ship.speed) / params.shipSpeedTau;
@@ -1423,7 +1382,6 @@ export function updateAutopilot(
   out.viewMargin = viewMargin;
   out.outOfViewTime = outOfViewTime;
   out.entrySpeed = entrySpeed;
-  out.entryDrift = entryDrift;
   out.entryQuick = entryQuick;
   out.entryAt = entryAt;
   out.entryShipSpeed = entryShipSpeed;
@@ -1454,12 +1412,10 @@ export function updateAutopilot(
       entryShipAccel,
       handover,
     );
-    out.driftRate = cruiseDriftRate(cruiseTime, interval, params, encounterCount > 0 ? entryDrift : 1);
   } else {
     const profile = encounterProfile(params, encounter.kind);
     out.fade = encounterOpacity(encounter.plan, remaining, profile, encounterTime);
     out.targetSpeed = activeEncounterTargetSpeed(encounter, remaining, params);
-    out.driftRate = travel === 'DEPARTURE' ? smoothstep(0, -profile.despawnDistance, remaining) : 0;
   }
   out.next = next;
   return out;
@@ -1517,19 +1473,19 @@ export interface Travel {
 
 /**
  * Creates a travel simulation at rest, in CRUISE, with the ship params taken from the autopilot so
- * the first step already follows it. `shipParams` supplies the drift settings (and the speed time
- * constant); its target speed and drift rate are replaced.
+ * the first step already follows it. `shipParams` supplies the speed time constant; its target speed
+ * is replaced.
  */
 export function createTravel(autopilotParams: AutopilotParams, shipParams: Readonly<ShipParams>): Travel {
   const autopilot = createAutopilotState(autopilotParams);
-  const params: ShipParams = { ...shipParams, targetSpeed: autopilot.targetSpeed, driftRate: autopilot.driftRate };
-  return { ship: createShipState({}, params), shipParams: params, autopilot, autopilotParams };
+  const params: ShipParams = { ...shipParams, targetSpeed: autopilot.targetSpeed };
+  return { ship: createShipState(), shipParams: params, autopilot, autopilotParams };
 }
 
 /**
  * The simulation step (docs/PLAN.md section 6, Time and speed): advances the ship by `dt` seconds,
- * then the autopilot from the new ship state, and feeds the autopilot's target speed and drift rate
- * into the ship params for the next step. Updates `travel` in place and allocates nothing except the
+ * then the autopilot from the new ship state, and feeds the autopilot's target speed into the ship
+ * params for the next step. Updates `travel` in place and allocates nothing except the
  * plan made when an encounter starts. A zero `dt` (the first frame after a resume) changes nothing
  * but the ship params, which then follow any speed change made meanwhile.
  */
@@ -1538,5 +1494,4 @@ export function stepTravel(travel: Travel, dt: number): void {
   updateShip(ship, dt, shipParams, ship);
   updateAutopilot(autopilot, ship, dt, autopilotParams, autopilot);
   shipParams.targetSpeed = autopilot.targetSpeed;
-  shipParams.driftRate = autopilot.driftRate;
 }

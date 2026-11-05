@@ -3,10 +3,10 @@
  *
  * The engine owns the frame loop and knows nothing about the DOM UI; the UI talks to it only through
  * the small public API below. The camera always sits at the origin and only takes the ship heading
- * (floating origin). Nothing is allocated inside the frame loop.
+ * (floating origin), which is fixed (SHIP_HEADING), so the camera never turns. Nothing is allocated inside the frame loop.
  *
  * Each frame runs one simulation step (`stepTravel`: the ship, then the Autopilot, which sets the
- * ship's target speed and drift rate), then the encounter view creates or disposes the encounter
+ * ship's target speed), then the encounter view creates or disposes the encounter
  * object, a planet, a nebula, an asteroid or a comet (compiling its shaders with `renderer.compileAsync`
  * before it is first drawn), and the render places it relative to the ship. The encounter shader
  * programs themselves are compiled once at construction and kept for the whole run
@@ -98,8 +98,6 @@ export interface EngineOptions {
   arrivalSpeed?: number;
   /** Which star layers are drawn (the distant galaxies belong to the far layer). Default: 'both'. For tests that look at one layer alone. */
   starLayers?: StarLayers;
-  /** Whether the heading drifts (the slow yaw and pitch). Default: true. Off, the heading stays at -Z. */
-  headingDrift?: boolean;
   /**
    * Times each frame's GPU work with `EXT_disjoint_timer_query_webgl2` where the browser has it
    * (GpuTimer.ts), read through `getGpuFrameTimes()`. Default: false (the e2e build turns it on with
@@ -663,7 +661,7 @@ function clampSpeedLevel(level: number, fallback: number): number {
 
 /**
  * The ship, autopilot and their params the engine travels with for `options` (its trip seed, speed
- * level, encounter interval, kind and arrival speed, and heading drift), with the engine's seeded
+ * level, encounter interval, kind and arrival speed), with the engine's seeded
  * planets, nebulae, asteroids and comets. Shared with the e2e GPU benchmark (src/e2eGpuBench.ts), so
  * it flies exactly the engine's encounters.
  */
@@ -687,7 +685,5 @@ export function createEngineTravel(options: Readonly<EngineOptions> = {}): Trave
     cometShare: kind === undefined ? DEFAULT_AUTOPILOT_PARAMS.cometShare : kind === 'comet' ? 1 : 0,
   };
   setCruiseSpeed(autopilotParams, SHIP_SPEED_LEVELS[speedLevel] ?? 0);
-  const shipParams =
-    options.headingDrift === false ? { ...DEFAULT_SHIP_PARAMS, yawAmplitude: 0, pitchAmplitude: 0 } : DEFAULT_SHIP_PARAMS;
-  return createTravel(autopilotParams, shipParams);
+  return createTravel(autopilotParams, DEFAULT_SHIP_PARAMS);
 }

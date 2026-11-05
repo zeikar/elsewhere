@@ -78,21 +78,13 @@ export const SHIP_DEFAULT_SPEED_LEVEL = 1;
 export const SHIP_SPEED_TAU_SECONDS = 2;
 
 /**
- * Slow heading drift (docs/PLAN.md section 9, Phase 1): yaw and pitch follow low-frequency sines of
- * the accumulated simulation time. Amplitudes are in radians, periods in seconds. Pitch stays well
- * away from the poles.
+ * Heading (docs/PLAN.md section 6, Starfield, and section 9, Phase 1): the ship always flies along
+ * -Z, the default Three.js camera direction, and never turns. The camera's rotation is therefore the
+ * same for the whole trip, in every travel state and at every speed level, so the far stars and the
+ * galaxies, which turn with the camera only, are a completely still backdrop; only the near dust
+ * streams past (along the velocity, which is the heading × the speed).
  */
-export const SHIP_YAW_DRIFT_AMPLITUDE_RAD = 0.6;
-export const SHIP_YAW_DRIFT_PERIOD_SECONDS = 240;
-export const SHIP_PITCH_DRIFT_AMPLITUDE_RAD = 0.2;
-export const SHIP_PITCH_DRIFT_PERIOD_SECONDS = 150;
-
-/**
- * Largest allowed angular change of the heading, in radians per second, so turns stay smooth.
- * The drift settings above must stay below it: their peak rate is about
- * sqrt((yawAmp * 2π / yawPeriod)² + (pitchAmp * 2π / pitchPeriod)²) ≈ 0.018 rad/s.
- */
-export const SHIP_MAX_TURN_RATE_RAD_PER_S = 0.03;
+export const SHIP_HEADING = { x: 0, y: 0, z: -1 } as const;
 
 /*
  * Starfield (docs/PLAN.md section 6, Starfield). Distances are in world units, the same units as the
@@ -210,10 +202,38 @@ export const GALAXY_SIZE_MAX_DEG = 3.5;
 export const GALAXY_SPIRAL_SHARE = 0.65;
 
 /**
- * Galaxies sit where the heading drift sweeps the view: within the yaw and pitch drift amplitudes
- * (SHIP_*_DRIFT_AMPLITUDE_RAD) of -Z, plus this margin, so each comes into view during a drift cycle.
+ * The heading is fixed (SHIP_HEADING), so a galaxy is seen only if it is in the view, and the
+ * placement depends on the trip seed only, never on the screen. Each sits in the camera's view on a
+ * screen of GALAXY_PLACEMENT_ASPECT (16:9, VIEW_DEFAULT_ASPECT; the vertical field of view
+ * CAMERA_FOV_DEG): its centre is drawn uniformly over the middle GALAXY_PLACEMENT_SCREEN_SHARE of the
+ * screen's width and height (normalised device coordinates within ±this), which leaves room for its
+ * own size, so every galaxy is wholly on such a screen from the first frame (Galaxies.test.ts).
+ *
+ * The vertical field of view stays CAMERA_FOV_DEG on a narrower screen, so it shows less at the
+ * sides: a 9:16 phone held upright shows only about ±18° of the ±39° the galaxies span. The first
+ * galaxy of every trip is therefore drawn over the same share of a GALAXY_FIRST_PLACEMENT_ASPECT
+ * (9:16) screen instead, so it is wholly on every screen from 9:16 to VIEW_WIDEST_ASPECT (21:9), and
+ * every trip with a galaxy shows at least one there (Galaxies.test.ts). The others keep the 16:9
+ * placement, so a narrower screen misses those toward the sides (measured over 4,000 seeds: about
+ * 26% of all galaxies are never seen at 9:16, 20% at 3:4, 12% at 1:1 and 2% at 4:3). A screen wider
+ * than 21:9 narrows the vertical field of view, so one much wider cuts off those toward the top and
+ * bottom, the first galaxy included (at 32:9, 15% are never seen and 7% of trips with a galaxy show
+ * none).
  */
-export const GALAXY_PLACEMENT_MARGIN_RAD = 0.25;
+export const GALAXY_PLACEMENT_ASPECT = 16 / 9;
+export const GALAXY_FIRST_PLACEMENT_ASPECT = 9 / 16;
+export const GALAXY_PLACEMENT_SCREEN_SHARE = 0.8;
+
+/**
+ * Smallest angle, in degrees, between the screen centre (the fixed heading, -Z) and the edge of any
+ * galaxy. Asteroids and comets first appear within about 1.2° of the centre, and planets within 4°
+ * (about 0.5% further, the largest passed far off, up to about 4.7°), and each lingers there through
+ * the far stretch. So no asteroid or comet fades in on top of a galaxy, but a rare large planet can
+ * fade in at a galaxy's edge (measured over 10,000 planet, 4,000 asteroid and 1,000 comet seeds;
+ * Galaxies.test.ts). A galaxy's size is drawn after its direction, so the check takes the largest
+ * (GALAXY_SIZE_MAX_DEG): a centre within GALAXY_SIZE_MAX_DEG / 2 + this of -Z is drawn again.
+ */
+export const GALAXY_CENTRE_CLEARANCE_DEG = 4.5;
 
 /** Smallest angle between two galaxies, in degrees, so they never overlap. */
 export const GALAXY_MIN_SEPARATION_DEG = 10;
@@ -267,13 +287,6 @@ export const ENCOUNTER_MAX_SAME_KIND_RUN = 3;
  * from this range, in radians (0 is level with the path, positive is up).
  */
 export const ENCOUNTER_SIDE_ELEVATION_RANGE = [-0.6, 0.6] as const;
-
-/**
- * Over the last this many seconds of the cruise, the heading drift eases to a stop, so the heading
- * is already still when the encounter is planned and stays held through APPROACH and FLYBY. It
- * resumes gradually in DEPARTURE, continuing from where it stopped.
- */
-export const ENCOUNTER_DRIFT_SETTLE_SECONDS = 5;
 
 /**
  * Dropping out of warp (docs/PLAN.md section 1: cruise is the screensaver, an encounter is the
@@ -333,14 +346,13 @@ export const ENCOUNTER_WARP_ENTRY_SECONDS = 8;
  *   all do; its tails trail back and away from the path, so it leaves with its coma (see Comets).
  * - A nebula is large and soft, and its layers reach across the path, so it is off the screen only
  *   once every layer lies behind the camera: the ship is past the farthest any layer reaches along the
- *   path (`nebulaViewExtent`, a bound drawn from NEBULA_RANGES in core radii), and the heading has not
- *   turned so far back that the view could reach behind (checked from the heading against the cone
- *   around the view, so it holds while the drift resumes).
+ *   path (`nebulaViewExtent`, a bound drawn from NEBULA_RANGES in core radii), along the fixed
+ *   heading.
  *
- * The heading is held from the end of the cruise to the closest approach, and moving forward along a
- * held heading never brings an object back into the view, so an object once off screen would stay
- * off; it is removed then. Until then the target speed is exactly the distance-based profile it
- * always was, so while the object is on screen the ship is never faster than before. The encounter
+ * The heading is fixed (SHIP_HEADING), and moving forward along it never brings an object back into
+ * the view, so an object once off screen would stay off; it is removed then. Until then the target
+ * speed is exactly the distance-based profile it always was, so while the object is on screen the
+ * ship is never faster than before. The encounter
  * interval still counts the cruise from the end of each encounter, which now comes sooner: the
  * schedule (each encounter's kind, side and cruise length) is unchanged, only the wall time between
  * encounters is shorter.
@@ -357,8 +369,9 @@ export const ENCOUNTER_WARP_ENTRY_SECONDS = 8;
  * within 3.3 s and 5.1 s at the top level (limits 4 s and 7 s); its acceleration peaks at about 7.5,
  * 25 and 40 at the three levels. An encounter that instead ran to its despawn distance (nothing left
  * on screen to leave) is followed by the gentle entry, over ENCOUNTER_WARP_ENTRY_SECONDS, stretched
- * so its slope never exceeds ENCOUNTER_WARP_ENTRY_MAX_RATE. The heading drift resumes from where the
- * encounter left it over ENCOUNTER_DRIFT_SETTLE_SECONDS, only once the object is gone.
+ * so its slope never exceeds ENCOUNTER_WARP_ENTRY_MAX_RATE. The ship flies on along the same fixed
+ * heading, so it passes the object, unseen, at exactly the planned distance (fixedHeading.test.ts
+ * flies on past the end of the encounter).
  */
 export const VIEW_WIDEST_ASPECT = 21 / 9;
 export const ENCOUNTER_WARP_ENTRY_MAX_RATE = 17;
@@ -1043,18 +1056,17 @@ export const ASTEROID_DETAIL = { main: 8, satellite: 3 } as const;
  *
  * Plan: the encounter radius is the coma's radius, and the planned path passes the nucleus at
  * COMET_MIN_PASS_DISTANCE or more (at least the coma radius × (1 + ENCOUNTER_CLEARANCE_MARGIN), far
- * more in practice), so the camera never enters the coma, let alone its core or the nucleus. The
- * heading is held while the encounter lasts, but a comet leaves the screen, and its encounter ends,
- * short of the closest approach, and the next cruise may ease the heading drift back up before the
- * ship gets there: the real pass can be a little nearer than the planned one (measured with the live
- * view: at least 0.969 × it at the slowest level and 0.990 × at the others, the nearest tail vertex
- * at 0.96 × the planned distance less the coma radius, still more than 60 units outside the coma;
- * Comet.test.ts flies on past the end of the encounter). Issue #62 removes the drift. The off-screen
- * test (`encounterViewMargin`) takes the live view to spheres that hold the coma and every segment of
- * both tails (`CometParams.bounds`), and the comet is off the screen only once all of them are. The
- * tails trail back along the path and away from it, so they never keep a comet on the screen after
- * its coma has left it (measured: they leave on the same step): a comet leaves the screen to the side
- * with its coma, a few seconds before the closest approach on every screen from 4:3 to 32:9.
+ * more in practice), so the camera never enters the coma, let alone its core or the nucleus. A comet
+ * leaves the screen, and its encounter ends, short of the closest approach, but the heading is fixed
+ * (SHIP_HEADING), so the ship flies on along the planned path and the real pass is the planned one
+ * (Comet.test.ts and e2e/comet.spec.ts fly on past the end of the encounter: within 0.5% of the
+ * planned distance, and every tail vertex outside the planned distance less the coma radius). The
+ * off-screen test (`encounterViewMargin`) takes the live view to spheres that hold the coma and
+ * every segment of both tails (`CometParams.bounds`), and the comet is off the screen only once all
+ * of them are. The tails trail back along the path and away from it, so they never keep a comet on
+ * the screen after its coma has left it (measured: they leave on the same step): a comet leaves the
+ * screen to the side with its coma, a few seconds before the closest approach on every screen from
+ * 4:3 to 32:9.
  *
  * Measured over 2,000 seeds (Comet.test.ts checks the bounds): the nucleus 2.5–5 in radius, the
  * coma radius 26–42, the closest approach to the nucleus 110–165 (p10/p50/p90 about 110/122/155),

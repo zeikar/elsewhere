@@ -208,10 +208,10 @@ describe('far star view directions', () => {
   });
 
   it("do not change under pure translation of the ship, while the near stars' wrapped positions do", () => {
-    // The engine's simulation with the heading drift off: the ship only translates, at the top speed.
+    // The engine's simulation: the heading is fixed, so the ship only translates, at the top speed.
     const autopilotParams = { ...DEFAULT_AUTOPILOT_PARAMS, interval: 1e9 };
     setCruiseSpeed(autopilotParams, SHIP_SPEED_LEVELS[SHIP_SPEED_LEVELS.length - 1]!);
-    const travel = createTravel(autopilotParams, { ...DEFAULT_SHIP_PARAMS, yawAmplitude: 0, pitchAmplitude: 0 });
+    const travel = createTravel(autopilotParams, DEFAULT_SHIP_PARAMS);
     for (let i = 0; i < 20; i++) stepTravel(travel, DT_CAP_SECONDS);
     const stars = directions(200);
     const ship = travel.ship;

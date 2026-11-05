@@ -34,7 +34,7 @@ import {
   planEncounter,
 } from './encounter';
 import { mulberry32 } from './seed';
-import { DEFAULT_SHIP_PARAMS, createShipState, headingAt, updateShip, type ShipParams, type Vec3 } from './Ship';
+import { DEFAULT_SHIP_PARAMS, createShipState, updateShip, type ShipParams, type Vec3 } from './Ship';
 
 const dot = (a: Vec3, b: Vec3) => a.x * b.x + a.y * b.y + a.z * b.z;
 const len = (a: Vec3) => Math.hypot(a.x, a.y, a.z);
@@ -45,6 +45,11 @@ function distanceToLine(p: Vec3, dir: Vec3): number {
   return Math.hypot(p.x - dir.x * t, p.y - dir.y * t, p.z - dir.z * t);
 }
 
+/** A unit heading turned `yaw` about +Y (toward +X) and `pitch` up from -Z: planning is tested at any heading, not only the ship's fixed one. */
+function turnedHeading(yaw: number, pitch: number): Vec3 {
+  return { x: Math.sin(yaw) * Math.cos(pitch), y: Math.sin(pitch), z: -Math.cos(yaw) * Math.cos(pitch) };
+}
+
 function randomUnit(random: () => number): Vec3 {
   const z = random() * 2 - 1;
   const a = random() * 2 * Math.PI;
@@ -52,11 +57,14 @@ function randomUnit(random: () => number): Vec3 {
   return { x: r * Math.cos(a), y: r * Math.sin(a), z };
 }
 
-/** Headings to test: the ship's drift headings, random directions, and (nearly) vertical ones. */
+/**
+ * Headings to test: the ship's fixed one (-Z, the first), headings turned up to 0.6 rad off it,
+ * random directions, and (nearly) vertical ones. `planEncounter` takes any heading.
+ */
 function testHeadings(): Vec3[] {
   const random = mulberry32(7);
   const headings: Vec3[] = [];
-  for (let t = 0; t < 600; t += 13) headings.push(headingAt(t, DEFAULT_SHIP_PARAMS, { x: 0, y: 0, z: 0 }));
+  for (let t = 0; t < 600; t += 13) headings.push(turnedHeading(0.6 * Math.sin((2 * Math.PI * t) / 240), 0.2 * Math.sin((2 * Math.PI * t) / 150)));
   for (let i = 0; i < 200; i++) headings.push(randomUnit(random));
   headings.push({ x: 0, y: 1, z: 0 }, { x: 0, y: -1, z: 0 }, { x: 1e-9, y: 1, z: 0 }, { x: 3, y: -4, z: 12 });
   return headings;
@@ -157,7 +165,7 @@ describe('planEncounter', () => {
 describe('planning at large coordinates', () => {
   it('keeps planet - ship accurate to 1e-6 with ship positions around 1e12', () => {
     const origin = { x: 1e12, y: -7.3e11, z: 1.2e12 + 0.375 };
-    const heading = headingAt(37, DEFAULT_SHIP_PARAMS, { x: 0, y: 0, z: 0 });
+    const heading = turnedHeading(0.52, 0.18);
     const radius = 90;
     const e = planEncounter(origin, heading, radius);
     const rel = { x: 0, y: 0, z: 0 };
@@ -237,13 +245,12 @@ describe('encounterTargetSpeed', () => {
 
   it("works with Ship's exponential speed approach: slows to near the minimum and returns to cruise", () => {
     const radius = 100;
-    const steady: ShipParams = { ...DEFAULT_SHIP_PARAMS, yawAmplitude: 0, pitchAmplitude: 0 };
     for (const dt of [1 / 60, 1 / 120]) {
       // The speeds encounters are flown from at each speed level: faster levels drop out of warp to
       // the arrival speed first (Autopilot.ts, `encounterCruiseSpeed`).
       for (const cruise of SHIP_SPEED_LEVELS.map((level) => Math.min(level, ENCOUNTER_ARRIVAL_SPEED))) {
-        const params: ShipParams = { ...steady, targetSpeed: cruise };
-        let ship = createShipState({ speed: cruise, position: { x: 5e9, y: 0, z: -3e9 } }, params);
+        const params: ShipParams = { ...DEFAULT_SHIP_PARAMS, targetSpeed: cruise };
+        let ship = createShipState({ speed: cruise, position: { x: 5e9, y: 0, z: -3e9 } });
         const e = planEncounter(ship.position, ship.heading, radius);
         const rel = { x: 0, y: 0, z: 0 };
         let remaining = encounterRemaining(e, ship.position);
@@ -483,8 +490,8 @@ describe('far stretch', () => {
     { label: 'the shortest stretch, from the top speed', start: farHandoverSpeed(farStretchMinRoom(cruise, profile), 150, cruise, profile), room: farStretchMinRoom(cruise, profile) },
   ])('the ship follows it ($label): smooth, accelerating at about the far acceleration at most, with a bounded jerk, and at the cruise speed with no acceleration at its end', ({ start, room }) => {
     for (const dt of [1 / 60, 1 / 30]) {
-      const params: ShipParams = { ...DEFAULT_SHIP_PARAMS, driftRate: 0 };
-      let ship = createShipState({ speed: start }, params);
+      const params: ShipParams = { ...DEFAULT_SHIP_PARAMS };
+      let ship = createShipState({ speed: start });
       let travelled = 0;
       let prevSpeed = start;
       let prevAccel = 0;
