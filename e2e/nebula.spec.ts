@@ -3,8 +3,8 @@ import { expect, test, type Page } from '@playwright/test';
 import type { E2EHookSnapshot } from '../src/e2eHook';
 import { NEBULA_NEAR_FADE_MIN_DISTANCE } from '../src/config';
 import { FAST_ENCOUNTERS_ARRIVAL_SPEED } from './limits';
+import { appUrl } from './app';
 
-const APP_PATH = '/elsewhere/';
 
 /** A pixel counts as lit when its brightest channel is above this (0–255). */
 const LIT_THRESHOLD = 24;
@@ -178,7 +178,7 @@ test('a forced nebula encounter draws a coloured nebula over the stars, runs the
   await page.setViewportSize({ width: 640, height: 360 });
   // Flown from the top speed (see FAST_ENCOUNTERS_ARRIVAL_SPEED): this checks the nebula's pixels,
   // the state cycle and the resources, not the speed profile.
-  await page.goto(`${APP_PATH}?encounterInterval=1&encounterKind=nebula&arrivalSpeed=${FAST_ENCOUNTERS_ARRIVAL_SPEED}`);
+  await page.goto(appUrl(`encounterInterval=1&encounterKind=nebula&arrivalSpeed=${FAST_ENCOUNTERS_ARRIVAL_SPEED}`));
   await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 0);
   await page.evaluate(() => window.__elsewhere!.setSpeed(99));
   expect((await page.evaluate(() => window.__elsewhere!.snapshot())).autopilot.arrivalSpeed).toBe(FAST_ENCOUNTERS_ARRIVAL_SPEED);

@@ -1,8 +1,8 @@
 import { expect, test, type Page } from '@playwright/test';
 import type { E2EHookSnapshot } from '../src/e2eHook';
 import { SHIP_SPEED_LEVELS, initialSpeedSettings } from '../src/config';
+import { appUrl } from './app';
 
-const APP_PATH = '/elsewhere/';
 
 // SwiftShader renders at only a few fps, which slows every page interaction; leave headroom over
 // Playwright's 30 s default.
@@ -18,7 +18,7 @@ function collectErrors(page: Page): string[] {
 }
 
 async function openApp(page: Page): Promise<void> {
-  await page.goto(APP_PATH);
+  await page.goto(appUrl());
   await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 0);
 }
 

@@ -6,8 +6,8 @@
 import { expect, test, type Page } from '@playwright/test';
 import type { E2EHookSnapshot } from '../src/e2eHook';
 import { installFrameSampler, takeFrameWindow } from './frameSampler';
+import { appUrl } from './app';
 
-const APP_PATH = '/elsewhere/';
 
 // SwiftShader renders at only a few fps; each test sets its own, longer timeout where it needs one.
 test.describe.configure({ timeout: 300_000 });
@@ -48,7 +48,7 @@ test('the hook reports frame-time statistics, the heap and renderer.info, and a 
   page,
 }) => {
   const errors = collectErrors(page);
-  await page.goto(`${APP_PATH}?encounterInterval=1e9`);
+  await page.goto(appUrl(`encounterInterval=1e9`));
   await page.waitForFunction(() => (window.__elsewhere?.snapshot().perf.frameMs.count ?? 0) >= 5);
   const s = await snapshot(page);
   const { frameMs, workMs, heapUsed } = s.perf;
@@ -97,7 +97,7 @@ test('hidden → 5 s → visible mid-encounter moves the ship by no more than on
   const errors = collectErrors(page);
   // Small viewport: SwiftShader is fill-rate bound and no pixels are checked here.
   await page.setViewportSize({ width: 480, height: 270 });
-  await page.goto(`${APP_PATH}?encounterInterval=1&encounterKind=planet`);
+  await page.goto(appUrl(`encounterInterval=1&encounterKind=planet`));
   await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 0);
   await page.evaluate(() => window.__elsewhere!.setSpeed(99));
   await installFrameSampler(page);

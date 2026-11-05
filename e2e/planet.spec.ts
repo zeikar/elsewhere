@@ -1,7 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import { expect, test, type Page } from '@playwright/test';
+import { appUrl } from './app';
 
-const APP_PATH = '/elsewhere/';
 
 /** A pixel counts as lit when its brightest channel is above this (0–255). */
 const LIT_THRESHOLD = 16;
@@ -85,7 +85,7 @@ function meanAbsDiff(a: readonly number[], b: readonly number[]): number {
 
 test('draws a rocky and a gas planet that are non-blank and clearly differ, with no shader errors', async ({ page }) => {
   const errors = collectErrors(page);
-  await page.goto(APP_PATH);
+  await page.goto(appUrl());
   await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 0);
   // The starfield is not needed here; pausing it frees SwiftShader for the planet draws.
   await page.evaluate(() => window.__elsewhere!.pause());
@@ -136,7 +136,7 @@ const CANVAS_ONLY = 'body > :not(canvas) { display: none !important; }';
 
 test('a planet hides the far stars behind its disc, and they show all around it', async ({ page }) => {
   const errors = collectErrors(page);
-  await page.goto(APP_PATH);
+  await page.goto(appUrl());
   await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 0);
   await page.evaluate(() => window.__elsewhere!.pause());
 

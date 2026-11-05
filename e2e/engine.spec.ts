@@ -1,8 +1,8 @@
 import { expect, test, type Page } from '@playwright/test';
 import type { E2EHookSnapshot } from '../src/e2eHook';
 import { DT_CAP_SECONDS } from '../src/config';
+import { appUrl } from './app';
 
-const APP_PATH = '/elsewhere/';
 
 /** Collects console errors and uncaught page errors from the moment it is called. */
 function collectErrors(page: Page): string[] {
@@ -15,7 +15,7 @@ function collectErrors(page: Page): string[] {
 }
 
 async function openApp(page: Page): Promise<void> {
-  await page.goto(APP_PATH);
+  await page.goto(appUrl());
   await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 0);
 }
 

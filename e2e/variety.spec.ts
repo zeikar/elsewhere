@@ -1,8 +1,8 @@
 import { writeFileSync } from 'node:fs';
 import { expect, test, type Page } from '@playwright/test';
 import type { EncounterKind } from '../src/engine/Autopilot';
+import { appUrl } from './app';
 
-const APP_PATH = '/elsewhere/';
 
 /** A pixel counts as lit when its brightest channel is above this (0–255). */
 const LIT_THRESHOLD = 16;
@@ -84,7 +84,7 @@ for (const kind of ['planet', 'nebula'] as const) {
     const errors = collectErrors(page);
     // SwiftShader is fill-rate bound; a small viewport keeps the six draws quick.
     await page.setViewportSize({ width: 640, height: 360 });
-    await page.goto(APP_PATH);
+    await page.goto(appUrl());
     await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 0);
     // The starfield is not needed here; pausing it frees SwiftShader for the preview draws.
     await page.evaluate(() => window.__elsewhere!.pause());

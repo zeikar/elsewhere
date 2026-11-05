@@ -21,8 +21,8 @@ import {
 } from '../src/engine/Autopilot';
 import { encounterTargetSpeed } from '../src/engine/encounter';
 import { FAST_ENCOUNTERS_ARRIVAL_SPEED, SOAK_HEAP_GROWTH_LIMIT_BYTES } from './limits';
+import { appUrl } from './app';
 
-const APP_PATH = '/elsewhere/';
 
 /** A pixel counts as lit when its brightest channel is above this (0–255). */
 const LIT_THRESHOLD = 16;
@@ -50,8 +50,7 @@ async function openApp(page: Page, interval?: number, kind?: EncounterKind, arri
   if (interval !== undefined) query.set('encounterInterval', String(interval));
   if (kind !== undefined) query.set('encounterKind', kind);
   if (arrivalSpeed !== undefined) query.set('arrivalSpeed', String(arrivalSpeed));
-  const search = query.toString();
-  await page.goto(search === '' ? APP_PATH : `${APP_PATH}?${search}`);
+  await page.goto(appUrl(query.toString()));
   await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 0);
 }
 
@@ -285,7 +284,8 @@ test('three encounters run CRUISE → APPROACH → FLYBY → DEPARTURE → CRUIS
   const log = await travelLog(page);
   test.info().annotations.push({ type: 'travel log', description: JSON.stringify({ ...log, frameMs: undefined }) });
 
-  // The default seeded mix of kinds (a planet, a nebula, then a planet with the default base seed;
+  // The default seeded mix of kinds (a planet, a nebula, then a planet with the test default trip
+  // seed that appUrl pins;
   // the nebula and variety specs check nebulae). The full cycle, three times, each with its own index.
   expect(log.states.slice(0, 13).map((s) => [s.state, s.index])).toEqual([
     ['CRUISE', null],

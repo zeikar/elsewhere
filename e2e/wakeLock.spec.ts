@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
+import { appUrl } from './app';
 
-const APP_PATH = '/elsewhere/';
 
 // SwiftShader renders at only a few fps, which slows every page interaction; leave headroom over
 // Playwright's 30 s default.
@@ -91,7 +91,7 @@ test('the wake lock is held while travelling, released on pause and re-requested
 }) => {
   const errors = collectErrors(page);
   await stubWakeLock(page);
-  await page.goto(APP_PATH);
+  await page.goto(appUrl());
   await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 0);
 
   await expect.poll(() => wakeLockLog(page)).toEqual({ requests: 1, releases: 0, held: 1 });
