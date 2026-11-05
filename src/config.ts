@@ -1032,7 +1032,7 @@ export const COMET_NUCLEUS_CRATER_RIM = 0.12;
 /**
  * Mesh resolution: the nucleus's icosphere detail (492 vertices, 980 triangles); the coma sphere's
  * width and height segments; each tail tube's rings along its length (segments) and vertices around
- * it (sides). The glow mesh is then 561 + 2 × 41 × 16 vertices and 1,024 + 2 × 1,280 triangles.
+ * it (sides). The glow mesh is then 561 + 2 × 41 × 16 = 1,873 vertices and 960 + 2 × 1,280 = 3,520 triangles.
  *
  * Encounter-time resources: two geometries (the nucleus and the glow), two materials and two draw
  * calls, all freed with the encounter, and no program of their own (the rocky surface program and
