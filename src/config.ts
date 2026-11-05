@@ -6,7 +6,11 @@
 /** Upper bound on the device pixel ratio applied to the renderer (docs/PLAN.md section 6, Performance). */
 export const DPR_CAP = 2;
 
-/** Camera vertical field of view in degrees, and clip planes in world units. Placeholders until the starfield is tuned. */
+/**
+ * Camera vertical field of view in degrees, and clip planes in world units. Placeholders until the
+ * starfield is tuned. The vertical field of view is CAMERA_FOV_DEG up to 21:9 and narrower beyond it
+ * (VIEW_WIDEST_ASPECT, `cameraFovDeg` in engine/renderSize.ts); the live value is the camera's `fov`.
+ */
 export const CAMERA_FOV_DEG = 60;
 export const CAMERA_NEAR = 0.1;
 export const CAMERA_FAR = 10000;
@@ -225,6 +229,48 @@ export const ENCOUNTER_WARP_EXIT_SECONDS = 10;
 export const ENCOUNTER_WARP_EXIT_LEAD_SECONDS = 3;
 export const ENCOUNTER_WARP_ENTRY_SECONDS = 8;
 
+/**
+ * Speed driven by visibility (docs/PLAN.md section 9, Phase 4): after the closest approach, an
+ * encounter ends as soon as its object is out of view, and the ship eases straight back into warp,
+ * instead of crawling on to the despawn distance with the object already behind the camera.
+ *
+ * "Out of view" is a pure function of the simulation state (the ship's position and heading and the
+ * encounter plan) and the base vertical field of view (CAMERA_FOV_DEG), never of the browser's
+ * viewport. Up to VIEW_WIDEST_ASPECT (width / height), 21:9, the vertical field of view is fixed, so
+ * a wider screen only shows more at the sides. Beyond it the engine narrows the vertical field of
+ * view so the horizontal one stays at the 21:9 one (`cameraFovDeg` in engine/renderSize.ts: a wider
+ * screen shows less at the top and bottom instead). The autopilot tests against the cone around the
+ * camera's forward axis that contains the whole view at 21:9 (its half-angle reaches the view's
+ * corners, about 55.7°; `viewConeHalfAngle`), which contains the view at every other aspect ratio
+ * too, so an object outside it is off-screen on every screen, whatever the camera's roll. The
+ * criterion for each kind:
+ *
+ * - A planet is out of view once the sphere of radius `radius × (1 + ENCOUNTER_CLEARANCE_MARGIN)`,
+ *   which holds everything drawn for it (the atmosphere shell included, see Planets below), lies
+ *   wholly outside the cone. With `k` from 1.6 to 6 that is from a few units after the closest
+ *   approach to well before it, so a planet encounter ends at or just after the closest approach.
+ * - A nebula is large and soft, and its layers reach across the path, so it is out of view only once
+ *   every layer lies behind the camera: the ship is past the farthest any layer reaches along the path
+ *   (`nebulaViewExtent`, a bound drawn from NEBULA_RANGES in core radii), and the heading has not
+ *   turned so far back that the cone could reach behind (checked from the heading, so it holds while
+ *   the drift resumes).
+ *
+ * Until then the target speed is exactly the distance-based profile it always was, so while the object
+ * is in view the ship is never faster than before. The encounter interval still counts the cruise
+ * from the end of each encounter, which now comes sooner: the schedule (each encounter's kind, side
+ * and cruise length) is unchanged, only the wall time between encounters is shorter.
+ *
+ * The next cruise eases the target up from the speed the encounter ended at (near the minimum speed)
+ * with the warp entry ease above, over ENCOUNTER_WARP_ENTRY_SECONDS, stretched where needed so its
+ * slope never exceeds ENCOUNTER_WARP_ENTRY_MAX_RATE (units per second per second): about the slope of
+ * the return from the arrival speed to the top level (1.5 × 90 / 8 ≈ 16.9), so returning from the
+ * minimum speed is never steeper than the return to warp was. At the slowest level (the reduced-motion
+ * start) the return is from 4 to 20 units per second, a slope of at most 3. The heading drift resumes
+ * from where the encounter left it over ENCOUNTER_DRIFT_SETTLE_SECONDS.
+ */
+export const VIEW_WIDEST_ASPECT = 21 / 9;
+export const ENCOUNTER_WARP_ENTRY_MAX_RATE = 17;
+
 /** Remaining distance to the closest approach at which APPROACH becomes FLYBY. */
 export const ENCOUNTER_FLYBY_DISTANCE = 300;
 
@@ -282,8 +328,10 @@ export const ENCOUNTER_MIN_SPEED = 6;
  * Lowest planet minimum speed (units per second) at any speed level. `setCruiseSpeed` scales
  * ENCOUNTER_MIN_SPEED with the cruise speed, which would make it 2 at the slowest level (the
  * reduced-motion start): one encounter would take about 350 s, about 69 s of it in FLYBY. With this
- * floor it takes about 285 s, about 44 s in FLYBY, and a median planet peaks at about 2.8°/s, as it
- * did before the planets were made smaller. Nebulae have their own floor (NEBULA_MIN_SPEED_FLOOR).
+ * floor it took about 285 s, about 44 s in FLYBY, and a median planet peaks at about 2.8°/s, as it
+ * did before the planets were made smaller; ending once the planet is out of view (see
+ * VIEW_WIDEST_ASPECT) brings it down to about 153 s. Nebulae have their own floor
+ * (NEBULA_MIN_SPEED_FLOOR).
  */
 export const ENCOUNTER_MIN_SPEED_FLOOR = 4;
 export const ENCOUNTER_SLOWDOWN_DISTANCE = 520;
@@ -295,8 +343,11 @@ export const ENCOUNTER_SPEEDUP_DISTANCE = 800;
  * up from 0 to 1 over ENCOUNTER_FADE_IN_DISTANCE. The planet's size does not change (its spawn scale
  * is 1, as for nebulae), so it starts as a distant dot because it is far away, and grows on screen by
  * perspective alone. After passing, opacity eases back down to 0 over ENCOUNTER_FADE_OUT_DISTANCE,
- * reaching 0 at ENCOUNTER_DESPAWN_DISTANCE past the closest approach. The fade distances are long
- * enough that at the top cruise speed one capped frame changes opacity by less than 2%.
+ * reaching 0 at ENCOUNTER_DESPAWN_DISTANCE past the closest approach, where DEPARTURE ends at the
+ * latest; in practice a planet encounter ends once the planet is out of view (VIEW_WIDEST_ASPECT),
+ * shortly after the closest approach, and the planet is removed unseen before it fades. The fade
+ * distances are long enough that at the top cruise speed one capped frame changes opacity by less
+ * than 2%.
  */
 export const ENCOUNTER_FADE_IN_DISTANCE = 1200;
 export const ENCOUNTER_FADE_OUT_DISTANCE = 1200;
@@ -438,7 +489,8 @@ export const NEBULA_SIDE_OFFSET_FACTOR = 1.7;
  * the wisps keep streaming past while the ship drifts through them. Like a planet encounter, a nebula
  * encounter is flown from the arrival speed at the faster levels (ENCOUNTER_ARRIVAL_SPEED), so at the
  * default level and the top level alike it slows to this minimum speed of 24, and a median nebula
- * encounter lasts about 88 s from its spawn to its end.
+ * encounter lasts about 79 s from its spawn to its end, once every layer is behind the camera (see
+ * VIEW_WIDEST_ASPECT; about 88 s when it ran on to the despawn distance).
  */
 export const NEBULA_MIN_SPEED = 24;
 /** Lowest nebula minimum speed at any speed level (see ENCOUNTER_MIN_SPEED_FLOOR). */
@@ -449,8 +501,9 @@ export const NEBULA_SPEEDUP_DISTANCE = 600;
 
 /**
  * Nebula fade (see the planet one above). Like a planet, a nebula keeps its size (its spawn scale is
- * 1): it is far beyond the star cube when it spawns and fades in from opacity 0. It ends shortly after
- * every layer is behind the camera.
+ * 1): it is far beyond the star cube when it spawns and fades in from opacity 0. The despawn distance
+ * is shortly after every layer is behind the camera; the encounter ends sooner, as soon as every
+ * layer is (see VIEW_WIDEST_ASPECT).
  */
 export const NEBULA_FADE_IN_DISTANCE = 1400;
 export const NEBULA_FADE_OUT_DISTANCE = 700;

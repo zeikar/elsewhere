@@ -30,6 +30,7 @@ import {
   ENCOUNTER_BASE_SEED,
   SHIP_DEFAULT_SPEED_LEVEL,
   SHIP_SPEED_LEVELS,
+  VIEW_WIDEST_ASPECT,
 } from '../config';
 import {
   DEFAULT_AUTOPILOT_PARAMS,
@@ -47,7 +48,7 @@ import { FarStarfield } from './FarStarfield';
 import { FrameClock } from './FrameClock';
 import { FrameStats } from './FrameStats';
 import { nebulaParams, nebulaProgramMaterials, type Nebula } from './Nebula';
-import { computeRenderSize } from './renderSize';
+import { cameraFovDeg, computeRenderSize } from './renderSize';
 import { planetParams, planetProgramMaterials, type Planet } from './Planet';
 import { ProgramWarmup } from './ProgramWarmup';
 import { DEFAULT_SHIP_PARAMS, type ShipState } from './Ship';
@@ -341,6 +342,11 @@ export class Engine {
     return this.camera.aspect;
   }
 
+  /** The camera's live vertical field of view, in degrees (narrower than CAMERA_FOV_DEG beyond 21:9). */
+  getCameraFov(): number {
+    return this.camera.fov;
+  }
+
   getRendererInfo(): Readonly<WebGLInfo> {
     return this.renderer.info;
   }
@@ -395,6 +401,9 @@ export class Engine {
     // updateStyle = false: CSS keeps the canvas at full viewport size.
     this.renderer.setSize(size.cssWidth, size.cssHeight, false);
     this.camera.aspect = size.cssWidth / size.cssHeight;
+    // Beyond 21:9 the vertical field of view narrows, so the view never reaches past the autopilot's
+    // view cone (config.ts, VIEW_WIDEST_ASPECT).
+    this.camera.fov = cameraFovDeg(CAMERA_FOV_DEG, this.camera.aspect, VIEW_WIDEST_ASPECT);
     this.camera.updateProjectionMatrix();
     this.starfield.setRenderSize(size);
     this.farStarfield.setRenderSize(size);

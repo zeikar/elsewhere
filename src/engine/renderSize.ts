@@ -32,3 +32,18 @@ export function computeRenderSize(
     dpr,
   };
 }
+
+/**
+ * Vertical field of view, in degrees, for a camera whose base vertical field of view is `fovDeg` at
+ * aspect ratio `aspect` (width / height), so that the horizontal field of view never exceeds the one
+ * at `widestAspect` (config.ts, VIEW_WIDEST_ASPECT). Up to `widestAspect` the vertical field of view
+ * is `fovDeg` and a wider screen shows more at the sides; beyond it the vertical field of view narrows
+ * to 2·atan(tan(fovDeg / 2) · widestAspect / aspect), so the horizontal one stays at the
+ * `widestAspect` one and the whole view stays inside the cone `viewConeHalfAngle(fovDeg, widestAspect)`.
+ * An invalid aspect gives `fovDeg`.
+ */
+export function cameraFovDeg(fovDeg: number, aspect: number, widestAspect: number): number {
+  if (!Number.isFinite(aspect) || aspect <= widestAspect) return fovDeg;
+  const tanHalf = Math.tan((fovDeg * Math.PI) / 360);
+  return (Math.atan((tanHalf * widestAspect) / aspect) * 360) / Math.PI;
+}
