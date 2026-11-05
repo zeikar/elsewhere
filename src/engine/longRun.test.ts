@@ -75,6 +75,8 @@ class ResourceLedger {
 
 interface LongRunResult {
   kinds: Record<EncounterKind, number>;
+  /** Planet encounters whose planet had a ring. */
+  ringed: number;
   /** Encounters whose return to CRUISE left something behind, with what. */
   leaks: string[];
   /** Largest per-frame step beyond what the ship's speed allows (≤ 0 is fine). */
@@ -91,6 +93,7 @@ function runEncounters(travel: Travel, count: number, dt: (frame: number) => num
   const ledger = new ResourceLedger();
   const result: LongRunResult = {
     kinds: { planet: 0, nebula: 0 },
+    ringed: 0,
     leaks: [],
     worstJump: Number.NEGATIVE_INFINITY,
     peak: { geometries: 0, materials: 0, programs: 0 },
@@ -122,6 +125,7 @@ function runEncounters(travel: Travel, count: number, dt: (frame: number) => num
       tracked = current;
       ledger.track(current.object);
       result.kinds[travel.autopilot.encounter!.kind]++;
+      if (view.getPlanet()?.ring) result.ringed++;
       result.peak.geometries = Math.max(result.peak.geometries, ledger.geometries.size);
       result.peak.materials = Math.max(result.peak.materials, ledger.materials.size);
       result.peak.programs = Math.max(result.peak.programs, ledger.programs());
@@ -176,8 +180,10 @@ describe('long run (simulation level)', () => {
     expect(result.kinds.planet + result.kinds.nebula).toBe(100);
     expect(result.kinds.planet).toBeGreaterThan(30);
     expect(result.kinds.nebula).toBeGreaterThan(20);
-    // An encounter holds one shared geometry and a handful of materials, never more.
-    expect(result.peak.geometries).toBe(1);
+    // An encounter holds one shared geometry (a ringed planet its own ring geometry too) and a
+    // handful of materials, never more. A ring draws with the atmosphere's (halo) program.
+    expect(result.ringed).toBeGreaterThan(0);
+    expect(result.peak.geometries).toBe(2);
     expect(result.peak.materials).toBeLessThanOrEqual(8);
     expect(result.peak.programs).toBeLessThanOrEqual(2);
     // No frame moves the ship further than its speed allows.

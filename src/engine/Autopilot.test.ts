@@ -31,6 +31,8 @@ import {
   NEBULA_RANGES,
   NEBULA_SIDE_OFFSET_FACTOR,
   PLANET_GAS_RANGES,
+  PLANET_PASS_FACTOR_RANGE,
+  PLANET_RING_RANGES,
   PLANET_ROCKY_RANGES,
   REDUCED_MOTION_SPEED_LEVEL,
   SHIP_DEFAULT_SPEED_LEVEL,
@@ -81,7 +83,7 @@ import {
   type Encounter,
 } from './encounter';
 import { Nebula, nebulaParams, type NebulaParams } from './Nebula';
-import { planetParams } from './Planet';
+import { Planet, planetParams, type PlanetParams } from './Planet';
 import { cameraFovDeg } from './renderSize';
 import { hash, mulberry32 } from './seed';
 import { DEFAULT_SHIP_PARAMS, createShipState, updateShip, type ShipParams, type ShipState, type Vec3 } from './Ship';
@@ -932,6 +934,26 @@ describe('autopilot simulation', () => {
     );
   });
 
+  it.each([1 / 60, DT_CAP_SECONDS])(
+    'a planet already out of view at its closest approach still spends one step in DEPARTURE, and the next encounter starts on schedule (dt = %f)',
+    (dt) => {
+      // A small planet passed far off: its sphere is out of the view cone at the closest approach.
+      const planet = { radius: 13, passFactor: 6 };
+      const params: Partial<AutopilotParams> = { nebulaShare: 0, planetFor: () => planet };
+      const reference = simulate(1 / 600, { params, until: afterEncounters(2) });
+      const run = simulate(dt, { params, until: afterEncounters(2) });
+      for (const { transitions } of [reference, run]) {
+        expect(transitions.slice(0, 8).map((t) => t.to)).toEqual([...CYCLE, ...CYCLE]);
+      }
+      const at = (r: typeof run, to: TravelState, n: number) => r.transitions.filter((t) => t.to === to)[n]!.time;
+      // Exactly one step in DEPARTURE: the planet was out of view when it began.
+      expect(at(run, 'CRUISE', 0) - at(run, 'DEPARTURE', 0)).toBeCloseTo(dt, 9);
+      // The held step is carried with the lateness: the next encounter starts when it would have
+      // without it, within the usual O(dt) per encounter (see `timelineTolerance`).
+      expect(Math.abs(at(run, 'APPROACH', 1) - at(reference, 'APPROACH', 1))).toBeLessThan(timelineTolerance(1, dt, 1 / 600));
+    },
+  );
+
   it('the heading resumes from where it was held, with no jump at any state change', () => {
     const dt = 1 / 60;
     const headingAtChange: Array<{ before: Vec3; after: Vec3; to: TravelState }> = [];
@@ -1379,6 +1401,28 @@ function nebulaLayerCorners(params: Readonly<NebulaParams>, plan: Readonly<Encou
   return layers;
 }
 
+/**
+ * The outer edge of `planet`'s ring, relative to the planet centre in world axes, exactly as the
+ * renderer places it: a `Planet` built for the plan, its ring mesh's world matrix applied to the ring
+ * geometry's outer vertices. A convex polygon holding the whole ring.
+ */
+function ringOutline(planet: Readonly<PlanetParams>, plan: Readonly<Encounter>): Vec3[] {
+  const built = new Planet(planet, undefined, plan);
+  const ring = built.ring!;
+  built.object.updateMatrixWorld(true);
+  const position = ring.geometry.getAttribute('position');
+  const outer: Vec3[] = [];
+  for (let i = 0; i < position.count; i++) {
+    const p = new Vector3().fromBufferAttribute(position, i);
+    if (Math.abs(p.length() - planet.ring!.outer) > 1e-6) continue;
+    p.applyMatrix4(ring.matrixWorld);
+    outer.push({ x: p.x, y: p.y, z: p.z });
+  }
+  built.dispose();
+  // The ring geometry repeats the first outer vertex at the end of the circle.
+  return outer.slice(0, -1);
+}
+
 /** Median radius of the seeded planets (`planetParams` over 2,001 seeds). */
 const MEDIAN_PLANET_RADIUS = (() => {
   const radii = Array.from({ length: 2001 }, (_, i) => planetParams(hash(0x3ed1a7, i)).radius).sort((a, b) => a - b);
@@ -1642,9 +1686,10 @@ describe('speed driven by visibility', () => {
             expect(r.inViewFrames, label).toBeGreaterThan(1000);
             expect(r.worstExcess, label).toBeLessThanOrEqual(1e-9);
             expect(r.inViewAfterEnd, label).toBe(0);
-            // It ended at or after the closest approach, and within a few seconds of it.
-            expect(r.endedAt, label).toBeGreaterThanOrEqual(r.closestAt);
-            expect(r.endedAt - r.closestAt, label).toBeLessThan(10);
+            // It ended after the closest approach (DEPARTURE lasts at least one step), and within a
+            // few seconds of it: up to about 12 s for the largest planet at the slowest level.
+            expect(r.endedAt, label).toBeGreaterThan(r.closestAt);
+            expect(r.endedAt - r.closestAt, label).toBeLessThan(15);
             cases++;
           }
         }
@@ -1652,6 +1697,63 @@ describe('speed driven by visibility', () => {
       expect(sides).toEqual(new Set(['left', 'right']));
     },
     60_000,
+  );
+
+  it.each([0, 1, 2])(
+    'ringed planets at level %i, the widest ring, k from its clearance to 6, tilts and elevations from -0.6 to 0.6: while the planet or its ring is in the 21:9 view the ship is never faster than on main, and neither is in view again after the encounter ends',
+    (level) => {
+      const largest = Math.max(PLANET_ROCKY_RANGES.radius[1], PLANET_GAS_RANGES.radius[1]);
+      const ringedSeed = Array.from({ length: 200 }, (_, i) => hash(0x41a6, i)).find((seed) => planetParams(seed).ring !== null)!;
+      const base = planetParams(ringedSeed);
+      const outer = PLANET_RING_RANGES.inner[1] + PLANET_RING_RANGES.width[1];
+      const clearance = outer * (1 + ENCOUNTER_CLEARANCE_MARGIN);
+      let cases = 0;
+      let latest = 0;
+      for (const k of [clearance, 4.5, PLANET_PASS_FACTOR_RANGE[1]]) {
+        for (const elevation of [-0.6, 0, 0.6]) {
+          for (const [opening, roll] of [
+            [PLANET_RING_RANGES.opening[0], -PLANET_RING_RANGES.roll[1]],
+            [PLANET_RING_RANGES.opening[1], PLANET_RING_RANGES.roll[0]],
+          ] as const) {
+            for (const radius of [MEDIAN_PLANET_RADIUS, largest]) {
+              const label = `level ${level}, k ${k}, elevation ${elevation}, opening ${opening}, roll ${roll}, radius ${radius}`;
+              const planet: PlanetParams = {
+                ...base,
+                radius,
+                passFactor: k,
+                extent: outer,
+                ring: { ...base.ring!, inner: PLANET_RING_RANGES.inner[1], outer, opening, roll },
+              };
+              const params = atLevel(level, { nebulaShare: 0, sideElevation: [elevation, elevation], baseSeed: cases, planetFor: () => planet });
+              let disc: Vec3[] = [];
+              let discFor: ActiveEncounter | null = null;
+              const r = againstMain(params, 1 / 60, (encounter, ship) => {
+                if (discFor !== encounter) {
+                  disc = ringOutline(planet, encounter.plan);
+                  discFor = encounter;
+                }
+                const centre = encounterOffset(encounter.plan, ship.position, { x: 0, y: 0, z: 0 });
+                return (
+                  sphereInView(centre, radius * PLANET_VIEW_RADIUS_FACTOR, ship.heading) ||
+                  polygonInView(disc.map((c) => ({ x: c.x + centre.x, y: c.y + centre.y, z: c.z + centre.z })), ship.heading)
+                );
+              });
+              expect(r.encounter.plan.closestDistance, label).toBeCloseTo(radius * k, 9);
+              expect(r.worstProfileError, label).toBe(0);
+              expect(r.inViewFrames, label).toBeGreaterThan(1000);
+              expect(r.worstExcess, label).toBeLessThanOrEqual(1e-9);
+              expect(r.inViewAfterEnd, label).toBe(0);
+              expect(r.endedAt, label).toBeGreaterThan(r.closestAt);
+              latest = Math.max(latest, r.endedAt - r.closestAt);
+              cases++;
+            }
+          }
+        }
+      }
+      // The ring takes longer to leave the view than the planet, but not much: under half a minute.
+      expect(latest).toBeLessThan(30);
+    },
+    120_000,
   );
 
   it.each([0, 1, 2])(

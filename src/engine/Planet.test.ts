@@ -1,4 +1,4 @@
-import { Mesh, type ShaderMaterial, Texture } from 'three';
+import { Mesh, RingGeometry, type ShaderMaterial, Texture, Vector3 } from 'three';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CAMERA_FAR,
@@ -7,24 +7,38 @@ import {
   ENCOUNTER_CLEARANCE_MARGIN,
   ENCOUNTER_DISTANCE,
   ENCOUNTER_PLANET_RADIUS,
-  ENCOUNTER_SIDE_OFFSET_FACTOR,
   ENCOUNTER_SLOWDOWN_DISTANCE,
   PLANET_GAS_RANGES,
   PLANET_GAS_SHARE,
+  PLANET_ICY_RADIUS,
+  PLANET_ICY_SHARE,
+  PLANET_MIN_PASS_DISTANCE,
   PLANET_NOISE_OFFSET_RANGE,
+  PLANET_PASS_FACTOR_RANGE,
+  PLANET_RING_RANGES,
+  PLANET_RING_SHARE,
   PLANET_ROCKY_RANGES,
   PLANET_ROTATION_PHASE_RANGE,
 } from '../config';
-import { DEFAULT_AUTOPILOT_PARAMS, createAutopilotState, updateAutopilot } from './Autopilot';
+import { DEFAULT_AUTOPILOT_PARAMS, createAutopilotState, encounterSchedule, updateAutopilot } from './Autopilot';
+import { planEncounter } from './encounter';
 import {
+  ATMOSPHERE_RENDER_ORDER,
+  DEFAULT_PLANET_FRAME,
   GAS_FAMILY_NAMES,
   Planet,
+  RINGED_ATMOSPHERE_RENDER_ORDER,
+  RING_RENDER_ORDER,
   ROCKY_FAMILY_NAMES,
   ROCKY_FAMILY_RANGES,
+  SURFACE_RENDER_ORDER,
   disposePlanetGeometry,
+  passFactorFor,
   planetGeometry,
   planetGeometryRefs,
   planetParams,
+  ringAxis,
+  ringGeometry,
   type PlanetParams,
   type Rgb,
 } from './Planet';
@@ -35,11 +49,30 @@ import { STARFIELD_RENDER_ORDER, Starfield } from './Starfield';
 const SEEDS = Array.from({ length: 1000 }, (_, i) => hash(ENCOUNTER_BASE_SEED, i));
 
 /** Fields checked separately (not plain numbers within a type's range table). */
-const NON_RANGE_FIELDS = new Set(['seed', 'type', 'family', 'palette', 'noiseOffset', 'rotationPhase', 'atmosphereColor']);
+const NON_RANGE_FIELDS = new Set([
+  'seed',
+  'type',
+  'family',
+  'palette',
+  'noiseOffset',
+  'rotationPhase',
+  'atmosphereColor',
+  'passFactor',
+  'extent',
+  'ring',
+]);
 
-function firstOfType(type: PlanetParams['type']): PlanetParams {
-  const seed = SEEDS.find((s) => planetParams(s).type === type);
+/** The first seeded planet of `type`; without a ring unless `ringed`. */
+function firstOfType(type: PlanetParams['type'], ringed = false): PlanetParams {
+  const seed = SEEDS.find((s) => planetParams(s).type === type && (planetParams(s).ring !== null) === ringed);
   if (seed === undefined) throw new Error(`no ${type} seed`);
+  return planetParams(seed);
+}
+
+/** The first seeded icy dwarf. */
+function firstIcy(): PlanetParams {
+  const seed = SEEDS.find((s) => planetParams(s).family === 'icy' && planetParams(s).ring === null);
+  if (seed === undefined) throw new Error('no icy seed');
   return planetParams(seed);
 }
 
@@ -52,8 +85,9 @@ function expectRgb(rgb: Rgb, label: string): void {
 }
 
 describe('planet config', () => {
-  const minRadius = Math.min(PLANET_ROCKY_RANGES.radius[0], PLANET_GAS_RANGES.radius[0]);
-  const maxRadius = Math.max(PLANET_ROCKY_RANGES.radius[1], PLANET_GAS_RANGES.radius[1]);
+  const minRadius = Math.min(PLANET_ROCKY_RANGES.radius[0], PLANET_GAS_RANGES.radius[0], PLANET_ICY_RADIUS[0]);
+  const maxRadius = Math.max(PLANET_ROCKY_RANGES.radius[1], PLANET_GAS_RANGES.radius[1], PLANET_ICY_RADIUS[1]);
+  const maxOuter = PLANET_RING_RANGES.inner[1] + PLANET_RING_RANGES.width[1];
 
   it('ranges are ordered and the type shares leave room for both types', () => {
     for (const ranges of [PLANET_ROCKY_RANGES, PLANET_GAS_RANGES]) {
@@ -68,47 +102,37 @@ describe('planet config', () => {
   });
 
   it('radii fit the encounter plan: far inside the spawn distance and the far plane', () => {
-    // Its whole sphere starts beyond the slowdown, so the encounter starts at cruise speed.
-    expect(ENCOUNTER_DISTANCE - maxRadius).toBeGreaterThan(ENCOUNTER_SLOWDOWN_DISTANCE);
-    expect(ENCOUNTER_DISTANCE + maxRadius * (ENCOUNTER_SIDE_OFFSET_FACTOR + 1)).toBeLessThan(CAMERA_FAR);
+    // Its whole sphere, ring included, starts beyond the slowdown, so the encounter starts at cruise speed.
+    expect(ENCOUNTER_DISTANCE - maxRadius * maxOuter).toBeGreaterThan(ENCOUNTER_SLOWDOWN_DISTANCE);
+    expect(ENCOUNTER_DISTANCE + maxRadius * (PLANET_PASS_FACTOR_RANGE[1] + maxOuter)).toBeLessThan(CAMERA_FAR);
     // The placeholder radius the autopilot uses today lies inside the seeded range.
     expect(ENCOUNTER_PLANET_RADIUS).toBeGreaterThanOrEqual(minRadius);
     expect(ENCOUNTER_PLANET_RADIUS).toBeLessThanOrEqual(maxRadius);
   });
 
-  it('at spawn, at full size, a median-radius planet spans at most 3% of the view height and the largest at most 5%', () => {
-    // Median radius of the seeded draw: a planet is gas with probability PLANET_GAS_SHARE, and its
-    // radius is uniform over its type's range. Found by bisection on the mixture's CDF.
-    const uniformCdf = ([min, max]: readonly [number, number], r: number) => Math.min(1, Math.max(0, (r - min) / (max - min)));
-    const cdf = (r: number) =>
-      (1 - PLANET_GAS_SHARE) * uniformCdf(PLANET_ROCKY_RANGES.radius, r) + PLANET_GAS_SHARE * uniformCdf(PLANET_GAS_RANGES.radius, r);
-    let low = minRadius;
-    let high = maxRadius;
-    for (let i = 0; i < 60; i++) {
-      const mid = (low + high) / 2;
-      if (cdf(mid) < 0.5) low = mid;
-      else high = mid;
-    }
-    const medianRadius = (low + high) / 2;
-    // The seeded draw agrees with that median.
-    const drawn = SEEDS.map((seed) => planetParams(seed).radius).sort((a, b) => a - b);
-    expect(Math.abs(drawn[drawn.length / 2]! - medianRadius) / medianRadius).toBeLessThan(0.05);
-
+  it('at spawn, at full size, a median planet spans at most 3.5% of the view height, the largest at most 9% and the widest ring at most 23%', () => {
     /**
-     * Projected diameter, as a fraction of the view height, of a planet of radius `r` at spawn: its
-     * centre is D ahead and r × k to the side, it is drawn at its full radius (the size scale is 1
-     * throughout), and the side offset is taken as vertical, the worst case for the height.
+     * Projected diameter, as a fraction of the view height, of a sphere of radius `r` at spawn whose
+     * centre is D ahead and `offset` to the side, drawn at its full size (the size scale is 1
+     * throughout), with the side offset taken as vertical, the worst case for the height.
      */
-    const spawnDiameter = (r: number) => {
-      const centre = Math.hypot(ENCOUNTER_DISTANCE, r * ENCOUNTER_SIDE_OFFSET_FACTOR);
+    const spawnDiameter = (r: number, offset: number) => {
+      const centre = Math.hypot(ENCOUNTER_DISTANCE, offset);
       const half = Math.asin(r / centre);
-      const offAxis = Math.atan2(r * ENCOUNTER_SIDE_OFFSET_FACTOR, ENCOUNTER_DISTANCE);
+      const offAxis = Math.atan2(offset, ENCOUNTER_DISTANCE);
       const tanHalfFov = Math.tan(((CAMERA_FOV_DEG / 2) * Math.PI) / 180);
       return (Math.tan(offAxis + half) - Math.tan(offAxis - half)) / (2 * tanHalfFov);
     };
-    // About 32 px at 1080p for the median radius, about 54 px for the largest.
-    expect(spawnDiameter(medianRadius)).toBeLessThanOrEqual(0.03);
-    expect(spawnDiameter(maxRadius)).toBeLessThanOrEqual(0.05);
+    // The seeded planets, each at its own k: about 37 px at 1080p for the median one.
+    const drawn = SEEDS.map((seed) => planetParams(seed));
+    const discs = drawn.map((p) => spawnDiameter(p.radius, p.radius * p.passFactor)).sort((a, b) => a - b);
+    expect(discs[discs.length / 2]!).toBeLessThanOrEqual(0.035);
+    // Any configured planet: the largest radius at the largest k, about 89 px.
+    const kMax = PLANET_PASS_FACTOR_RANGE[1];
+    expect(spawnDiameter(maxRadius, maxRadius * kMax)).toBeLessThanOrEqual(0.09);
+    for (const disc of discs) expect(disc).toBeLessThanOrEqual(spawnDiameter(maxRadius, maxRadius * kMax) + 1e-12);
+    // The widest ring around the largest planet spans its outer diameter at most (seen face-on).
+    expect(spawnDiameter(maxRadius * maxOuter, maxRadius * kMax)).toBeLessThanOrEqual(0.23);
   });
 
   it('the atmosphere shell stays inside the guaranteed clearance, so the camera never enters it', () => {
@@ -116,7 +140,24 @@ describe('planet config', () => {
       expect(ranges.atmosphereThickness[0]).toBeGreaterThan(0);
       expect(1 + ranges.atmosphereThickness[1]).toBeLessThan(1 + ENCOUNTER_CLEARANCE_MARGIN);
     }
-    expect(1 + ENCOUNTER_CLEARANCE_MARGIN).toBeLessThan(ENCOUNTER_SIDE_OFFSET_FACTOR);
+    expect(1 + ENCOUNTER_CLEARANCE_MARGIN).toBeLessThan(PLANET_PASS_FACTOR_RANGE[0]);
+  });
+
+  it('the pass factor range leaves room for every planet: the distance floor and the widest ring clearance', () => {
+    const [kMin, kMax] = PLANET_PASS_FACTOR_RANGE;
+    expect(kMin).toBe(1.6);
+    expect(kMax).toBe(6);
+    // The smallest planet can reach the distance floor, and the widest ring its clearance.
+    expect(PLANET_MIN_PASS_DISTANCE / minRadius).toBeLessThanOrEqual(kMax);
+    expect(maxOuter * (1 + ENCOUNTER_CLEARANCE_MARGIN)).toBeLessThanOrEqual(kMax);
+    // A ring starts outside the thickest atmosphere.
+    expect(PLANET_RING_RANGES.inner[0]).toBeGreaterThan(1 + PLANET_GAS_RANGES.atmosphereThickness[1]);
+    // passFactorFor spans its interval, from the low end at roll 0 to kMax just below roll 1.
+    expect(passFactorFor(100, 1.1, 0)).toBeCloseTo(kMin, 12);
+    expect(passFactorFor(15, 1.1, 0)).toBeCloseTo(PLANET_MIN_PASS_DISTANCE / 15, 12);
+    expect(passFactorFor(100, 2.5, 0)).toBeCloseTo(2.5 * (1 + ENCOUNTER_CLEARANCE_MARGIN), 12);
+    expect(passFactorFor(100, 1.1, 1 - 1e-12)).toBeCloseTo(kMax, 9);
+    for (const roll of [0.1, 0.5, 0.9]) expect(passFactorFor(100, 1.1, roll)).toBeLessThan(passFactorFor(100, 1.1, roll + 0.05));
   });
 });
 
@@ -144,14 +185,65 @@ describe('planetParams', () => {
     expect(gas / SEEDS.length).toBeCloseTo(PLANET_GAS_SHARE, 1);
   });
 
-  it('across 1,000 seeds every palette family of both types occurs', () => {
+  it('across 1,000 seeds every palette family of both types occurs, icy dwarfs among the rocky ones', () => {
     const families = new Set(SEEDS.map((s) => `${planetParams(s).type}:${planetParams(s).family}`));
     const expected = [...ROCKY_FAMILY_NAMES.map((f) => `rocky:${f}`), ...GAS_FAMILY_NAMES.map((f) => `gas:${f}`)];
     expect([...families].sort()).toEqual(expected.sort());
-    expect(ROCKY_FAMILY_NAMES.length).toBeGreaterThanOrEqual(8);
+    expect(ROCKY_FAMILY_NAMES.length).toBeGreaterThanOrEqual(9);
     expect(GAS_FAMILY_NAMES.length).toBeGreaterThanOrEqual(9);
-    // No icy family (icy planets are optional, docs/PLAN.md section 5).
-    for (const name of [...ROCKY_FAMILY_NAMES, ...GAS_FAMILY_NAMES]) expect(name).not.toMatch(/ic[ye]/);
+    // Icy dwarfs (docs/PLAN.md section 9, Phase 4) are a rocky family, drawn with the rocky shader.
+    expect(ROCKY_FAMILY_NAMES).toContain('icy');
+    expect(GAS_FAMILY_NAMES).not.toContain('icy');
+  });
+
+  it('across 20,000 seeds the icy dwarf and ring shares are the documented ones', () => {
+    const many = Array.from({ length: 20_000 }, (_, i) => planetParams(hash(0x5a4e, i)));
+    const rocky = many.filter((p) => p.type === 'rocky');
+    const gas = many.filter((p) => p.type === 'gas');
+    const share = (list: PlanetParams[], test: (p: PlanetParams) => boolean) => list.filter(test).length / list.length;
+    // Binomial standard errors are under 0.7%; allow about 3 of them.
+    expect(share(rocky, (p) => p.family === 'icy')).toBeCloseTo(PLANET_ICY_SHARE, 1);
+    expect(Math.abs(share(rocky, (p) => p.family === 'icy') - PLANET_ICY_SHARE)).toBeLessThan(0.02);
+    expect(Math.abs(share(gas, (p) => p.ring !== null) - PLANET_RING_SHARE.gas)).toBeLessThan(0.02);
+    expect(Math.abs(share(rocky, (p) => p.ring !== null) - PLANET_RING_SHARE.rocky)).toBeLessThan(0.01);
+    // Gas giants only otherwise: no icy gas giant.
+    expect(share(gas, (p) => p.family === 'icy')).toBe(0);
+    // Rings come in every size and tilt the ranges allow, around planets of both types.
+    const rings = many.flatMap((p) => (p.ring === null ? [] : [p.ring]));
+    const spread = (values: number[], [min, max]: readonly [number, number]) => (Math.max(...values) - Math.min(...values)) / (max - min);
+    expect(spread(rings.map((r) => r.inner), PLANET_RING_RANGES.inner)).toBeGreaterThan(0.95);
+    expect(spread(rings.map((r) => r.outer - r.inner), PLANET_RING_RANGES.width)).toBeGreaterThan(0.95);
+    expect(spread(rings.map((r) => r.opening), PLANET_RING_RANGES.opening)).toBeGreaterThan(0.95);
+    expect(rings.some((r) => r.roll > 0) && rings.some((r) => r.roll < 0)).toBe(true);
+  });
+
+  it('with the test default trip seed, the first 50 encounters include a ringed planet and an icy dwarf', () => {
+    // The schedule the engine flies (docs/PLAN.md section 9, Phase 4: "Done when").
+    const planets = encounterSchedule(DEFAULT_AUTOPILOT_PARAMS, 50)
+      .filter((e) => e.kind === 'planet')
+      .map((e) => planetParams(e.seed));
+    expect(DEFAULT_AUTOPILOT_PARAMS.baseSeed).toBe(ENCOUNTER_BASE_SEED);
+    expect(planets.filter((p) => p.ring !== null).length).toBeGreaterThanOrEqual(1);
+    expect(planets.filter((p) => p.family === 'icy').length).toBeGreaterThanOrEqual(1);
+    // And it still opens with the oceanic planet (src/tripSeed.test.ts checks the whole opening).
+    expect(planets[0]!.family).toBe('oceanic');
+  });
+
+  it('an icy dwarf is small, pale and cratered, with bright, flat plains and dark patches', () => {
+    const icy = SEEDS.map((s) => planetParams(s)).filter((p) => p.family === 'icy');
+    expect(icy.length).toBeGreaterThan(50);
+    const luma = (c: Rgb) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    for (const p of icy) {
+      if (p.type !== 'rocky') throw new Error('an icy gas giant');
+      expect(p.radius).toBeGreaterThanOrEqual(PLANET_ICY_RADIUS[0]);
+      expect(p.radius).toBeLessThanOrEqual(PLANET_ICY_RADIUS[1]);
+      expect(p.craters).toBeGreaterThanOrEqual(0.25);
+      // The plains (the basin colour) are the brightest tone, the lowland patches the darkest.
+      expect(luma(p.palette[0])).toBeGreaterThan(0.7);
+      expect(luma(p.palette[1])).toBeLessThan(0.3);
+      expect(luma(p.palette[0])).toBeGreaterThan(luma(p.palette[2]));
+      expect(p.atmosphereIntensity).toBeLessThanOrEqual(0.35);
+    }
   });
 
   it("every rocky family's sub-ranges lie inside the configured rocky ranges", () => {
@@ -200,7 +292,11 @@ describe('planetParams', () => {
     for (const seed of SEEDS) {
       const params = planetParams(seed);
       const ranges: Readonly<Record<string, readonly [number, number]>> =
-        params.type === 'gas' ? PLANET_GAS_RANGES : PLANET_ROCKY_RANGES;
+        params.type === 'gas'
+          ? PLANET_GAS_RANGES
+          : params.family === 'icy'
+            ? { ...PLANET_ROCKY_RANGES, radius: PLANET_ICY_RADIUS }
+            : PLANET_ROCKY_RANGES;
       const label = `seed ${seed} (${params.type})`;
       for (const [key, value] of Object.entries(params)) {
         if (NON_RANGE_FIELDS.has(key)) continue;
@@ -223,7 +319,59 @@ describe('planetParams', () => {
       expect(params.palette, label).toHaveLength(4);
       params.palette.forEach((c, i) => expectRgb(c, `${label}: palette[${i}]`));
       expectRgb(params.atmosphereColor, `${label}: atmosphereColor`);
+      // The pass factor and the extent (docs/PLAN.md section 9, Phase 4).
+      expect(params.passFactor, label).toBeGreaterThanOrEqual(PLANET_PASS_FACTOR_RANGE[0]);
+      expect(params.passFactor, label).toBeLessThanOrEqual(PLANET_PASS_FACTOR_RANGE[1]);
+      expect(params.radius * params.passFactor, label).toBeGreaterThanOrEqual(PLANET_MIN_PASS_DISTANCE * (1 - 1e-12));
+      expect(params.passFactor, label).toBeGreaterThanOrEqual(params.extent * (1 + ENCOUNTER_CLEARANCE_MARGIN));
+      const ring = params.ring;
+      if (ring === null) {
+        expect(params.extent, label).toBe(1 + params.atmosphereThickness);
+        continue;
+      }
+      expect(params.extent, label).toBe(ring.outer);
+      const g = PLANET_RING_RANGES;
+      for (const [value, range, name] of [
+        [ring.inner, g.inner, 'inner'],
+        [ring.outer - ring.inner, g.width, 'width'],
+        [ring.opacity, g.opacity, 'opacity'],
+        [ring.bands, g.bands, 'bands'],
+        [ring.bandOffset, g.bandOffset, 'bandOffset'],
+        [ring.gap, g.gap, 'gap'],
+        [ring.gapWidth, g.gapWidth, 'gapWidth'],
+        [ring.opening, g.opening, 'opening'],
+        [Math.abs(ring.roll), g.roll, 'roll'],
+      ] as const) {
+        expect(value, `${label}: ring ${name}`).toBeGreaterThanOrEqual(range[0] - 1e-12);
+        expect(value, `${label}: ring ${name}`).toBeLessThanOrEqual(range[1] + 1e-12);
+      }
+      ring.colors.forEach((c, i) => expectRgb(c, `${label}: ring colour ${i}`));
     }
+  });
+
+  it('keeps every Phase 3 draw: the type and family of every planet but an icy dwarf are as before Phase 4', () => {
+    // planetParams(hash(0x5eed, i)) for i = 0…39 before Phase 4 (main at #45), as `type:family`.
+    // The Phase 4 variety comes from a stream of its own, so only an icy dwarf, which replaces its
+    // family's look, differs; the test default trip seed therefore opens as it did.
+    const phase3 = [
+      'gas:saturnian', 'gas:neptunian', 'rocky:sulphur', 'rocky:lunar', 'rocky:oceanic', 'gas:neptunian', 'rocky:sulphur', 'gas:ember',
+      'gas:ember', 'rocky:lunar', 'gas:rose', 'gas:saturnian', 'rocky:lunar', 'gas:uranian', 'rocky:lunar', 'gas:uranian',
+      'rocky:terran', 'rocky:oceanic', 'rocky:volcanic', 'rocky:sulphur', 'gas:ember', 'gas:uranian', 'gas:violet', 'rocky:lunar',
+      'gas:violet', 'rocky:sulphur', 'rocky:ferric', 'gas:emerald', 'rocky:terran', 'rocky:ferric', 'gas:jovian', 'gas:uranian',
+      'gas:jovian', 'rocky:terran', 'rocky:oceanic', 'gas:violet', 'rocky:oceanic', 'rocky:ferric', 'gas:jovian', 'gas:ember',
+    ];
+    let icy = 0;
+    phase3.forEach((before, i) => {
+      const p = planetParams(hash(0x5eed, i));
+      if (p.family === 'icy') {
+        icy++;
+        expect(before.startsWith('rocky:'), `${i}`).toBe(true);
+      } else {
+        expect(`${p.type}:${p.family}`, `${i}`).toBe(before);
+      }
+    });
+    expect(icy).toBeGreaterThan(0);
+    expect(icy).toBeLessThan(phase3.length / 4);
   });
 
   it('plugs into the autopilot as planetFor: the encounter uses the seeded radius', () => {
@@ -236,7 +384,8 @@ describe('planetParams', () => {
     const expected = planetParams(hash(ENCOUNTER_BASE_SEED, 0));
     expect(encounter.kind === 'planet' && encounter.planet).toEqual(expected);
     expect(encounter.plan.radius).toBe(expected.radius);
-    expect(encounter.plan.closestDistance).toBeCloseTo(expected.radius * ENCOUNTER_SIDE_OFFSET_FACTOR, 9);
+    // At its own pass factor.
+    expect(encounter.plan.closestDistance).toBeCloseTo(expected.radius * expected.passFactor, 9);
   });
 });
 
@@ -376,6 +525,136 @@ describe('Planet', () => {
     expect(atmosphereMaterial.depthWrite).toBe(false);
     starfield.dispose();
     planet.dispose();
+  });
+
+  it('a ringed planet adds its ring, drawn with the halo program after the surface and before the starfield, depth-tested and writing depth', () => {
+    const params = firstOfType('gas', true);
+    const ring = params.ring!;
+    const planet = new Planet(params);
+    expect(planet.ring).not.toBeNull();
+    const ringMesh = planet.ring!;
+    const ringMaterial = ringMesh.material;
+    const meshes: Mesh[] = [];
+    planet.object.traverse((o) => {
+      if (o instanceof Mesh) meshes.push(o);
+    });
+    const surface = meshes.find((m) => m.renderOrder === SURFACE_RENDER_ORDER)!;
+    const atmosphere = planet.atmosphere!;
+    expect(meshes).toHaveLength(3);
+    expect(meshes).toContain(atmosphere);
+    // Order: far stars, surface, atmosphere, ring, near stars (all in the transparent list). The
+    // atmosphere draws before the ring, so the ring blends over its glow rather than hiding it.
+    expect(ringMesh.renderOrder).toBe(RING_RENDER_ORDER);
+    expect(atmosphere.renderOrder).toBe(RINGED_ATMOSPHERE_RENDER_ORDER);
+    expect(RINGED_ATMOSPHERE_RENDER_ORDER).toBeGreaterThan(SURFACE_RENDER_ORDER);
+    expect(RING_RENDER_ORDER).toBeGreaterThan(RINGED_ATMOSPHERE_RENDER_ORDER);
+    expect(RING_RENDER_ORDER).toBeLessThan(STARFIELD_RENDER_ORDER);
+    // A planet without a ring keeps its atmosphere after the near stars.
+    const plain = new Planet(firstOfType('gas'));
+    expect(plain.ring).toBeNull();
+    expect(plain.atmosphere!.renderOrder).toBe(ATMOSPHERE_RENDER_ORDER);
+    plain.dispose();
+    expect(ringMaterial.transparent).toBe(true);
+    // The planet's depth hides the ring behind its disc; the ring's hides the near stars behind it.
+    expect(ringMaterial.depthTest).toBe(true);
+    expect(ringMaterial.depthWrite).toBe(true);
+    // The halo program: the atmosphere's sources, no defines, front faces only, so no new program.
+    const atmosphereMaterial = atmosphere.material as ShaderMaterial;
+    expect(ringMaterial.vertexShader).toBe(atmosphereMaterial.vertexShader);
+    expect(ringMaterial.fragmentShader).toBe(atmosphereMaterial.fragmentShader);
+    expect(ringMaterial.defines).toEqual(atmosphereMaterial.defines);
+    expect(ringMaterial.side).toBe(atmosphereMaterial.side);
+    expect(ringMaterial.uniforms.uRing!.value).toBe(1);
+    expect(atmosphereMaterial.uniforms.uRing!.value).toBe(0);
+    // It fades and is lit with the planet.
+    expect(ringMaterial.uniforms.uOpacity).toBe(planet.uniforms.uOpacity);
+    expect(ringMaterial.uniforms.uLightDir).toBe(planet.uniforms.uLightDir);
+    expect(ringMaterial.uniforms.uRingOuter!.value).toBe(ring.outer);
+    // It adds the planet's own glow in front of its far side.
+    expect(atmosphereMaterial.depthTest).toBe(true);
+    expect(atmosphereMaterial.depthWrite).toBe(false);
+    for (const name of ['uAtmosphereColor', 'uAtmosphereIntensity', 'uThickness'] as const) {
+      expect(ringMaterial.uniforms[name]).toBe(planet.uniforms[name]);
+    }
+    // The ring and the spin axis share the tilt, so a gas giant's bands run along its ring.
+    expect(ringMesh.parent).toBe(surface.parent);
+    planet.dispose();
+  });
+
+  it('the ring geometry is a flat annulus within [inner, outer] with both windings, and freed with its planet', () => {
+    const geometry = ringGeometry(1.4, 2.5);
+    const plain = new RingGeometry(1.4, 2.5, 160, 1);
+    const position = geometry.getAttribute('position');
+    let outermost = 0;
+    let innermost = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < position.count; i++) {
+      const p = new Vector3().fromBufferAttribute(position, i);
+      // In the XZ plane: its normal is the mesh's local +Y.
+      expect(Math.abs(p.y)).toBeLessThan(1e-9);
+      outermost = Math.max(outermost, p.length());
+      innermost = Math.min(innermost, p.length());
+    }
+    // To float32 precision (the outer edge's chords lie inside the circle).
+    expect(outermost).toBeCloseTo(2.5, 6);
+    expect(innermost).toBeCloseTo(1.4, 6);
+    // Both windings: every triangle twice, once each way round.
+    expect(geometry.getIndex()!.count).toBe(2 * plain.getIndex()!.count);
+    expect(Object.keys(geometry.attributes).sort()).toEqual(Object.keys(planetGeometry().attributes).sort());
+    plain.dispose();
+    geometry.dispose();
+
+    const planet = new Planet(firstOfType('gas', true));
+    const ring = planet.ring!;
+    const geometryDispose = vi.spyOn(ring.geometry, 'dispose');
+    const materialDispose = vi.spyOn(ring.material, 'dispose');
+    planet.dispose();
+    expect(geometryDispose).toHaveBeenCalledTimes(1);
+    expect(materialDispose).toHaveBeenCalledTimes(1);
+    expect(planetGeometryRefs()).toBe(0);
+  });
+
+  it('ringAxis tilts the ring toward the approach by its opening and about the path by its roll, as the planet draws it', () => {
+    const frames = [
+      DEFAULT_PLANET_FRAME,
+      planEncounter({ x: 0, y: 0, z: 0 }, { x: 0.4, y: -0.1, z: -1 }, 50, ENCOUNTER_DISTANCE, 3, 2.7),
+      planEncounter({ x: 0, y: 0, z: 0 }, { x: -0.8, y: 0.2, z: -0.3 }, 50, ENCOUNTER_DISTANCE, 3, -0.4),
+    ];
+    const base = firstOfType('gas', true);
+    for (const frame of frames) {
+      for (const [opening, roll] of [
+        [0.3, 0.2],
+        [0.6, -0.45],
+      ] as const) {
+        const axis = ringAxis({ opening, roll }, frame, { x: 0, y: 0, z: 0 });
+        const d = frame.direction;
+        const side = frame.side;
+        expect(Math.hypot(axis.x, axis.y, axis.z)).toBeCloseTo(1, 12);
+        // Seen from ahead (along -direction) the ring opens by `opening`; from the closest approach
+        // (along -side) by asin(cos(opening) sin(roll)).
+        expect(-(axis.x * d.x + axis.y * d.y + axis.z * d.z)).toBeCloseTo(Math.sin(opening), 12);
+        expect(axis.x * side.x + axis.y * side.y + axis.z * side.z).toBeCloseTo(Math.cos(opening) * Math.sin(roll), 12);
+        // The planet's ring mesh and spin axis follow it.
+        const planet = new Planet({ ...base, ring: { ...base.ring!, opening, roll } }, undefined, frame);
+        planet.object.updateMatrixWorld(true);
+        const up = new Vector3(0, 1, 0).transformDirection(planet.ring!.matrixWorld);
+        expect(up.x).toBeCloseTo(axis.x, 9);
+        expect(up.y).toBeCloseTo(axis.y, 9);
+        expect(up.z).toBeCloseTo(axis.z, 9);
+        planet.dispose();
+      }
+    }
+  });
+
+  it('an icy dwarf draws with the rocky surface program', () => {
+    const icy = firstIcy();
+    const rocky = new Planet(firstOfType('rocky'));
+    const planet = new Planet(icy);
+    const surfaceOf = (p: Planet) => materialsOf(p)[0] as unknown as ShaderMaterial;
+    expect(surfaceOf(planet).fragmentShader).toBe(surfaceOf(rocky).fragmentShader);
+    expect(surfaceOf(planet).defines).toEqual(surfaceOf(rocky).defines);
+    expect(surfaceOf(planet).uniforms.uCraters!.value).toBe(icy.type === 'rocky' && icy.craters);
+    planet.dispose();
+    rocky.dispose();
   });
 
   it('setScale, setLightDirection and update', () => {

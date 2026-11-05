@@ -330,19 +330,26 @@ export const ENCOUNTER_BASE_SEED = 0x91b3_a5ba;
 /**
  * `D`: the planet is placed this far ahead along the heading when the encounter starts, so it is
  * also the spawn distance. Kept well inside CAMERA_FAR. A planet keeps its world size for the whole
- * encounter, so this and the planet radii (PLANET_ROCKY_RANGES, PLANET_GAS_RANGES) set how small it
- * first appears: at spawn a median-radius planet spans under 3% of the view height and the largest
- * under 5% (checked in Planet.test.ts). At the default speed level and above (every level at or
- * above the arrival speed) the spawn is about 54 s before the closest approach.
+ * encounter, so this and the planet radii (PLANET_ROCKY_RANGES, PLANET_GAS_RANGES, PLANET_ICY_RADIUS)
+ * set how small it first appears: at spawn a median planet's disc spans under 3.5% of the view
+ * height and the largest under 9% (about 37 and 97 px at 1080p), and the widest ring, thin and
+ * translucent, under 23%; it fades in from opacity 0 there (checked in Planet.test.ts). At the default speed level and above
+ * (every level at or above the arrival speed) the spawn is about 54 s before the closest approach.
  */
 export const ENCOUNTER_DISTANCE = 2400;
 
-/** `k`: the planet centre sits `radius × k` to the side of the path, which is the closest approach. */
+/**
+ * `k`: the planet centre sits `radius × k` to the side of the path, which is the closest approach.
+ * The default for a planet that brings no pass factor of its own (`PlanetSpec.passFactor`); every
+ * seeded planet does (PLANET_PASS_FACTOR_RANGE).
+ */
 export const ENCOUNTER_SIDE_OFFSET_FACTOR = 2;
 
 /**
  * Required clearance: the closest approach to the centre must be at least `radius × (1 + margin)`,
  * so ENCOUNTER_SIDE_OFFSET_FACTOR must stay above 1 + this margin and the path never meets the sphere.
+ * A ringed planet needs `radius × ring outer radius × (1 + margin)` (`planetPassFactor` in
+ * engine/Autopilot.ts), so the path never comes near the ring either.
  */
 export const ENCOUNTER_CLEARANCE_MARGIN = 0.25;
 
@@ -355,8 +362,10 @@ export const ENCOUNTER_CLEARANCE_MARGIN = 0.25;
  *
  * The minimum speed and its band are tuned for the planet radii: the closest approach is
  * `radius × k`, so how fast the planet sweeps past in angle there is the speed over that distance.
- * At the default speed level a median planet (radius about 41) peaks at about 4.4°/s, and the ship
- * reaches the closest approach about 54 s after the spawn (both checked in EncounterView.test.ts).
+ * At the default speed level the Phase 3 median planet (radius about 41, k = 2) peaks at about
+ * 4.4°/s, and the ship reaches the closest approach about 54 s after the spawn (both checked in
+ * EncounterView.test.ts). Seeded planets vary their radius and k, and pass at least
+ * PLANET_MIN_PASS_DISTANCE from the path: none peaks above about 5°/s, under the 5.1°/s guard.
  * Faster levels drop to the arrival speed before the spawn (ENCOUNTER_ARRIVAL_SPEED), so they fly
  * this same profile and the same flyby. The slowdown and speed-up distances are not scaled down with
  * the radii: the ship needs that distance to slow down from the arrival speed within a few time
@@ -398,20 +407,95 @@ export const ENCOUNTER_DESPAWN_DISTANCE = 1500;
  * in world units, angles in radians, speeds in radians per second, and noise values are in the
  * units of a unit sphere (the shared planet geometry).
  *
- * Radii stay compatible with the encounter plan: the closest approach is `radius × k`
- * (ENCOUNTER_SIDE_OFFSET_FACTOR) whatever the radius, so the flyby looks the same at any radius;
- * every planet is small next to the spawn distance ENCOUNTER_DISTANCE, so it starts as a distant dot
- * at its full size (see ENCOUNTER_DISTANCE for the bounds); and the atmosphere shell
- * (`radius × (1 + thickness)`) stays inside the clearance `radius × (1 + ENCOUNTER_CLEARANCE_MARGIN)`,
- * so the camera never enters it. ENCOUNTER_PLANET_RADIUS lies inside the combined radius range.
+ * Radii stay compatible with the encounter plan: every planet is small next to the spawn distance
+ * ENCOUNTER_DISTANCE, so it starts small at its full size (see ENCOUNTER_DISTANCE for the bounds);
+ * and the atmosphere shell (`radius × (1 + thickness)`) stays inside the clearance
+ * `radius × (1 + ENCOUNTER_CLEARANCE_MARGIN)`, so the camera never enters it. ENCOUNTER_PLANET_RADIUS
+ * lies inside the combined radius range.
+ *
+ * Variety (docs/PLAN.md section 9, Phase 4): radii span 13–110, and each planet brings its own pass
+ * factor `k` (PLANET_PASS_FACTOR_RANGE), so the closest approach `radius × k` and the planet's
+ * angular diameter there, `2 asin(1 / k)`, differ from one planet to the next. Some gas giants and a
+ * few rocky worlds have rings (PLANET_RING_SHARE), and some rocky worlds are icy dwarfs
+ * (PLANET_ICY_SHARE). The values are drawn from a second seeded stream after all of the Phase 3
+ * ones, so every planet keeps its Phase 3 type, family and colours, and an icy dwarf replaces only
+ * its family's look.
+ *
+ * Measured over 20,000 seeds (Planet.test.ts and EncounterView.test.ts check the bounds): radius
+ * p10/p50/p90 about 19/45/95; k p10/p50/p90 about 1.75/3.3/5.3; the closest approach at least 75, its
+ * median about 123; the angular diameter at the closest approach p10/p50/p90 about 21.8°/35.5°/69.8°,
+ * a p90/p10 ratio of about 3.2 (at least 3 is required); 16% of planets ringed, 11% icy dwarfs.
  */
 
 /** Share of planets that are gas giants; the rest are rocky. */
 export const PLANET_GAS_SHARE = 0.45;
 
+/**
+ * Pass factor `k` range (log-uniform), and the smallest closest approach in world units. A planet's
+ * `k` is drawn log-uniformly from `[max(min, PLANET_MIN_PASS_DISTANCE / radius, ring clearance), max]`,
+ * so small planets pass at a large `k` and look small, and large ones can pass anywhere from close
+ * (77° across at k = 1.6) to far off (19° at k = 6). The floor on the distance bounds the bearing
+ * rate: at the default level the ship passes the closest approach at about 6.3 units per second, so a
+ * planet at the floor sweeps past at 6.3 / 75 rad/s, about 4.7°/s, and no planet (whatever its
+ * distance; a far one peaks while the ship is still slowing) faster than about 5°/s, inside the
+ * Phase 3 guard of 5.1°/s (EncounterView.test.ts). The ring clearance is
+ * `ring outer radius × (1 + ENCOUNTER_CLEARANCE_MARGIN)`.
+ * The upper end keeps every planet at least 19° across at its closest approach.
+ */
+export const PLANET_PASS_FACTOR_RANGE = [1.6, 6] as const;
+export const PLANET_MIN_PASS_DISTANCE = 75;
+
+/**
+ * Skew of the `k` draw toward close passes: `k = low × (max / low)^(u^skew)` for a uniform roll `u`
+ * (`passFactorFor` in engine/Planet.ts), so 1 is log-uniform. Small planets have a narrow range of
+ * `k` anyway (they pass near the distance floor, at a large `k`); for the large ones, which can pass
+ * at any `k`, 2 makes the median about 2.2 and still puts one in ten beyond 4.6. Log-uniform would
+ * spread the angular diameters at the closest approach only about 2.6× from p10 to p90.
+ */
+export const PLANET_PASS_FACTOR_SKEW = 2;
+
+/** Share of rocky planets that are icy dwarfs (Pluto-like: small, pale, nitrogen-ice plains, dark patches, craters). */
+export const PLANET_ICY_SHARE = 0.2;
+
+/** Icy dwarf radius range; it replaces the rocky one. At least PLANET_MIN_PASS_DISTANCE / k max. */
+export const PLANET_ICY_RADIUS = [13, 24] as const;
+
+/** Share of planets of each type that have a ring system. */
+export const PLANET_RING_SHARE = { gas: 0.3, rocky: 0.05 } as const;
+
+/**
+ * Ring parameter ranges, in planet radii where a length. The ring is a flat annulus in the planet's
+ * equatorial plane, which a ringed planet turns toward the encounter (see `opening` and `roll`).
+ */
+export const PLANET_RING_RANGES = {
+  /** Inner edge. Well outside the thickest atmosphere shell (1 + PLANET_GAS_RANGES.atmosphereThickness). */
+  inner: [1.3, 1.65],
+  /** Width; the outer edge is inner + width. */
+  width: [0.45, 1.05],
+  /** Peak opacity of the densest ringlets. */
+  opacity: [0.55, 0.9],
+  /** Ringlet cycles across the ring's width. */
+  bands: [7, 22],
+  /** Offset into the ringlet noise. */
+  bandOffset: [0, 100],
+  /** Where the main gap lies across the ring (0 inner edge, 1 outer edge), and its width (same units). */
+  gap: [0.4, 0.75],
+  gapWidth: [0.02, 0.07],
+  /**
+   * Tilt of the ring plane toward the ship as it approaches, in radians: 0 would show the ring
+   * edge-on along the path. Seen from the spawn, the ring opens by about this angle.
+   */
+  opening: [0.3, 0.6],
+  /**
+   * Tilt of the ring plane about the path, in radians, either way: 0 would show the ring edge-on at
+   * the closest approach.
+   */
+  roll: [0.18, 0.45],
+} as const;
+
 /** Parameter ranges for rocky planets. */
 export const PLANET_ROCKY_RANGES = {
-  radius: [18, 44],
+  radius: [16, 50],
   /** Base frequency of the terrain noise. */
   noiseScale: [1.2, 2.8],
   /** Terrain noise octaves (an integer). */
@@ -438,7 +522,7 @@ export const PLANET_ROCKY_RANGES = {
 
 /** Parameter ranges for gas giants. */
 export const PLANET_GAS_RANGES = {
-  radius: [40, 68],
+  radius: [44, 110],
   /** Base frequency of the turbulence noise. */
   noiseScale: [1.4, 3.4],
   /** Turbulence noise octaves (an integer). */
@@ -492,6 +576,19 @@ export const PLANET_ENCOUNTER_LIGHT = { behind: 0.6, inward: 0.6, up: 0.3 } as c
 
 /** Width and height segments of the shared planet sphere geometry. */
 export const PLANET_SPHERE_SEGMENTS = [96, 64] as const;
+
+/**
+ * Segments around a ring's annulus geometry (one per ringed planet, freed with it). Its edges are
+ * chords, so its outer edge lies within the outer radius (the planet's extent) and the fragment
+ * shader trims the inner edge to the true circle.
+ *
+ * Encounter-time resources: a ringed planet holds one geometry and one material more than a plain
+ * one (this annulus, 322 vertices and 640 triangles with both windings, and the ring material), and
+ * no program more (the ring draws with the atmosphere's program, kept compiled by ProgramWarmup), so
+ * a planet encounter holds at most 2 geometries and 3 materials of its own; all are freed with the planet,
+ * and the counts at cruise are unchanged (longRun.test.ts, e2e/rings.spec.ts).
+ */
+export const PLANET_RING_SEGMENTS = 160;
 
 /*
  * Nebulae (docs/PLAN.md section 6, Nebulae (Phase 3)): layered, soft-blended planes shaded with a

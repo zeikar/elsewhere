@@ -23,8 +23,8 @@
  * Nothing is allocated per frame; creating an object (once per encounter) allocates its materials.
  */
 import type { Object3D, Vector3 } from 'three';
-import { PLANET_ENCOUNTER_LIGHT } from '../config';
-import type { AutopilotState, NebulaEncounter, PlanetEncounter } from './Autopilot';
+import { ENCOUNTER_CLEARANCE_MARGIN, PLANET_ENCOUNTER_LIGHT } from '../config';
+import { planetViewRadiusFactor, type AutopilotState, type NebulaEncounter, type PlanetEncounter } from './Autopilot';
 import { encounterOffset, encounterScale, type Encounter, type EncounterProfile } from './encounter';
 import { Nebula, nebulaParams, type NebulaParams } from './Nebula';
 import { Planet, planetParams, type PlanetParams } from './Planet';
@@ -68,11 +68,27 @@ export function encounterLightDirection(plan: Readonly<Encounter>, out: Vec3): V
 
 /**
  * Seeded planet parameters for an encounter. The drawn radius is always the planned one, so the
- * clearance the plan guarantees (`radius × k`) holds whatever chose the planet.
+ * clearance the plan guarantees (`radius × k`) holds whatever chose the planet. A ring is drawn only
+ * if it fits the plan: inside the extent the encounter was planned and is ended with (so it leaves
+ * the view with the planet, `encounterViewMargin`) and inside the clearance (`radius × outer ×
+ * (1 + ENCOUNTER_CLEARANCE_MARGIN)` within the closest approach). With the engine's chooser
+ * (`planetParams`) it always fits; a planet chosen otherwise (a bare `{ radius }`, as in tests) is
+ * drawn without it.
  */
 export function encounterPlanetParams(encounter: Readonly<PlanetEncounter>): PlanetParams {
   const params = planetParams(encounter.seed);
-  return params.radius === encounter.plan.radius ? params : { ...params, radius: encounter.plan.radius };
+  const { radius, closestDistance } = encounter.plan;
+  const ring = params.ring;
+  const fits =
+    ring === null ||
+    (ring.outer <= planetViewRadiusFactor(encounter.planet) &&
+      radius * ring.outer * (1 + ENCOUNTER_CLEARANCE_MARGIN) <= closestDistance * (1 + 1e-12));
+  if (params.radius === radius && fits) return params;
+  return {
+    ...params,
+    radius,
+    ...(fits ? {} : { ring: null, extent: 1 + params.atmosphereThickness }),
+  };
 }
 
 /**
@@ -157,7 +173,7 @@ export class EncounterView {
     const created: EncounterObject =
       encounter.kind === 'nebula'
         ? new Nebula(encounterNebulaParams(encounter), encounter.plan)
-        : new Planet(encounterPlanetParams(encounter), encounterLightDirection(encounter.plan, this.light));
+        : new Planet(encounterPlanetParams(encounter), encounterLightDirection(encounter.plan, this.light), encounter.plan);
     created.setFade(0);
     this.current = created;
     this.index = encounter.index;

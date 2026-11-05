@@ -27,14 +27,24 @@
  * in ascending renderOrder):
  *
  * 1. FAR_STARFIELD_RENDER_ORDER (-2): the far stars and the distant galaxies (Galaxies.ts), both
- *    additive, just inside the far plane, no depth writes. Drawn first, so they never hide anything, and everything below draws over them.
+ *    additive, just inside the far plane, no depth writes. Drawn first, so they never hide anything,
+ *    and everything below draws over them.
  * 2. STARFIELD_RENDER_ORDER - 1 (-1): planet surfaces (SURFACE_RENDER_ORDER), which write depth and
  *    paint over the far stars behind them; and nebula layers (NEBULA_RENDER_ORDER), which blend over
  *    the far stars without writing depth. One encounter is in the scene at a time, so the two never
  *    meet.
- * 3. STARFIELD_RENDER_ORDER (0): this near layer, additive, depth-tested against the planet surface,
- *    so near stars behind a planet are hidden and those in front of it still show.
- * 4. STARFIELD_RENDER_ORDER + 1 (+1): planet atmospheres (ATMOSPHERE_RENDER_ORDER), additive.
+ * 2a. STARFIELD_RENDER_ORDER - 0.75 (-0.75): a ringed planet's atmosphere
+ *    (RINGED_ATMOSPHERE_RENDER_ORDER), additive, depth-tested against the surface, no depth writes;
+ *    drawn before its ring, so the ring blends over the glow instead of hiding it.
+ * 2b. STARFIELD_RENDER_ORDER - 0.5 (-0.5): planet rings (RING_RENDER_ORDER), depth-tested against the
+ *    surface and writing depth, so the disc hides the ring's far side and the near side blends over
+ *    the disc, the far stars and the glow. The far side, seen past the limb, adds the glow in front
+ *    of it back over itself.
+ * 3. STARFIELD_RENDER_ORDER (0): this near layer, additive, depth-tested against the planet surface
+ *    and ring, so near stars behind a planet or its ring are hidden and those in front still show.
+ * 4. STARFIELD_RENDER_ORDER + 1 (+1): the atmospheres of planets without a ring
+ *    (ATMOSPHERE_RENDER_ORDER), additive. Like 2a, it neither writes depth nor is hidden by the near
+ *    layer, and additive draws add up in any order, so the two orders draw an atmosphere the same.
  *
  * The CPU-side maths is exported as pure functions (with TS mirrors of the shader's wrap and fade)
  * so it can be tested without WebGL.

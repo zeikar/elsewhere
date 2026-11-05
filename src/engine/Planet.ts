@@ -1,10 +1,13 @@
 /**
- * Planets (docs/PLAN.md section 6, Planets (Phase 2) and Performance): seeded rocky planets and gas
- * giants with procedural surfaces, basic lighting and an additive atmospheric rim glow.
+ * Planets (docs/PLAN.md section 6, Planets (Phase 2), Variety (Phase 4) and Performance): seeded
+ * rocky planets, icy dwarfs and gas giants with procedural surfaces, basic lighting, an additive
+ * atmospheric rim glow, and for some a ring system.
  *
  * - `planetParams(seed)` is pure: it derives the type, radius, palette, noise or band parameters,
- *   rotation and atmosphere from an encounter's appearance seed (`hash(baseSeed, encounterIndex)`).
- *   Its result is a `PlanetSpec`, so it can be passed straight to `AutopilotParams.planetFor`.
+ *   rotation and atmosphere from an encounter's appearance seed (`hash(baseSeed, encounterIndex)`),
+ *   and from a second stream the Phase 4 variety: whether a rocky planet is an icy dwarf, the ring,
+ *   and the pass factor `k`. Its result is a `PlanetSpec` (radius, `passFactor`, `extent`), so it
+ *   can be passed straight to `AutopilotParams.planetFor`.
  * - `Planet` builds the meshes. Every planet reuses one module-level unit `SphereGeometry`, which is
  *   reference-counted: each planet holds it from its constructor until its `dispose()`, and the last
  *   planet to be disposed frees it (the next planet makes a new one). Each planet owns its materials
@@ -16,8 +19,14 @@
  * - The atmosphere is a slightly larger shell drawn additively. Its glow is computed analytically
  *   from how close each view ray passes to the planet, so it brightens toward the limb and fades out
  *   at the shell's edge, and it is brighter on the day side.
- * - `setFade(opacity)` drives one opacity uniform shared by the surface and the atmosphere (the
- *   Autopilot's fade); at 0 the planet is hidden.
+ * - A ring is a flat annulus (its own geometry, freed with the planet) in the planet's equatorial
+ *   plane, with seeded ringlets, a main gap, two tones from the planet's palette, a lit and an unlit
+ *   face, and the planet's shadow across it. A ringed planet's spin axis and ring are turned toward
+ *   its encounter (`ringAxis`), so the ring is seen open on the approach and at the closest approach,
+ *   never edge-on. It draws with the atmosphere's shader program (the halo program), so it adds no
+ *   program: see `haloVertexShader`.
+ * - `setFade(opacity)` drives one opacity uniform shared by the surface, the ring and the atmosphere
+ *   (the Autopilot's fade); at 0 the planet is hidden.
  * - Draw order and depth, relative to the two star layers (the full render order is in
  *   Starfield.ts; contract for whoever adds planets to the scene): the far stars draw first of all
  *   (FAR_STARFIELD_RENDER_ORDER), so the surface paints over the far stars behind its disc. The
@@ -28,6 +37,13 @@
  *   writes. The surface writes depth while it fades too, so near stars behind a partly faded planet
  *   are hidden; fades happen while the planet is far beyond most of the star cube, so few stars are
  *   affected. A partly faded surface blends over the far stars, so they show through it as it fades.
+ *   The ring draws after the surface and before the near starfield (RING_RENDER_ORDER), depth-tested,
+ *   so the disc hides the ring's far side and the near side blends over the disc and the far stars;
+ *   it writes depth (except in its gaps), so near stars behind it are hidden too. A ringed planet's
+ *   atmosphere draws between its surface and its ring instead (RINGED_ATMOSPHERE_RENDER_ORDER), so
+ *   the ring's near side blends over the glow, dimming it by the ring's opacity rather than hiding
+ *   it; where the ring's far side shows past the limb, through the glow, the ring adds that glow
+ *   back over itself (see `haloFragmentShader`).
  *
  * Positions are relative to the ship (floating origin): the caller sets `object.position` to
  * `planet centre - ship position`, computed in float64 on the CPU.
@@ -39,18 +55,29 @@ import {
   Group,
   Mesh,
   NormalBlending,
+  Quaternion,
+  RingGeometry,
   SRGBColorSpace,
   ShaderMaterial,
   SphereGeometry,
   Vector3,
 } from 'three';
 import {
+  ENCOUNTER_CLEARANCE_MARGIN,
   PLANET_ATMOSPHERE_TINT,
   PLANET_GAS_RANGES,
   PLANET_GAS_SHARE,
+  PLANET_ICY_RADIUS,
+  PLANET_ICY_SHARE,
   PLANET_LIGHT_DIRECTION,
+  PLANET_MIN_PASS_DISTANCE,
   PLANET_NOISE_OFFSET_RANGE,
   PLANET_PALETTE_TINT,
+  PLANET_PASS_FACTOR_RANGE,
+  PLANET_PASS_FACTOR_SKEW,
+  PLANET_RING_RANGES,
+  PLANET_RING_SEGMENTS,
+  PLANET_RING_SHARE,
   PLANET_ROCKY_RANGES,
   PLANET_ROTATION_PHASE_RANGE,
   PLANET_SPHERE_SEGMENTS,
@@ -69,13 +96,51 @@ export type PlanetType = 'rocky' | 'gas';
 /** An sRGB colour with channels in [0, 1]. */
 export type Rgb = readonly [number, number, number];
 
+/**
+ * A ring system (docs/PLAN.md section 9, Phase 4): a thin, flat annulus in the planet's equatorial
+ * plane, with seeded ringlets, a main gap, colours and tilt. Lengths are in planet radii.
+ */
+export interface PlanetRing {
+  /** Inner edge. */
+  inner: number;
+  /** Outer edge; the planet's `extent`. */
+  outer: number;
+  /** Peak opacity of the densest ringlets. */
+  opacity: number;
+  /** Ringlet cycles across the ring's width. */
+  bands: number;
+  /** Offset into the ringlet noise. */
+  bandOffset: number;
+  /** Where the main gap lies across the ring (0 inner edge, 1 outer edge), and its width. */
+  gap: number;
+  gapWidth: number;
+  /** Ring colours (sRGB): the dominant tone and the one it shades into. */
+  colors: readonly [Rgb, Rgb];
+  /** Tilt of the ring plane toward the approaching ship, in radians (`ringAxis`). */
+  opening: number;
+  /** Signed tilt of the ring plane about the path, in radians (`ringAxis`). */
+  roll: number;
+}
+
 interface PlanetParamsBase extends PlanetSpec {
   /** The appearance seed these parameters were drawn from. */
   seed: number;
-  /** Name of the palette family the colours were drawn from (for example `terran` or `jovian`). */
+  /** Name of the palette family the colours were drawn from (for example `terran`, `icy` or `jovian`). */
   family: string;
   /** Planet radius in world units. */
   radius: number;
+  /**
+   * `k`: the encounter passes the centre at `radius × k` (PLANET_PASS_FACTOR_RANGE). Already clears
+   * the ring, if any (`planetPassFactor` in Autopilot.ts would raise it otherwise).
+   */
+  passFactor: number;
+  /**
+   * Everything drawn for the planet lies within `radius × extent` of its centre: the ring's outer
+   * edge, or the atmosphere shell (`1 + atmosphereThickness`) without a ring.
+   */
+  extent: number;
+  /** The ring system, or `null` (most planets). */
+  ring: PlanetRing | null;
   /**
    * Four surface colours (sRGB). Rocky: basin or sea, lowland, upland, highland. Gas: dark band,
    * light band, accent band, storm.
@@ -89,7 +154,10 @@ interface PlanetParamsBase extends PlanetSpec {
   noiseOffset: readonly [number, number, number];
   /** Spin about the planet's axis, in radians per second. */
   rotationSpeed: number;
-  /** Tilt of the spin axis away from world up, in radians. */
+  /**
+   * Tilt of the spin axis away from world up, in radians. A ringed planet's spin axis is instead the
+   * ring's axis, turned toward the encounter (`ringAxis`).
+   */
   axialTilt: number;
   /** Starting rotation angle, in radians. */
   rotationPhase: number;
@@ -158,7 +226,10 @@ interface GasFamily {
   atmospheres: readonly number[];
 }
 
-/** Rocky palette families (no icy worlds: those are optional per docs/PLAN.md section 5). */
+/**
+ * Rocky palette families, which `planetParams` picks from evenly. Icy dwarfs (ICY_FAMILY) are drawn
+ * separately, at PLANET_ICY_SHARE.
+ */
 const ROCKY_FAMILIES: readonly RockyFamily[] = [
   {
     name: 'terran',
@@ -245,6 +316,23 @@ const ROCKY_FAMILIES: readonly RockyFamily[] = [
   },
 ];
 
+/**
+ * Icy dwarfs (docs/PLAN.md section 9, Phase 4), Pluto-like: the basins are smooth, bright
+ * nitrogen-ice plains (the "sea" of the rocky shader, flat and only faintly glossy), the lowlands dark
+ * reddish-brown tholin patches, the uplands tan and the peaks frosted, with plenty of craters and a
+ * faint blue haze or none. Small (PLANET_ICY_RADIUS).
+ */
+const ICY_FAMILY: RockyFamily = {
+  name: 'icy',
+  palette: [0xd4cbbb, 0x4e3226, 0xa88a6c, 0xe2dcd2],
+  atmospheres: [0x9ab8f0, 0xb0c8f8],
+  seaLevel: [-0.1, 0.06],
+  iceCap: [0, 0.12],
+  specular: [0.04, 0.12],
+  craters: [0.25, 0.55],
+  atmosphereIntensity: [0, 0.35],
+};
+
 const GAS_FAMILIES: readonly GasFamily[] = [
   { name: 'jovian', palette: [0x9a6a46, 0xe6d6bc, 0xc49a6c, 0xb5502e], atmospheres: [0xf2d8b0, 0xe8c8a8] },
   { name: 'saturnian', palette: [0xb3955a, 0xefe2bd, 0xd2bb85, 0xf6edd2], atmospheres: [0xf6e6be, 0xe8e0c8] },
@@ -257,13 +345,13 @@ const GAS_FAMILIES: readonly GasFamily[] = [
   { name: 'umber', palette: [0x3a2414, 0x8c6a48, 0x6a4a2e, 0xcc9c68], atmospheres: [0xd8b090, 0xe8c8a0] },
 ];
 
-/** Names of the rocky and gas palette families, in draw order. */
-export const ROCKY_FAMILY_NAMES: readonly string[] = ROCKY_FAMILIES.map((f) => f.name);
+/** Names of the rocky (icy dwarfs last) and gas palette families. */
+export const ROCKY_FAMILY_NAMES: readonly string[] = [...ROCKY_FAMILIES, ICY_FAMILY].map((f) => f.name);
 export const GAS_FAMILY_NAMES: readonly string[] = GAS_FAMILIES.map((f) => f.name);
 
 /** The rocky families' sub-ranges, so tests can check they lie inside PLANET_ROCKY_RANGES. */
 export const ROCKY_FAMILY_RANGES: readonly Readonly<Record<'seaLevel' | 'iceCap' | 'specular' | 'craters' | 'atmosphereIntensity', Range>>[] =
-  ROCKY_FAMILIES.map(({ seaLevel, iceCap, specular, craters, atmosphereIntensity }) => ({
+  [...ROCKY_FAMILIES, ICY_FAMILY].map(({ seaLevel, iceCap, specular, craters, atmosphereIntensity }) => ({
     seaLevel,
     iceCap,
     specular,
@@ -273,6 +361,11 @@ export const ROCKY_FAMILY_RANGES: readonly Readonly<Record<'seaLevel' | 'iceCap'
 
 /** Salt mixed into the seed so the parameter stream differs from other values drawn from the seed. */
 const PARAMS_SALT = 0x91a2e7;
+/**
+ * Salt of the second stream, for the Phase 4 variety (icy dwarfs, rings, the pass factor). A stream
+ * of its own, so every Phase 3 value is drawn exactly as before.
+ */
+const VARIETY_SALT = 0x7a41e7;
 
 function lerp(range: Range, t: number): number {
   return range[0] + (range[1] - range[0]) * t;
@@ -322,7 +415,7 @@ export function planetParams(seed: number): PlanetParams {
   random();
   const type: PlanetType = random() < PLANET_GAS_SHARE ? 'gas' : 'rocky';
   const ranges = type === 'gas' ? PLANET_GAS_RANGES : PLANET_ROCKY_RANGES;
-  const radius = lerp(ranges.radius, random());
+  const radiusRoll = random();
   const noiseScale = lerp(ranges.noiseScale, random());
   const octaves = Math.min(ranges.octaves[1], ranges.octaves[0] + Math.floor(random() * (ranges.octaves[1] - ranges.octaves[0] + 1)));
   const noiseOffset = [
@@ -334,7 +427,24 @@ export function planetParams(seed: number): PlanetParams {
   const axialTilt = lerp(ranges.axialTilt, random());
   const rotationPhase = lerp(PLANET_ROTATION_PHASE_RANGE, random()) % (2 * Math.PI);
   const atmosphereThickness = lerp(ranges.atmosphereThickness, random());
+
+  // The Phase 4 variety, from its own stream: always the same draws, in the same order.
+  const variety = mulberry32((seed ^ VARIETY_SALT) >>> 0);
+  variety();
+  const icy = type === 'rocky' && variety() < PLANET_ICY_SHARE;
+  const ringed = variety() < PLANET_RING_SHARE[type];
+  const passRoll = variety();
+  const ringDraw = drawRing(variety);
+  const icyDraw = drawRockyFamily(ICY_FAMILY, variety);
+
+  const radius = lerp(icy ? PLANET_ICY_RADIUS : ranges.radius, radiusRoll);
   const base = { seed, radius, noiseScale, octaves, noiseOffset, rotationSpeed, axialTilt, rotationPhase, atmosphereThickness };
+  /** The ring, extent and pass factor, once the palette is known (the ring takes its colours from it). */
+  const shape = (palette: Hex4Rgb) => {
+    const ring = ringed ? { ...ringDraw, colors: ringColors(type, palette) } : null;
+    const extent = ring === null ? 1 + atmosphereThickness : ring.outer;
+    return { ring, extent, passFactor: passFactorFor(radius, extent, passRoll) };
+  };
 
   if (type === 'gas') {
     const g = PLANET_GAS_RANGES;
@@ -351,6 +461,7 @@ export function planetParams(seed: number): PlanetParams {
     const stormLongitude = lerp(g.stormLongitude, random());
     return {
       ...base,
+      ...shape(palette),
       type,
       family: family.name,
       palette,
@@ -375,20 +486,83 @@ export function planetParams(seed: number): PlanetParams {
   const specular = lerp(family.specular, random());
   const relief = lerp(r.relief, random());
   const craters = lerp(family.craters, random());
+  const atmosphere = atmosphereColor(family.atmospheres, random);
+  // An icy dwarf keeps the terrain shape (noise, warp, relief) and replaces the family's look.
+  const look = icy
+    ? icyDraw
+    : { family: family.name, palette, atmosphereColor: atmosphere, atmosphereIntensity, seaLevel, iceCap, specular, craters };
   return {
     ...base,
+    ...shape(look.palette),
     type,
-    family: family.name,
-    palette,
-    atmosphereColor: atmosphereColor(family.atmospheres, random),
-    atmosphereIntensity,
+    ...look,
     warp,
-    seaLevel,
-    iceCap,
-    specular,
     relief,
-    craters,
   };
+}
+
+type Hex4Rgb = readonly [Rgb, Rgb, Rgb, Rgb];
+
+/** A rocky family's look, drawn from `random` in a fixed order. */
+function drawRockyFamily(family: RockyFamily, random: () => number) {
+  return {
+    family: family.name,
+    palette: jitterPalette(family.palette, random),
+    atmosphereColor: atmosphereColor(family.atmospheres, random),
+    atmosphereIntensity: lerp(family.atmosphereIntensity, random()),
+    seaLevel: lerp(family.seaLevel, random()),
+    iceCap: lerp(family.iceCap, random()),
+    specular: lerp(family.specular, random()),
+    craters: lerp(family.craters, random()),
+  };
+}
+
+/** A ring's shape and tilt, drawn from `random` in a fixed order (its colours come from the palette). */
+function drawRing(random: () => number): Omit<PlanetRing, 'colors'> {
+  const g = PLANET_RING_RANGES;
+  const inner = lerp(g.inner, random());
+  const outer = inner + lerp(g.width, random());
+  const opacity = lerp(g.opacity, random());
+  const bands = lerp(g.bands, random());
+  const bandOffset = lerp(g.bandOffset, random());
+  const gap = lerp(g.gap, random());
+  const gapWidth = lerp(g.gapWidth, random());
+  const opening = lerp(g.opening, random());
+  const roll = lerp(g.roll, random()) * (random() < 0.5 ? -1 : 1);
+  return { inner, outer, opacity, bands, bandOffset, gap, gapWidth, opening, roll };
+}
+
+/** `rgb` moved `amount` of the way toward its own grey (desaturated), then scaled by `scale`. */
+function greyed(rgb: Rgb, amount: number, scale = 1): Rgb {
+  const grey = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+  return [
+    clamp01((rgb[0] + (grey - rgb[0]) * amount) * scale),
+    clamp01((rgb[1] + (grey - rgb[1]) * amount) * scale),
+    clamp01((rgb[2] + (grey - rgb[2]) * amount) * scale),
+  ];
+}
+
+/**
+ * Ring colours from the planet's palette: muted versions of a gas giant's light and accent bands
+ * (ice and dust, like Saturn's), or of a rocky world's highland and upland tones (rock and dust).
+ */
+function ringColors(type: PlanetType, palette: Hex4Rgb): readonly [Rgb, Rgb] {
+  return type === 'gas'
+    ? [greyed(palette[1], 0.45), greyed(palette[2], 0.45, 0.85)]
+    : [greyed(palette[3], 0.55), greyed(palette[2], 0.5, 0.8)];
+}
+
+/**
+ * The pass factor `k` for a planet of `radius` and `extent`, from a roll `u` in [0, 1):
+ * `low × (max / low)^(u^PLANET_PASS_FACTOR_SKEW)`, log-uniform in `k` but skewed toward `low`, the
+ * lowest `k` that keeps the closest approach at least PLANET_MIN_PASS_DISTANCE and clear of the
+ * extent (`radius × extent × (1 + ENCOUNTER_CLEARANCE_MARGIN)`); `max` is the top of
+ * PLANET_PASS_FACTOR_RANGE. The radii and ring sizes leave that interval non-empty.
+ */
+export function passFactorFor(radius: number, extent: number, roll: number): number {
+  const [min, max] = PLANET_PASS_FACTOR_RANGE;
+  const low = Math.min(max, Math.max(min, PLANET_MIN_PASS_DISTANCE / radius, extent * (1 + ENCOUNTER_CLEARANCE_MARGIN)));
+  return low * (max / low) ** (roll ** PLANET_PASS_FACTOR_SKEW);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -739,38 +913,113 @@ void main() {
 }
 `;
 
-const atmosphereVertexShader = /* glsl */ `
+/*
+ * The halo program draws both the atmosphere shell and the ring (`uRing` picks which), so a ringed
+ * planet needs no shader program of its own: the program count stays the same from start-up on, and
+ * ProgramWarmup's atmosphere holder already keeps it compiled (see `planetProgramMaterials`). Three.js
+ * keys a program on its sources, defines and a few material flags (side, among them), not on
+ * blending or depth writes, so the two materials share it. Uniforms keep their values per program,
+ * so every halo material sets `uRing` itself.
+ */
+const haloVertexShader = /* glsl */ `
 varying vec3 vWorld;
 varying vec3 vCenter;
 varying float vShellRadius;
+// The mesh's local +Y in world space: the ring plane's normal (unused by the atmosphere).
+varying vec3 vAxis;
 
 void main() {
   vec4 world = modelMatrix * vec4(position, 1.0);
   vWorld = world.xyz;
   vCenter = modelMatrix[3].xyz;
   vShellRadius = length(modelMatrix[0].xyz);
+  vAxis = normalize(modelMatrix[1].xyz);
   gl_Position = projectionMatrix * viewMatrix * world;
 }
 `;
 
-const atmosphereFragmentShader = /* glsl */ `
+const haloFragmentShader = /* glsl */ `
 uniform vec3 uAtmosphereColor;
 uniform float uAtmosphereIntensity;
 uniform float uThickness;
 uniform vec3 uLightDir;
 uniform float uOpacity;
+// 1 for the ring, 0 for the atmosphere.
+uniform float uRing;
+uniform float uRingInner;
+uniform float uRingOuter;
+uniform float uRingOpacity;
+uniform float uRingBands;
+uniform float uRingOffset;
+uniform float uRingGap;
+uniform float uRingGapWidth;
+uniform vec3 uRingColor0;
+uniform vec3 uRingColor1;
 
 varying vec3 vWorld;
 varying vec3 vCenter;
 varying float vShellRadius;
+varying vec3 vAxis;
 
-void main() {
-  // How close the view ray through this fragment passes to the planet centre, in planet radii:
-  // 1 at the limb, 1 + thickness at the shell's edge.
+const float PI = 3.141592653589793;
+
+float hash11(float x) {
+  return fract(sin(x * 127.1 + 311.7) * 43758.5453);
+}
+
+// Smooth 1D value noise in [0, 1].
+float noise1(float x) {
+  float i = floor(x);
+  float f = x - i;
+  return mix(hash11(i), hash11(i + 1.0), f * f * (3.0 - 2.0 * f));
+}
+
+// The ring: the mesh is a flat annulus scaled by the planet radius (vShellRadius), centred on it.
+vec4 ring() {
+  vec3 rel = vWorld - vCenter;
+  float r = length(rel) / vShellRadius;
+  float t = (r - uRingInner) / (uRingOuter - uRingInner);
+  // The annulus's edges are chords; trim them to the true circles.
+  if (t < 0.0 || t > 1.0) discard;
+  // Ringlets: a few octaves of noise across the width, so the bands are irregular, sharpened.
+  float x = t * uRingBands + uRingOffset;
+  float n = 0.55 * noise1(x) + 0.3 * noise1(x * 2.7 + 13.1) + 0.15 * noise1(x * 7.9 + 4.2);
+  float density = smoothstep(0.18, 0.82, n);
+  // Denser toward the middle, soft at both edges, and the main gap.
+  density *= mix(0.45, 1.0, sin(PI * t)) * smoothstep(0.0, 0.06, t) * (1.0 - smoothstep(0.9, 1.0, t));
+  density *= smoothstep(0.45, 1.0, abs(t - uRingGap) / uRingGapWidth);
+  vec3 albedo = mix(uRingColor0, uRingColor1, noise1(t * 3.0 + uRingOffset * 0.37));
+  albedo *= 0.75 + 0.5 * n;
+
+  // Lit by the sun on one face. Seen from the other, light only filters through, more so where thin.
+  vec3 l = normalize(uLightDir);
+  vec3 axis = normalize(vAxis);
+  vec3 v = normalize(cameraPosition - vWorld);
+  float nl = dot(axis, l);
+  float lit = 0.12 + 0.88 * abs(nl);
+  if (nl * dot(axis, v) < 0.0) lit *= 0.5 * (1.0 - 0.6 * density);
+  // The planet's shadow: the ray toward the sun passes within one radius of the centre.
+  float along = -dot(rel, l);
+  float miss = dot(rel, rel) - along * along;
+  float radius2 = vShellRadius * vShellRadius;
+  float shadow = along > 0.0 ? smoothstep(radius2 * 0.94, radius2 * 1.06, miss) : 1.0;
+  vec3 color = albedo * lit * mix(0.03, 1.0, shadow);
+
+  float alpha = density * uRingOpacity * uOpacity;
+  // Fragments this faint change no 8-bit channel; dropping them keeps depth out of the gaps.
+  if (alpha < 1.0 / 512.0) discard;
+  return vec4(color, alpha);
+}
+
+// The atmosphere's glow along the view ray through this fragment (linear colour, before the output
+// encoding), for a planet of radius planetRadius. It depends on the ray alone, so the ring can
+// compute the glow the atmosphere draws at the same pixel.
+vec3 atmosphereGlow(float planetRadius) {
+  // How close the ray passes to the planet centre, in planet radii: 1 at the limb, 1 + thickness at
+  // the shell's edge.
   vec3 rd = normalize(vWorld - cameraPosition);
   vec3 oc = vCenter - cameraPosition;
   vec3 closest = cameraPosition + rd * dot(oc, rd);
-  float planetRadius = vShellRadius / (1.0 + uThickness);
   float x = length(closest - vCenter) / planetRadius;
 
   float glow;
@@ -785,8 +1034,25 @@ void main() {
   // Brighter on the day side, wrapping a little past the terminator as scattered light does.
   vec3 toLimb = normalize(closest - vCenter + 1e-5);
   float day = smoothstep(-0.3, 0.55, dot(toLimb, normalize(uLightDir)));
-  vec3 color = uAtmosphereColor * glow * day * uAtmosphereIntensity * uOpacity;
-  gl_FragColor = vec4(color, 1.0);
+  return uAtmosphereColor * glow * day * uAtmosphereIntensity * uOpacity;
+}
+
+void main() {
+  if (uRing > 0.5) {
+    gl_FragColor = ring();
+    #include <colorspace_fragment>
+    // The atmosphere drew before the ring (RINGED_ATMOSPHERE_RENDER_ORDER), so the ring blends over
+    // its glow. The ring lies outside the atmosphere shell, so on this view ray the glow is all
+    // behind the ring or all in front of it. Behind (the ring nearer than the planet centre along the
+    // ray): blending over it is right. In front (the ring's far side, seen past the limb): the ring
+    // adds the glow, as the atmosphere wrote it, to its own colour, so blended at alpha a it leaves
+    // a × glow + (1 − a) × glow, the whole glow, over itself.
+    if (uAtmosphereIntensity > 0.0 && dot(vWorld - vCenter, vWorld - cameraPosition) > 0.0) {
+      gl_FragColor.rgb += linearToOutputTexel(vec4(atmosphereGlow(vShellRadius), 1.0)).rgb;
+    }
+    return;
+  }
+  gl_FragColor = vec4(atmosphereGlow(vShellRadius / (1.0 + uThickness)), 1.0);
   #include <colorspace_fragment>
 }
 `;
@@ -871,9 +1137,19 @@ export interface PlanetUniforms {
 /**
  * Render order. The surface draws after the far stars (painting over those behind it) and before the
  * near starfield, and writes depth, so the depth-tested near stars are hidden only where they are
- * behind it. The additive atmosphere draws after the near starfield.
+ * behind it. The ring draws after the surface, depth-tested against it, so the planet hides the part
+ * of the ring behind its disc and the part in front blends over the disc; it writes depth too, so the
+ * near stars behind it are hidden as well. The additive atmosphere draws after the near starfield.
+ *
+ * A ringed planet's atmosphere draws between its surface and its ring instead
+ * (RINGED_ATMOSPHERE_RENDER_ORDER), so the ring's depth never hides the glow: the ring's near side
+ * blends over it, and its far side, seen past the limb through the glow, adds the glow back over
+ * itself (see `haloFragmentShader`). The atmosphere is additive, depth-tested only against the
+ * surface and writes no depth, so drawing it before the near starfield leaves the stars as they are.
  */
 export const SURFACE_RENDER_ORDER = STARFIELD_RENDER_ORDER - 1;
+export const RINGED_ATMOSPHERE_RENDER_ORDER = SURFACE_RENDER_ORDER + 0.25;
+export const RING_RENDER_ORDER = SURFACE_RENDER_ORDER + 0.5;
 export const ATMOSPHERE_RENDER_ORDER = STARFIELD_RENDER_ORDER + 1;
 
 type Uniforms = ShaderMaterial['uniforms'];
@@ -896,12 +1172,12 @@ function createSurfaceMaterial(type: PlanetType, uniforms: Uniforms): ShaderMate
   });
 }
 
-/** The atmosphere shell's material. One shader program for every planet. */
+/** The atmosphere shell's material: the halo program, additive. One shader program for every planet. */
 function createAtmosphereMaterial(uniforms: Uniforms): ShaderMaterial {
   return new ShaderMaterial({
-    uniforms,
-    vertexShader: atmosphereVertexShader,
-    fragmentShader: atmosphereFragmentShader,
+    uniforms: { ...uniforms, uRing: { value: 0 } },
+    vertexShader: haloVertexShader,
+    fragmentShader: haloFragmentShader,
     side: FrontSide,
     transparent: true,
     blending: AdditiveBlending,
@@ -911,13 +1187,86 @@ function createAtmosphereMaterial(uniforms: Uniforms): ShaderMaterial {
 }
 
 /**
- * One material per planet shader program (the rocky surface, the gas surface and the atmosphere),
- * built exactly as planets build theirs but with no uniforms, so each compiles to the program the
- * planets use. For keeping those programs compiled between encounters (see ProgramWarmup.ts); they
- * are never drawn. The caller owns and disposes them.
+ * The ring's material: the same halo program as the atmosphere (same sources, no defines, front
+ * faces only), blended normally and writing depth (see RING_RENDER_ORDER). The ring geometry holds
+ * both windings, so front faces alone show it from either side. It takes the atmosphere's uniforms
+ * too, to add the glow in front of its far side (see RINGED_ATMOSPHERE_RENDER_ORDER).
+ */
+function createRingMaterial(uniforms: Uniforms): ShaderMaterial {
+  return new ShaderMaterial({
+    uniforms: { ...uniforms, uRing: { value: 1 } },
+    vertexShader: haloVertexShader,
+    fragmentShader: haloFragmentShader,
+    side: FrontSide,
+    transparent: true,
+    blending: NormalBlending,
+    depthTest: true,
+    depthWrite: true,
+  });
+}
+
+/**
+ * One material per planet shader program (the rocky surface, the gas surface and the halo, which
+ * draws both the atmosphere and the ring), built exactly as planets build theirs but with no
+ * uniforms, so each compiles to the program the planets use. For keeping those programs compiled
+ * between encounters (see ProgramWarmup.ts); they are never drawn. The caller owns and disposes them.
  */
 export function planetProgramMaterials(): ShaderMaterial[] {
   return [createSurfaceMaterial('rocky', {}), createSurfaceMaterial('gas', {}), createAtmosphereMaterial({})];
+}
+
+/**
+ * A flat annulus from `inner` to `outer` in the XZ plane (normal +Y), with both windings, so a
+ * front-face-only material draws it from either side. Positions, normals and uvs, like the sphere.
+ */
+export function ringGeometry(inner: number, outer: number, segments = PLANET_RING_SEGMENTS): RingGeometry {
+  const geometry = new RingGeometry(inner, outer, segments, 1);
+  geometry.rotateX(-Math.PI / 2);
+  const index = geometry.getIndex();
+  if (index !== null) {
+    const front = Array.from(index.array as ArrayLike<number>);
+    const back: number[] = [];
+    for (let i = 0; i < front.length; i += 3) back.push(front[i]!, front[i + 2]!, front[i + 1]!);
+    geometry.setIndex([...front, ...back]);
+  }
+  return geometry;
+}
+
+/** The plan frame a planet is oriented in: the planned direction and the side the planet sits on. */
+export interface PlanetFrame {
+  direction: Readonly<Vec3>;
+  side: Readonly<Vec3>;
+}
+
+/** The frame of a planet ahead along -Z, to the right of the path (previews and tests). */
+export const DEFAULT_PLANET_FRAME: PlanetFrame = { direction: { x: 0, y: 0, z: -1 }, side: { x: 1, y: 0, z: 0 } };
+
+/**
+ * Writes the ring's axis (the normal of its plane, and the ringed planet's spin axis) in world space
+ * into `out` and returns it, for a ring planned in `frame`. With `up = side × direction`, the axis is
+ * `up` tilted toward the approaching ship by `opening` and about the path by `roll`:
+ * `cos(opening) cos(roll) up − sin(opening) direction + cos(opening) sin(roll) side`, a unit vector.
+ * A ring with neither tilt would lie in the plane of the path and be seen edge-on all along it;
+ * `opening` opens it toward the approach and `roll` at the closest approach. The path crosses the
+ * ring plane only `|tan(roll) / tan(opening)|` × the closest approach along the path from it, which
+ * is beyond the ring whenever the closest approach is (`planetPassFactor`).
+ */
+export function ringAxis(ring: Readonly<Pick<PlanetRing, 'opening' | 'roll'>>, frame: Readonly<PlanetFrame>, out: Vec3): Vec3 {
+  const { direction: d, side: s } = frame;
+  const ux = s.y * d.z - s.z * d.y;
+  const uy = s.z * d.x - s.x * d.z;
+  const uz = s.x * d.y - s.y * d.x;
+  const a = Math.cos(ring.opening) * Math.cos(ring.roll);
+  const b = -Math.sin(ring.opening);
+  const c = Math.cos(ring.opening) * Math.sin(ring.roll);
+  const x = a * ux + b * d.x + c * s.x;
+  const y = a * uy + b * d.y + c * s.y;
+  const z = a * uz + b * d.z + c * s.z;
+  const len = Math.hypot(x, y, z);
+  out.x = x / len;
+  out.y = y / len;
+  out.z = z / len;
+  return out;
 }
 
 export class Planet {
@@ -930,10 +1279,21 @@ export class Planet {
   readonly uniforms: PlanetUniforms;
   private readonly tilt = new Group();
   private readonly surface: Mesh<SphereGeometry, ShaderMaterial>;
-  private readonly atmosphere: Mesh<SphereGeometry, ShaderMaterial> | null;
+  /** The atmosphere shell, or `null` for an airless planet; it draws with the shared sphere. */
+  readonly atmosphere: Mesh<SphereGeometry, ShaderMaterial> | null;
+  /** The ring, or `null`; it owns its geometry. */
+  readonly ring: Mesh<RingGeometry, ShaderMaterial> | null;
   private disposed = false;
 
-  constructor(params: Readonly<PlanetParams>, lightDirection: Readonly<Vec3> = PLANET_LIGHT_DIRECTION) {
+  /**
+   * `frame` orients a ringed planet toward its encounter (`ringAxis`); a planet without a ring tilts
+   * its spin axis by `axialTilt` from world up and ignores it.
+   */
+  constructor(
+    params: Readonly<PlanetParams>,
+    lightDirection: Readonly<Vec3> = PLANET_LIGHT_DIRECTION,
+    frame: Readonly<PlanetFrame> = DEFAULT_PLANET_FRAME,
+  ) {
     this.params = params;
     const geometry = acquirePlanetGeometry();
     const [c0, c1, c2, c3] = params.palette;
@@ -988,9 +1348,40 @@ export class Planet {
     });
     this.surface = new Mesh(geometry, surfaceMaterial);
     this.surface.renderOrder = SURFACE_RENDER_ORDER;
-    this.tilt.rotation.z = params.axialTilt;
+    const ring = params.ring;
+    if (ring === null) {
+      this.tilt.rotation.z = params.axialTilt;
+    } else {
+      const axis = ringAxis(ring, frame, { x: 0, y: 0, z: 0 });
+      this.tilt.quaternion.copy(new Quaternion().setFromUnitVectors(new Vector3(0, 1, 0), new Vector3(axis.x, axis.y, axis.z)));
+    }
     this.tilt.add(this.surface);
     this.object.add(this.tilt);
+
+    if (ring !== null) {
+      const [r0, r1] = ring.colors;
+      const ringMaterial = createRingMaterial({
+        uAtmosphereColor: u.uAtmosphereColor,
+        uAtmosphereIntensity: u.uAtmosphereIntensity,
+        uThickness: u.uThickness,
+        uLightDir: u.uLightDir,
+        uOpacity: u.uOpacity,
+        uRingInner: { value: ring.inner },
+        uRingOuter: { value: ring.outer },
+        uRingOpacity: { value: ring.opacity },
+        uRingBands: { value: ring.bands },
+        uRingOffset: { value: ring.bandOffset },
+        uRingGap: { value: ring.gap },
+        uRingGapWidth: { value: ring.gapWidth },
+        uRingColor0: { value: toColor(r0) },
+        uRingColor1: { value: toColor(r1) },
+      });
+      this.ring = new Mesh(ringGeometry(ring.inner, ring.outer), ringMaterial);
+      this.ring.renderOrder = RING_RENDER_ORDER;
+      this.tilt.add(this.ring);
+    } else {
+      this.ring = null;
+    }
 
     if (params.atmosphereIntensity > 0) {
       const atmosphereMaterial = createAtmosphereMaterial({
@@ -1002,7 +1393,7 @@ export class Planet {
       });
       this.atmosphere = new Mesh(geometry, atmosphereMaterial);
       this.atmosphere.scale.setScalar(1 + params.atmosphereThickness);
-      this.atmosphere.renderOrder = ATMOSPHERE_RENDER_ORDER;
+      this.atmosphere.renderOrder = ring === null ? ATMOSPHERE_RENDER_ORDER : RINGED_ATMOSPHERE_RENDER_ORDER;
       this.object.add(this.atmosphere);
     } else {
       this.atmosphere = null;
@@ -1044,6 +1435,8 @@ export class Planet {
     this.object.removeFromParent();
     this.surface.material.dispose();
     this.atmosphere?.material.dispose();
+    this.ring?.material.dispose();
+    this.ring?.geometry.dispose();
     releasePlanetGeometry();
   }
 }

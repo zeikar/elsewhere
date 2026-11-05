@@ -9,9 +9,9 @@ import {
   ENCOUNTER_MIN_SPEED,
   ENCOUNTER_MIN_SPEED_FLOOR,
   ENCOUNTER_SIDE_OFFSET_FACTOR,
-  PLANET_GAS_RANGES,
   PLANET_GAS_SHARE,
-  PLANET_ROCKY_RANGES,
+  PLANET_MIN_PASS_DISTANCE,
+  PLANET_PASS_FACTOR_RANGE,
   REDUCED_MOTION_SPEED_LEVEL,
   SHIP_DEFAULT_SPEED_LEVEL,
   SHIP_SPEED_LEVELS,
@@ -20,6 +20,7 @@ import {
 } from '../config';
 import {
   DEFAULT_AUTOPILOT_PARAMS,
+  planetPassFactor,
   createTravel,
   encounterCruiseSpeed,
   encounterProfile,
@@ -30,6 +31,8 @@ import {
   updateAutopilot,
   warpEntryDuration,
   type AutopilotParams,
+  type PlanetEncounter,
+  type PlanetSpec,
   type TravelState,
   type Travel,
 } from './Autopilot';
@@ -49,8 +52,8 @@ import {
   planetRenderPosition,
 } from './EncounterView';
 import { Nebula, disposeNebulaGeometry, nebulaGeometry, nebulaGeometryRefs, nebulaParams } from './Nebula';
-import { disposePlanetGeometry, planetGeometry, planetGeometryRefs, planetParams, type Planet } from './Planet';
-import { hash } from './seed';
+import { Planet, disposePlanetGeometry, planetGeometry, planetGeometryRefs, planetParams, ringAxis } from './Planet';
+import { hash, mulberry32 } from './seed';
 import { DEFAULT_SHIP_PARAMS, createShipState, headingAt, updateShip, type Vec3 } from './Ship';
 
 const dot = (a: Vec3, b: Vec3) => a.x * b.x + a.y * b.y + a.z * b.z;
@@ -465,14 +468,22 @@ describe('EncounterView shader warm-up', () => {
   });
 });
 
-/** Median radius of the seeded planet draw: gas with probability PLANET_GAS_SHARE, the radius uniform over the type's range. */
+/**
+ * Radius of the Phase 3 median planet, the one the speed profile was tuned for (config.ts,
+ * ENCOUNTER_MIN_SPEED): the median of the Phase 3 draw, gas with probability PLANET_GAS_SHARE and the
+ * radius uniform over the type's Phase 3 range (rocky 18–44, gas 40–68), about 41.3. It passed at
+ * k = 2 (ENCOUNTER_SIDE_OFFSET_FACTOR). Seeded planets now vary their radius and k; the peak bearing
+ * rate over all of them is checked against the same guard below.
+ */
 function medianPlanetRadius(): number {
+  const PHASE3_ROCKY_RADIUS = [18, 44] as const;
+  const PHASE3_GAS_RADIUS = [40, 68] as const;
   // Found by bisection on the mixture's CDF.
   const uniformCdf = ([min, max]: readonly [number, number], r: number) => Math.min(1, Math.max(0, (r - min) / (max - min)));
   const cdf = (r: number) =>
-    (1 - PLANET_GAS_SHARE) * uniformCdf(PLANET_ROCKY_RANGES.radius, r) + PLANET_GAS_SHARE * uniformCdf(PLANET_GAS_RANGES.radius, r);
-  let low = Math.min(PLANET_ROCKY_RANGES.radius[0], PLANET_GAS_RANGES.radius[0]);
-  let high = Math.max(PLANET_ROCKY_RANGES.radius[1], PLANET_GAS_RANGES.radius[1]);
+    (1 - PLANET_GAS_SHARE) * uniformCdf(PHASE3_ROCKY_RADIUS, r) + PLANET_GAS_SHARE * uniformCdf(PHASE3_GAS_RADIUS, r);
+  let low: number = PHASE3_ROCKY_RADIUS[0];
+  let high: number = PHASE3_GAS_RADIUS[1];
   for (let i = 0; i < 60; i++) {
     const mid = (low + high) / 2;
     if (cdf(mid) < 0.5) low = mid;
@@ -488,9 +499,9 @@ function medianPlanetRadius(): number {
  * first reaches opacity 0.1 and at the closest approach. The bearing is the angle between the planned
  * path and the line of sight to the planet centre.
  */
-function medianPlanetFlyby(level: number) {
-  const radius = medianPlanetRadius();
-  const params: AutopilotParams = { ...DEFAULT_AUTOPILOT_PARAMS, nebulaShare: 0, planetFor: () => ({ radius }) };
+function medianPlanetFlyby(level: number, planet: PlanetSpec = { radius: medianPlanetRadius() }) {
+  const radius = planet.radius;
+  const params: AutopilotParams = { ...DEFAULT_AUTOPILOT_PARAMS, nebulaShare: 0, planetFor: () => planet };
   setCruiseSpeed(params, SHIP_SPEED_LEVELS[level]!);
   const travel = createTravel(params, DEFAULT_SHIP_PARAMS);
   const dt = 1 / 60;
@@ -624,6 +635,7 @@ describe('the travel step', () => {
       const rel = { x: 0, y: 0, z: 0 };
       let minClearance = Number.POSITIVE_INFINITY;
       let radius = Number.NaN;
+      let closest = Number.NaN;
       let worstFadeStep = 0;
       let slowest = Number.POSITIVE_INFINITY;
       let startedAt = Number.NaN;
@@ -646,6 +658,7 @@ describe('the travel step', () => {
         const encounter = autopilot.encounter;
         if (encounter === null) continue;
         radius = encounter.plan.radius;
+        closest = encounter.plan.closestDistance;
         minClearance = Math.min(minClearance, len(encounterOffset(encounter.plan, ship.position, rel)));
         if (autopilot.state === 'FLYBY') slowest = Math.min(slowest, autopilot.targetSpeed);
       }
@@ -653,7 +666,7 @@ describe('the travel step', () => {
       expect(endedOutOfView).toBe(true);
       // Clear of the planet, at its planned closest approach.
       expect(minClearance).toBeGreaterThanOrEqual(radius * (1 + ENCOUNTER_CLEARANCE_MARGIN));
-      expect(minClearance).toBeCloseTo(radius * ENCOUNTER_SIDE_OFFSET_FACTOR, 0);
+      expect(minClearance).toBeCloseTo(closest, 0);
       // Fades in gradually: no frame changes the opacity by more than 2% while it is in view.
       expect(worstFadeStep).toBeGreaterThan(0);
       expect(worstFadeStep).toBeLessThan(0.02);
@@ -704,6 +717,73 @@ describe('the travel step', () => {
     expect(Math.abs(top.approach - normal.approach)).toBeLessThanOrEqual(0.5);
     expect(Math.abs(top.duration - normal.duration)).toBeLessThanOrEqual(0.5);
   });
+
+  // Every seeded planet, as the engine plans it: its radius and the k it is planned with.
+  const seededPlanets = [0x5e1ec7, ENCOUNTER_BASE_SEED].flatMap((base) =>
+    Array.from({ length: 1000 }, (_, i) => {
+      const planet = planetParams(hash(base, i));
+      const k = planetPassFactor(planet, DEFAULT_AUTOPILOT_PARAMS.sideOffsetFactor);
+      return { planet, k, closest: planet.radius * k, diameterDeg: (2 * Math.asin(1 / k) * 180) / Math.PI };
+    }),
+  );
+  const quantile = (values: readonly number[], q: number) => [...values].sort((a, b) => a - b)[Math.floor(q * (values.length - 1))]!;
+
+  it('over 2,000 seeded planets the angular diameter at the closest approach is at least 19° and varies at least 3× from p10 to p90', () => {
+    const diameters = seededPlanets.map((p) => p.diameterDeg);
+    expect(Math.min(...diameters)).toBeGreaterThanOrEqual((2 * Math.asin(1 / PLANET_PASS_FACTOR_RANGE[1]) * 180) / Math.PI - 1e-9);
+    expect(Math.min(...diameters)).toBeGreaterThan(19);
+    expect(Math.max(...diameters)).toBeLessThanOrEqual((2 * Math.asin(1 / PLANET_PASS_FACTOR_RANGE[0]) * 180) / Math.PI + 1e-9);
+    // Measured: p10 about 21.8°, p50 about 35°, p90 about 70°: about 3.2×.
+    expect(quantile(diameters, 0.9) / quantile(diameters, 0.1)).toBeGreaterThanOrEqual(3);
+    // Both small, close passes and giants far off: radius and k vary independently enough.
+    expect(seededPlanets.some((p) => p.planet.radius < 20 && p.closest < 100)).toBe(true);
+    expect(seededPlanets.some((p) => p.planet.radius > 90 && p.k > 4.5)).toBe(true);
+    // Every planet passes at least the distance floor from the path, and clear of its ring.
+    for (const { planet, k, closest } of seededPlanets) {
+      expect(closest).toBeGreaterThanOrEqual(PLANET_MIN_PASS_DISTANCE * (1 - 1e-12));
+      expect(k).toBe(planet.passFactor);
+      expect(k).toBeGreaterThanOrEqual(planet.extent * (1 + ENCOUNTER_CLEARANCE_MARGIN));
+    }
+  });
+
+  it.each(fasterLevels)(
+    'at speed level $level no seeded planet sweeps past faster in angle than the guard allows a median planet before #36 (1.2 × 4.25°/s)',
+    ({ level }) => {
+      // The speed profile depends only on the remaining distance, so the ship flies the same
+      // remaining distances at the same times past every planet, and a planet passed at `c` is at
+      // bearing atan2(c, remaining). One flown trace then gives every seeded planet's peak bearing
+      // rate, exactly as `medianPlanetFlyby` measures it.
+      const dt = 1 / 60;
+      const travel = createTravel({ ...DEFAULT_AUTOPILOT_PARAMS, nebulaShare: 0, planetFor: () => ({ radius: 50 }) }, DEFAULT_SHIP_PARAMS);
+      setCruiseSpeed(travel.autopilotParams, SHIP_SPEED_LEVELS[level]!);
+      const trace: number[] = [];
+      for (let i = 0; i < 1e6 && !(trace.length > 0 && travel.autopilot.encounter === null); i++) {
+        stepTravel(travel, dt);
+        if (travel.autopilot.encounter !== null) trace.push(travel.autopilot.remaining);
+      }
+      const peakFor = (closest: number) => {
+        let peak = 0;
+        for (let i = 1; i < trace.length; i++) {
+          const rate = Math.abs(Math.atan2(closest, trace[i]!) - Math.atan2(closest, trace[i - 1]!)) / dt;
+          peak = Math.max(peak, (rate * 180) / Math.PI);
+        }
+        return peak;
+      };
+      const peaks = seededPlanets.map((p) => ({ ...p, peak: peakFor(p.closest) }));
+      const worst = peaks.reduce((a, b) => (b.peak > a.peak ? b : a));
+      const closest = peaks.reduce((a, b) => (b.closest < a.closest ? b : a));
+      // Measured: about 4.99°/s at most, for a planet passed about 210 from the path, whose peak
+      // comes while the ship is still slowing down; the closest one (75, at the distance floor) peaks
+      // at about 4.66°/s, at its closest approach, and so does the median planet.
+      expect(worst.peak).toBeLessThanOrEqual(BEFORE_PEAK_DEG_PER_S * 1.2);
+      expect(closest.closest).toBeCloseTo(PLANET_MIN_PASS_DISTANCE, 6);
+      // Flown for real, the worst and the closest planet peak exactly as computed.
+      for (const p of [worst, closest]) {
+        const flyby = medianPlanetFlyby(level, p.planet);
+        expect(flyby.peak).toBeCloseTo(p.peak, 6);
+      }
+    },
+  );
 
   it.each([1 / 60, 1 / 120])(
     'during an encounter, pause → resume → speed up keeps the state machine consistent (dt = %f)',
@@ -764,4 +844,144 @@ describe('the travel step', () => {
       expect(travel.ship.speed).toBeGreaterThan(SHIP_SPEED_LEVELS[SHIP_DEFAULT_SPEED_LEVEL]! * 2);
     },
   );
+});
+
+/** The ring of a `Planet` as drawn: its plane's unit normal and centre, and its outer radius, in world units. */
+function drawnRing(planet: Planet): { normal: Vec3; outer: number } {
+  const ring = planet.ring!;
+  planet.object.updateMatrixWorld(true);
+  const e = ring.matrixWorld.elements;
+  // The ring geometry lies in its local XZ plane, so the mesh's local +Y is the plane's normal.
+  const ny = { x: e[4]!, y: e[5]!, z: e[6]! };
+  const scale = len(ny);
+  return { normal: { x: ny.x / scale, y: ny.y / scale, z: ny.z / scale }, outer: planet.params.ring!.outer * scale };
+}
+
+describe('ringed planets in the encounter view', () => {
+  it('a ringed planet is drawn with its ring turned toward its encounter, and a ring that does not fit the plan is not drawn', () => {
+    // A trip whose first encounter is ringed.
+    let baseSeed = 0;
+    while (planetParams(hash(baseSeed, 0)).ring === null) baseSeed++;
+    const scene = new Scene();
+    const view = new EncounterView(scene);
+    const travel = createTravel({ ...engineParams(1, 2), baseSeed }, DEFAULT_SHIP_PARAMS);
+    while (view.getPlanet() === null) frame(travel, view, 1 / 30);
+    const planet = view.getPlanet()!;
+    const encounter = travel.autopilot.encounter as PlanetEncounter;
+    expect(planet.ring).not.toBeNull();
+    expect(planet.params).toEqual(planetParams(encounter.seed));
+    const axis = ringAxis(planet.params.ring!, encounter.plan, { x: 0, y: 0, z: 0 });
+    planet.object.updateMatrixWorld(true);
+    const up = new Vector3(0, 1, 0).transformDirection(planet.ring!.matrixWorld);
+    expect(dist(up, axis)).toBeLessThan(1e-9);
+    // Seen from the approach, the ring is open (not edge-on).
+    expect(-dot(axis, encounter.plan.direction)).toBeGreaterThan(Math.sin(0.29));
+    // The out-of-view sphere holds the ring.
+    expect(encounter.planet.extent).toBe(planet.params.ring!.outer);
+    view.dispose();
+
+    // A bare `{ radius }` chooser plans no room for a ring, so the seeded ring is left out.
+    const bare: PlanetEncounter = { ...encounter, planet: { radius: encounter.plan.radius } };
+    const plain = encounterPlanetParams(bare);
+    expect(plain.ring).toBeNull();
+    expect(plain.extent).toBe(1 + plain.atmosphereThickness);
+    // As is a ring the plan's clearance does not cover, even with the extent declared.
+    const tight = planEncounter({ x: 0, y: 0, z: 0 }, encounter.plan.direction, encounter.plan.radius, ENCOUNTER_DISTANCE, 2, 0);
+    expect(encounterPlanetParams({ ...encounter, plan: tight }).ring).toBeNull();
+  });
+});
+
+describe('rings never meet the path (docs/PLAN.md section 6, Variety: the camera never passes through a ring)', () => {
+  it('the planned straight path crosses the ring plane of 1,000 seeded ringed planets only beyond the ring, at any heading and elevation', () => {
+    const random = mulberry32(0x7149);
+    let checked = 0;
+    let tightest = Number.POSITIVE_INFINITY;
+    for (let i = 0; checked < 1000; i++) {
+      const seed = hash(0x41a6, i);
+      const spec = planetParams(seed);
+      if (spec.ring === null) continue;
+      const heading = { x: random() * 2 - 1, y: (random() * 2 - 1) * 0.4, z: -0.2 - random() };
+      const elevation = (random() * 2 - 1) * 0.6;
+      const sideAngle = random() < 0.5 ? elevation : Math.PI - elevation;
+      const k = planetPassFactor(spec, DEFAULT_AUTOPILOT_PARAMS.sideOffsetFactor);
+      const plan = planEncounter({ x: 1e9 * random(), y: 0, z: 0 }, heading, spec.radius, ENCOUNTER_DISTANCE, k, sideAngle);
+      const encounter: PlanetEncounter = { kind: 'planet', index: i, seed, side: 'right', planet: spec, plan };
+      const params = encounterPlanetParams(encounter);
+      // The engine's chooser always gets its ring drawn.
+      expect(params.ring).toEqual(spec.ring);
+      const planet = new Planet(params, encounterLightDirection(plan, { x: 0, y: 0, z: 0 }), plan);
+      const { normal, outer } = drawnRing(planet);
+      planet.dispose();
+      // The path, relative to the planet centre: -side × closestDistance + direction × t.
+      const toPath = { x: -plan.side.x * plan.closestDistance, y: -plan.side.y * plan.closestDistance, z: -plan.side.z * plan.closestDistance };
+      const along = dot(normal, plan.direction);
+      // Parallel to the plane: never crosses it (the plane is at least the closest approach away).
+      const t = Math.abs(along) < 1e-12 ? Number.POSITIVE_INFINITY : -dot(normal, toPath) / along;
+      const crossing = Math.hypot(plan.closestDistance, t);
+      tightest = Math.min(tightest, crossing / outer);
+      // Beyond the ring by at least the clearance margin, and the path never comes within it either.
+      expect(crossing).toBeGreaterThanOrEqual(outer * (1 + ENCOUNTER_CLEARANCE_MARGIN) * (1 - 1e-9));
+      expect(plan.closestDistance).toBeGreaterThanOrEqual(outer * (1 + ENCOUNTER_CLEARANCE_MARGIN) * (1 - 1e-9));
+      checked++;
+    }
+    // Not a loose bound: some ring is crossed near its clearance.
+    expect(tightest).toBeLessThan(1.4);
+  }, 60_000);
+
+  it('the ship, flown frame by frame at every level, never crosses a ring or comes within its clearance: 90 ringed encounters', () => {
+    // Trip seeds whose first encounter (always a planet) is ringed, so each run flies one.
+    const bases: number[] = [];
+    for (let base = 0; bases.length < 90; base++) if (planetParams(hash(base, 0)).ring !== null) bases.push(base);
+    const elevations = new Set<number>();
+    let worstCrossing = Number.POSITIVE_INFINITY;
+    let crossings = 0;
+    for (const [n, baseSeed] of bases.entries()) {
+      const level = n % SHIP_SPEED_LEVELS.length;
+      const dt = n % 2 === 0 ? 1 / 60 : DT_CAP_SECONDS;
+      const params = { ...engineParams(level, 2), baseSeed };
+      const travel = createTravel(params, DEFAULT_SHIP_PARAMS);
+      let ring: { normal: Vec3; outer: number } | null = null;
+      let encounter: PlanetEncounter | null = null;
+      let minDistance = Number.POSITIVE_INFINITY;
+      const prev = { x: 0, y: 0, z: 0 };
+      const now = { x: 0, y: 0, z: 0 };
+      for (let i = 0; i < 1e6; i++) {
+        const before = { ...travel.ship.position };
+        stepTravel(travel, dt);
+        const active = travel.autopilot.encounter;
+        if (encounter === null && active !== null && active.kind === 'planet') {
+          encounter = active;
+          const planet = new Planet(encounterPlanetParams(active), encounterLightDirection(active.plan, { x: 0, y: 0, z: 0 }), active.plan);
+          ring = drawnRing(planet);
+          planet.dispose();
+          elevations.add(Math.round(Math.asin(Math.max(-1, Math.min(1, active.plan.side.y))) * 10));
+        }
+        if (encounter === null || ring === null) continue;
+        if (active !== encounter) break;
+        // The frame's segment, relative to the planet centre (ship - centre).
+        encounterOffset(encounter.plan, before, prev);
+        encounterOffset(encounter.plan, travel.ship.position, now);
+        const a = { x: -prev.x, y: -prev.y, z: -prev.z };
+        const b = { x: -now.x, y: -now.y, z: -now.z };
+        minDistance = Math.min(minDistance, len(a), len(b));
+        const da = dot(ring.normal, a);
+        const db = dot(ring.normal, b);
+        if (da === 0 || Math.sign(da) !== Math.sign(db)) {
+          // Where this segment pierces the ring plane.
+          const t = da === db ? 0 : da / (da - db);
+          const hit = { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: a.z + (b.z - a.z) * t };
+          worstCrossing = Math.min(worstCrossing, len(hit) / ring.outer);
+          crossings++;
+        }
+      }
+      expect(encounter, `base ${baseSeed}`).not.toBeNull();
+      expect(minDistance, `base ${baseSeed}`).toBeGreaterThanOrEqual(ring!.outer * (1 + ENCOUNTER_CLEARANCE_MARGIN) * (1 - 1e-9));
+    }
+    // Paths do cross ring planes (rings are tilted toward the path), always outside the ring.
+    expect(crossings).toBeGreaterThan(20);
+    expect(worstCrossing).toBeGreaterThan(1 + ENCOUNTER_CLEARANCE_MARGIN);
+    // Elevations from below to above the path.
+    expect(Math.min(...elevations)).toBeLessThanOrEqual(-4);
+    expect(Math.max(...elevations)).toBeGreaterThanOrEqual(4);
+  }, 120_000);
 });

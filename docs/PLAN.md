@@ -72,7 +72,7 @@ Travel states: `CRUISE → APPROACH → FLYBY → DEPARTURE → CRUISE`
 
 Built in section 9 Phase 4, together with the rest of its list.
 
-- [ ] More planet variety: ringed, icy, and so on
+- [x] More planet variety: ringed, icy, and so on
 - [x] Shareable seed in the URL
 
 ### Optional (after the MVP)

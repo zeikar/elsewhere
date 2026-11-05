@@ -31,12 +31,14 @@ import type { GalaxyType } from './engine/Galaxies';
 import { nebulaLayerPlaneDistance } from './engine/Nebula';
 import type { PlanetType } from './engine/Planet';
 import {
+  checkRingDepth,
   hidePlanetPreview,
   showEncounterPreview,
   showPlanetPreview,
   type EncounterPreviewInfo,
   type PlanetPreviewInfo,
   type PlanetPreviewOptions,
+  type RingDepthInfo,
 } from './e2ePlanetPreview';
 
 /** A rolling window of frame times, in milliseconds (`null` fields while the window is empty). */
@@ -177,6 +179,10 @@ export interface E2EHookSnapshot {
     index: number;
     type: PlanetType;
     seed: number;
+    /** Palette family (for example `icy`). */
+    family: string;
+    /** Whether the planet is drawn with a ring. */
+    ringed: boolean;
     /** Planet radius in world units. */
     radius: number;
     /** Drawn radius in world units (radius × the encounter's size scale). */
@@ -234,6 +240,13 @@ export interface E2EHook {
    * anything shown: a planet framed as `showPlanet` frames it, a nebula as seen mid-APPROACH.
    */
   showEncounter(kind: EncounterKind, seed: number): EncounterPreviewInfo;
+  /**
+   * Draws the ringed planet for appearance seed `seed` as `showEncounter` does, with and without its
+   * ring, and reports how the pixels differ where the ring lies in front of the disc, behind it and
+   * over the sky, and the atmosphere's glow where the ring crosses the halo (see `checkRingDepth` in
+   * src/e2ePlanetPreview.ts).
+   */
+  checkRingDepth(seed: number): RingDepthInfo;
   /** Removes the planet overlay canvas. */
   hidePlanet(): void;
 }
@@ -316,6 +329,8 @@ export function installE2EHook(engine: Engine): void {
           index: autopilot.encounter.index,
           type: planet.params.type,
           seed: planet.params.seed,
+          family: planet.params.family,
+          ringed: planet.ring !== null,
           radius: planet.params.radius,
           drawnRadius: planet.object.scale.x,
           opacity: planet.uniforms.uOpacity.value,
@@ -433,6 +448,7 @@ export function installE2EHook(engine: Engine): void {
     setSpeed: (level) => engine.setSpeed(level),
     showPlanet: (type, nth, options) => showPlanetPreview(type, nth, options),
     showEncounter: (kind, seed) => showEncounterPreview(kind, seed),
+    checkRingDepth: (seed) => checkRingDepth(seed),
     hidePlanet: () => hidePlanetPreview(),
   };
   Object.defineProperty(window, '__elsewhere', { value: Object.freeze(hook), configurable: false });
