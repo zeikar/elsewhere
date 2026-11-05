@@ -137,30 +137,79 @@ async function speedViews(page: Page, query: string): Promise<SpeedViews> {
   return { slow, cruise, fast, still };
 }
 
+/**
+ * The speed cue, as lit pixels (brightest channel above LIT_THRESHOLD) in views at rest (`slow`),
+ * at the default level (`cruise`) and at the top level (`fast`). The model behind the bounds:
+ *
+ *   lit(v) = S + E(v)
+ *
+ * S is what is lit at rest (the far stars and the near stars' still dots), and E(v), the streak
+ * excess, is what the near streaks add at speed v. A streak's length is v × the streak time, so E
+ * grows in proportion to the speed, whatever the dust's brightness: the brightness decides which
+ * streaks clear the threshold, and the length how many pixels each of them lights. Two numbers
+ * describe the cue:
+ *
+ * - k = E(top) / E(default): how much the streaks grow from the default level to the top level.
+ *   Ideally the speed ratio, 150 / 60 = 2.5; the length cap (STAR_MAX_STREAK_PX) and the fades
+ *   near the camera take a little off. Measured 2.37 in the default view, and 2.44 on main before
+ *   the dust was dimmed, so k does not depend on the brightness. Bound: 1.75, halfway from no
+ *   growth (1) to the ideal 2.5.
+ * - e = E(default) / S: how much the default level's streaks add to the sky seen at rest. This is
+ *   what dimming the dust lowers: measured 0.66 in the default view (1.25 on main). Bound: 0.4, so
+ *   that even at the default level the streaks add 40% to the lit sky.
+ *
+ * Together they bound the ratios between the views (both increase with k and with e):
+ * lit(top) / lit(rest) = 1 + k·e ≥ 1.7, and lit(top) / lit(default) = (1 + k·e) / (1 + e) ≥ 1.21.
+ * Measured 2.56 and 1.54.
+ *
+ * The previous guard was lit(top) > 1.6 × lit(rest) alone, measured 2.61 at the time. It took the
+ * view at rest with the controls still on screen (they hide after UI_HIDE_DELAY_MS), which added
+ * about 1,600 lit pixels to S and so understated the ratio: with the controls hidden (canvasShot
+ * now hides them), main measures 4.06. It never looked at the default level either.
+ */
+const SPEED_CUE = { kMin: 1.75, eMin: 0.4 } as const;
+
+function speedCue(views: SpeedViews): { k: number; e: number } {
+  const { slow, cruise, fast } = views;
+  return { k: (fast.lit - slow.lit) / (cruise.lit - slow.lit), e: (cruise.lit - slow.lit) / slow.lit };
+}
+
 test('streak length responds to speed', async ({ page }) => {
   const errors = collectErrors(page);
   // The near layer alone (an e2e-only override): the far stars are round dots at any speed.
-  const { slow, fast, still } = await speedViews(page, '?starLayers=near');
+  const views = await speedViews(page, '?starLayers=near');
+  const { slow, cruise, fast, still } = views;
   expect(still.starfield.visible).toBe(true);
   expect(still.farStars.visible).toBe(false);
 
   expect(fast.png.equals(slow.png)).toBe(false);
-  // At speed 0 every star is a round dot; at speed the same stars become streaks covering far more pixels.
+  // At speed 0 every star is a round dot; at speed the same stars become streaks covering far more
+  // pixels (measured 5.2× at the default level and 10.6× at the top level), and the streaks grow
+  // with the speed (k measured 2.26).
   expect(slow.lit).toBeGreaterThan(0);
+  expect(cruise.lit).toBeGreaterThan(slow.lit * 2);
   expect(fast.lit).toBeGreaterThan(slow.lit * 2);
+  expect(speedCue(views).k).toBeGreaterThan(SPEED_CUE.kMin);
   expect(errors).toEqual([]);
 });
 
 test('streak length responds to speed in the default view, with both star layers', async ({ page }) => {
   const errors = collectErrors(page);
-  const { slow, fast, still } = await speedViews(page, '');
+  const views = await speedViews(page, '');
+  const { slow, cruise, fast, still } = views;
   expect(still.starfield.visible).toBe(true);
   expect(still.farStars.visible).toBe(true);
 
-  // The still far stars add the same lit pixels to both views, which dilutes the near layer's
-  // ratio, but the sky as seen must still read clearly faster at the top speed.
+  // The still far stars add the same lit pixels to every view, which dilutes the near layer's
+  // ratios, but the sky as seen must still read clearly faster at the default level than at rest,
+  // and at the top level than at the default level (SPEED_CUE).
   expect(slow.lit).toBeGreaterThan(0);
-  expect(fast.lit).toBeGreaterThan(slow.lit * 1.6);
+  const { k, e } = speedCue(views);
+  expect(k).toBeGreaterThan(SPEED_CUE.kMin);
+  expect(e).toBeGreaterThan(SPEED_CUE.eMin);
+  // Implied by the two above; spelled out as the ratios between the views.
+  expect(fast.lit).toBeGreaterThan(slow.lit * (1 + SPEED_CUE.kMin * SPEED_CUE.eMin));
+  expect(fast.lit).toBeGreaterThan(cruise.lit * ((1 + SPEED_CUE.kMin * SPEED_CUE.eMin) / (1 + SPEED_CUE.eMin)));
   expect(errors).toEqual([]);
 });
 
@@ -278,6 +327,61 @@ test('after the ship translates with no rotation, far-star pixels stay put while
   // The near stars streak with speed, and move between two views at the same speed.
   expect(nearRestToCruise.differing).toBeGreaterThan(1000);
   expect(nearCruiseToLater.differing).toBeGreaterThan(1000);
+  await nearPage.close();
+  expect(errors).toEqual([]);
+  expect(nearErrors).toEqual([]);
+});
+
+/** Lit pixels in a PNG, their mean brightest channel (0–255), and pixels above 128 (decoded in the page). */
+function brightnessStats(page: Page, png: Buffer): Promise<{ lit: number; meanLit: number; bright: number }> {
+  return page.evaluate(
+    async ({ b64, threshold }) => {
+      const bitmap = await createImageBitmap(await (await fetch(`data:image/png;base64,${b64}`)).blob());
+      const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+      const ctx = canvas.getContext('2d')!;
+      ctx.drawImage(bitmap, 0, 0);
+      const data = ctx.getImageData(0, 0, bitmap.width, bitmap.height).data;
+      let lit = 0;
+      let sum = 0;
+      let bright = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        const value = Math.max(data[i]!, data[i + 1]!, data[i + 2]!);
+        if (value > threshold) {
+          lit++;
+          sum += value;
+        }
+        if (value > 128) bright++;
+      }
+      return { lit, meanLit: lit === 0 ? 0 : sum / lit, bright };
+    },
+    { b64: png.toString('base64'), threshold: LIT_THRESHOLD },
+  );
+}
+
+test('the near dust is drawn dimmer than the far stars, at rest and at the top speed', async ({ page, browser }) => {
+  const errors = collectErrors(page);
+  const far = await translationViews(page, 'far');
+  const nearPage = await browser.newPage();
+  const nearErrors = collectErrors(nearPage);
+  const near = await translationViews(nearPage, 'near');
+  expect(near.snaps[1].ship.speed).toBeGreaterThan(100);
+
+  const stats = {
+    farRest: await brightnessStats(page, far.shots[0]),
+    farCruise: await brightnessStats(page, far.shots[1]),
+    nearRest: await brightnessStats(page, near.shots[0]),
+    nearCruise: await brightnessStats(page, near.shots[1]),
+  };
+  test.info().annotations.push({ type: 'brightness per layer', description: JSON.stringify(stats) });
+  for (const s of Object.values(stats)) expect(s.lit).toBeGreaterThan(200);
+  // A lit dust pixel is on average well under the far stars' (measured 0.43 of it at rest and at
+  // the top speed; 0.71 and 0.79 before the dust was dimmed).
+  expect(stats.nearRest.meanLit).toBeLessThan(0.6 * stats.farRest.meanLit);
+  expect(stats.nearCruise.meanLit).toBeLessThan(0.6 * stats.farCruise.meanLit);
+  // The brightest points in the sky are far stars, even with the dust streaking at the top speed
+  // (measured 0 dust pixels above 128 against 201 far ones; 215 against 122 before).
+  expect(stats.farCruise.bright).toBeGreaterThan(50);
+  expect(stats.nearCruise.bright).toBeLessThan(0.25 * stats.farCruise.bright);
   await nearPage.close();
   expect(errors).toEqual([]);
   expect(nearErrors).toEqual([]);
