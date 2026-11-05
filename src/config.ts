@@ -192,7 +192,8 @@ export const ENCOUNTER_DRIFT_SETTLE_SECONDS = 5;
  * ENCOUNTER_WARP_EXIT_LEAD_SECONDS before the encounter starts. The ship lags its target by about
  * SHIP_SPEED_TAU_SECONDS, so the lead lets the lag settle: from the top speed the ship is within
  * about 3 units per second of the arrival speed at the spawn, and within 0.5 when the object
- * reaches opacity 0.1 (checked in EncounterView.test.ts). After the encounter, the target eases back
+ * reaches opacity 0.1 (the spawn bound is checked in Autopilot.test.ts, the opacity bound in both
+ * Autopilot.test.ts and EncounterView.test.ts). After the encounter, the target eases back
  * up to the cruise speed over ENCOUNTER_WARP_ENTRY_SECONDS at the start of the next cruise (the first
  * cruise, from load, starts at the cruise speed: the ship accelerates from rest). All
  * three are cruise time, so they count toward the encounter interval. A cruise too short for them (an
@@ -412,7 +413,8 @@ export const NEBULA_SIDE_OFFSET_FACTOR = 1.7;
  * Nebula speed profile (see the planet one above): a gentler slowdown with a higher minimum speed, so
  * the wisps keep streaming past while the ship drifts through them. Like a planet encounter, a nebula
  * encounter is flown from the arrival speed at the faster levels (ENCOUNTER_ARRIVAL_SPEED), so at the
- * top level it now slows to this minimum speed of 24 rather than to 60, the old 2.5× scaled value.
+ * default level and the top level alike it slows to this minimum speed of 24, and a median nebula
+ * encounter lasts about 88 s from its spawn to its end.
  */
 export const NEBULA_MIN_SPEED = 24;
 /** Lowest nebula minimum speed at any speed level (see ENCOUNTER_MIN_SPEED_FLOOR). */

@@ -951,34 +951,51 @@ describe('dropping out of warp', () => {
           expect(params.nebula.profile).toEqual(DEFAULT_AUTOPILOT_PARAMS.nebula.profile);
         }
         const profile = kind === 'nebula' ? params.nebula.profile : params.profile;
-        let speedAtSpawn = Number.NaN;
-        let speedAtVisible = Number.NaN;
+        // Over three encounters, so the cruises after an encounter (the return to warp, then the drop
+        // out of it) are checked as well as the first one from load.
+        const encounters = 3;
+        const speedsAtSpawn: number[] = [];
+        const speedsAtVisible: number[] = [];
+        let visible = false;
         let encounterFrames = 0;
         simulate(dt, {
           params,
-          until: afterEncounters(1),
+          until: afterEncounters(encounters),
+          maxSeconds: 4000,
           onFrame: ({ ship, prevAutopilot, autopilot }) => {
             if (autopilot.encounter === null) return;
-            if (prevAutopilot.state === 'CRUISE') speedAtSpawn = ship.speed;
-            if (Number.isNaN(speedAtVisible) && autopilot.fade >= 0.1) speedAtVisible = ship.speed;
+            if (prevAutopilot.state === 'CRUISE') {
+              speedsAtSpawn.push(ship.speed);
+              visible = false;
+            }
+            if (!visible && autopilot.fade >= 0.1) {
+              speedsAtVisible.push(ship.speed);
+              visible = true;
+            }
             // Exactly the encounter speed's profile, from the spawn to the end.
             expect(autopilot.targetSpeed).toBe(encounterTargetSpeed(autopilot.remaining, encounterSpeed, profile));
             encounterFrames++;
           },
         });
-        expect(encounterFrames).toBeGreaterThan(1000);
+        expect(encounterFrames).toBeGreaterThan(1000 * encounters);
+        expect(speedsAtSpawn).toHaveLength(encounters);
+        expect(speedsAtVisible).toHaveLength(encounters);
         // From the top speed the lag is about 3 units per second at the spawn and under 0.5 by the
-        // time the object is noticeably visible; at or below the arrival speed there is none.
-        expect(speedAtSpawn).toBeLessThanOrEqual(encounterSpeed + 3.5);
-        expect(speedAtVisible).toBeLessThanOrEqual(encounterSpeed + 0.5);
-        // At or below the arrival speed, the ship has long reached its cruise speed (from rest at load).
-        if (cruiseSpeed <= ENCOUNTER_ARRIVAL_SPEED) expect(speedAtVisible).toBeCloseTo(cruiseSpeed, 6);
+        // time the object is noticeably visible, in every encounter; at or below the arrival speed
+        // there is none.
+        expect(Math.max(...speedsAtSpawn)).toBeLessThanOrEqual(encounterSpeed + 3.5);
+        expect(Math.max(...speedsAtVisible)).toBeLessThanOrEqual(encounterSpeed + 0.5);
+        // At or below the arrival speed, the ship has long reached its cruise speed (from rest at
+        // load, or back from the previous encounter's departure).
+        if (cruiseSpeed <= ENCOUNTER_ARRIVAL_SPEED) {
+          for (const speed of speedsAtVisible) expect(speed).toBeCloseTo(cruiseSpeed, 6);
+        }
       },
     );
 
-    it.each([1 / 60, 1 / 120])(
-      'the drop out of warp and the return to it are smooth: no step in the target speed or the speed at any frame (dt %f)',
-      (dt) => {
+    it.each((['planet', 'nebula'] as const).flatMap((kind) => [1 / 60, 1 / 120].map((dt) => ({ kind, dt }))))(
+      'the drop out of warp and the return to it are smooth around $kind encounters: no step in the target speed or the speed at any frame (dt $dt)',
+      ({ kind, dt }) => {
         // Over two encounters: load, a full cruise, the drop out of warp, an encounter, the return
         // to warp, and again. Streaks are the ship velocity × the streak time, so a smooth speed
         // also means smooth streak lengths.
@@ -987,7 +1004,7 @@ describe('dropping out of warp', () => {
         let backInWarp = Number.NaN;
         let endedAt = Number.NaN;
         simulate(dt, {
-          params: atSpeed(cruiseSpeed, { nebulaShare: 0 }),
+          params: atSpeed(cruiseSpeed, { nebulaShare: kind === 'nebula' ? 1 : 0 }),
           until: afterEncounters(2),
           maxSeconds: 4000,
           onFrame: ({ prev, ship, prevAutopilot, autopilot }) => {
