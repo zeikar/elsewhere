@@ -154,6 +154,45 @@ export const FAR_STAR_BRIGHTNESS_EXPONENT = 2;
 export const FAR_STAR_SEED = 0xfa7_5ea5;
 
 /*
+ * Distant galaxies (docs/PLAN.md section 6, Variety): a seeded handful of small, faint spiral and
+ * elliptical galaxies on the far layer, drawn like the far stars (at infinity, turned by the camera's
+ * rotation only). Unlike the far stars they come from the trip seed, so every trip has its own and a
+ * shared seed replays them. Sizes are angles in the sky, so they stay the same whatever the field of
+ * view or the canvas size.
+ */
+
+/**
+ * Chance of a trip having 0, 1, 2 or 3 galaxies (index = count; the weights sum to 1). Mostly one or
+ * two, so they stay rare enough to be a find.
+ */
+export const GALAXY_COUNT_WEIGHTS: readonly number[] = [0.15, 0.4, 0.3, 0.15];
+
+/** Range of a galaxy's angular diameter along its major axis, in degrees. Skewed toward the small end. */
+export const GALAXY_SIZE_MIN_DEG = 1.2;
+export const GALAXY_SIZE_MAX_DEG = 3.5;
+
+/** Share of the galaxies that are spirals (the rest are ellipticals). */
+export const GALAXY_SPIRAL_SHARE = 0.65;
+
+/**
+ * Galaxies sit where the heading drift sweeps the view: within the yaw and pitch drift amplitudes
+ * (SHIP_*_DRIFT_AMPLITUDE_RAD) of -Z, plus this margin, so each comes into view during a drift cycle.
+ */
+export const GALAXY_PLACEMENT_MARGIN_RAD = 0.25;
+
+/** Smallest angle between two galaxies, in degrees, so they never overlap. */
+export const GALAXY_MIN_SEPARATION_DEG = 10;
+
+/**
+ * Peak brightness of a galaxy's core glow, and of its disc (the arms or the oval falloff), before the
+ * colour tint. Both well below the brighter far stars, so the galaxies read as faint, distant smudges.
+ */
+export const GALAXY_CORE_BRIGHTNESS_MIN = 0.3;
+export const GALAXY_CORE_BRIGHTNESS_MAX = 0.5;
+export const GALAXY_DISC_BRIGHTNESS_MIN = 0.12;
+export const GALAXY_DISC_BRIGHTNESS_MAX = 0.2;
+
+/*
  * Encounters (docs/PLAN.md section 6, Planets). An encounter plans a straight path along the heading
  * at the moment it starts, and places the planet beside it. Distances are in world units, measured
  * along that path from the point of closest approach: positive while approaching, negative after
