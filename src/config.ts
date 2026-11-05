@@ -18,10 +18,11 @@ export const DPR_CAP = 2;
  * surface, its atmosphere shell and its ring never meet, and the shell and the ring's near side lie
  * strictly in front of the disc, so the depth order, which the quantisation keeps, is always right;
  * only the ring's far side needs the gap to be several steps (Planet.test.ts, e2e/rings.spec.ts).
- * Nothing drawn comes within 1 unit of the camera: the near dust fades out over its last
- * STAR_NEAR_FADE_DISTANCE units and its streaks are clipped to the near plane, nebula layers are
- * hidden within NEBULA_NEAR_FADE_MIN_DISTANCE, and every object is passed at a clearance of more
- * than 10 units. The far stars and galaxies are drawn at infinity, before everything else and with
+ * Nothing drawn comes within 1 unit of the camera: the near dust fades out over the
+ * STAR_NEAR_FADE_DISTANCE units beyond the near plane's distance, so a mote is gone as its head
+ * reaches the plane in the middle of the view and is at most about 10% bright where it does in a
+ * corner, and its streaks are clipped to the plane; nebula layers are hidden within
+ * NEBULA_NEAR_FADE_MIN_DISTANCE, and every object is passed at a clearance of more than 10 units. The far stars and galaxies are drawn at infinity, before everything else and with
  * no depth writes, so the encounter objects, all inside CAMERA_FAR, paint over them.
  */
 export const CAMERA_FOV_DEG = 60;
@@ -126,7 +127,7 @@ export const STAR_TINT_STRENGTH = 0.3;
 /**
  * Fading, so wrapping never pops a star in or out. A star fades to 0 over the last
  * STAR_EDGE_FADE_WIDTH units before the cube boundary, and over the last STAR_NEAR_FADE_DISTANCE
- * units before the camera.
+ * units before the camera's near plane (CAMERA_NEAR), so none is cut off by it while visible.
  */
 export const STAR_EDGE_FADE_WIDTH = 150;
 export const STAR_NEAR_FADE_DISTANCE = 4;
@@ -477,7 +478,11 @@ export const ENCOUNTER_DESPAWN_DISTANCE = 1500;
  * spawn up to ENCOUNTER_FAR_SPEED, held there, and back down to the arrival speed, each change a
  * smootherstep in distance (no step in speed, acceleration or jerk) whose peak acceleration is about
  * ENCOUNTER_FAR_ACCEL; the curve takes a lower peak where the stretch is too short for the whole rise
- * and fall, and none where the object is already past the threshold at the spawn (the largest rings).
+ * and fall. A stretch shorter than the whole fall from ENCOUNTER_FAR_SPEED (about 1,480 units) is left
+ * out, as where the object is already past the threshold at the spawn (the largest planets and
+ * rings): the whole approach is then flown on the arrival speed's profile, as every approach was
+ * before #64, and no stretch is short enough to rise and fall again within a second or so, with a
+ * large jerk.
  * The target speed leads the curve by the ship's lag (`target = v + SHIP_SPEED_TAU_SECONDS × dv/dt`,
  * as the quick warp entry does), so the ship's speed itself follows it and arrives at the threshold
  * at the arrival speed. Like the rest of the profile, the speeds scale with the level
@@ -485,10 +490,11 @@ export const ENCOUNTER_DESPAWN_DISTANCE = 1500;
  * scales with its square.
  *
  * Above the arrival speed the cruise drops out of warp only as far as the far stretch can fly on
- * from (the highest speed it can fall from within its length; `farHandoverSpeed`), so at the top level
- * the ship stays in warp to the spawn of most objects and slows down during the far stretch, rather
- * than slowing down, speeding up again and slowing down once more; before a nebula, or an object
- * already too large at the spawn, it drops out of warp to the arrival speed as before.
+ * from (the highest speed it can fall from within its length; `farHandoverSpeed`): every far stretch
+ * is long enough to fall from the far speed, so at the top level the ship stays in warp, steady, to
+ * the spawn of every object with one and slows down during the far stretch, rather than slowing
+ * down, speeding up again and slowing down once more; before a nebula, or an object with no far
+ * stretch, it drops out of warp to the arrival speed as before.
  *
  * Measured over 200 seeded encounters of each kind on a 16:9 screen, from the spawn to the closest
  * approach, p10/p50/p90/max in seconds (before #64, spawned 2,400 or 1,600 out: in brackets):
@@ -505,7 +511,8 @@ export const ENCOUNTER_DESPAWN_DISTANCE = 1500;
  * planet's spawn at the default level (6/35/48 s at the top level, 36/123/160 s at the slowest), and
  * at a median of about 59 s for an asteroid and 47 s for a comet. The ship's acceleration on the far
  * stretch peaks at about 12.8 units per second per second at the default and top levels (1.4 at the
- * slowest), and its jerk at about 5 per second cubed.
+ * slowest), and its jerk at about 5 per second cubed (6.7 at most, for a stretch just over the
+ * shortest, at the default level), with no step in the target speed at the spawn.
  */
 export const ENCOUNTER_FAR_SPEED = 150;
 export const ENCOUNTER_FAR_ACCEL = 12;

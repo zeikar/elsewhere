@@ -28,6 +28,7 @@ import {
   farHandoverSpeed,
   farStretchCurve,
   farStretchEnd,
+  farStretchMinRoom,
   farStretchRoom,
   farStretchTargetSpeed,
   planEncounter,
@@ -408,9 +409,37 @@ describe('far stretch', () => {
     }
     // A tiny object: the slowdown. One already past the threshold at the spawn: no room.
     expect(farStretchEnd(40, 1, profile)).toBe(ENCOUNTER_SLOWDOWN_DISTANCE);
-    expect(farStretchRoom(ENCOUNTER_DISTANCE, 600, 300, profile)).toBe(0);
-    expect(farStretchRoom(ENCOUNTER_DISTANCE, 100, 50, { ...profile, farSpeed: 0 })).toBe(0);
-    expect(farStretchRoom(ENCOUNTER_DISTANCE, 100, 50, profile)).toBeCloseTo(ENCOUNTER_DISTANCE - farStretchEnd(100, 50, profile), 9);
+    expect(farStretchRoom(ENCOUNTER_DISTANCE, 600, 300, profile, cruise)).toBe(0);
+    expect(farStretchRoom(ENCOUNTER_DISTANCE, 100, 50, { ...profile, farSpeed: 0 }, cruise)).toBe(0);
+    expect(farStretchRoom(ENCOUNTER_DISTANCE, 100, 50, { ...profile, farSpeed: cruise }, cruise)).toBe(0);
+    expect(farStretchRoom(ENCOUNTER_DISTANCE, 100, 50, profile, cruise)).toBeCloseTo(ENCOUNTER_DISTANCE - farStretchEnd(100, 50, profile), 9);
+  });
+
+  it('is at least the whole fall from the far speed long, at every level, or not there at all', () => {
+    const min = farStretchMinRoom(cruise, profile);
+    // About 1,480 units: 1.875 / 2 × (150² − 60²) / 12 (the smootherstep's steepest slope is 1.875).
+    expect(min).toBeCloseTo(((1.875 / 2) * (ENCOUNTER_FAR_SPEED ** 2 - cruise ** 2)) / ENCOUNTER_FAR_ACCEL, 9);
+    expect(min).toBeGreaterThan(1400);
+    expect(min).toBeLessThan(1500);
+    // The same at every level (speeds × f, acceleration × f²).
+    for (const level of SHIP_SPEED_LEVELS) {
+      const f = Math.min(level, cruise) / cruise;
+      const scaled = { ...profile, farSpeed: profile.farSpeed * f, farAccel: profile.farAccel * f * f };
+      expect(farStretchMinRoom(cruise * f, scaled)).toBeCloseTo(min, 9);
+    }
+    // A drawn radius that puts the threshold just inside and just outside the minimum from the spawn.
+    const closest = 100;
+    const half = profile.farMaxAngle / 2;
+    const drawnFor = (end: number) => Math.sin(half) * Math.hypot(end, closest);
+    expect(farStretchRoom(ENCOUNTER_DISTANCE, closest, drawnFor(ENCOUNTER_DISTANCE - min - 1), profile, cruise)).toBeCloseTo(min + 1, 6);
+    expect(farStretchRoom(ENCOUNTER_DISTANCE, closest, drawnFor(ENCOUNTER_DISTANCE - min + 1), profile, cruise)).toBe(0);
+    expect(farStretchRoom(ENCOUNTER_DISTANCE, closest, drawnFor(ENCOUNTER_DISTANCE - 72), profile, cruise)).toBe(0);
+    // From there on, the cruise before it hands over at the far speed or at its own speed, whichever
+    // is lower: it stays in warp, as at the top level, rather than dropping partly out of it.
+    for (const room of [min, min + 1, 3000, 6000]) {
+      expect(farHandoverSpeed(room, 150, cruise, profile)).toBeCloseTo(ENCOUNTER_FAR_SPEED, 9);
+      expect(farHandoverSpeed(room, 100, cruise, profile)).toBe(100);
+    }
   });
 
   it('the target starts at the start speed and ends at the cruise speed, and the curve peaks at the far speed', () => {
@@ -450,8 +479,8 @@ describe('far stretch', () => {
   it.each([
     { label: 'from the arrival speed', start: cruise, room: 5000 },
     { label: 'from the top speed', start: 150, room: 5000 },
-    { label: 'a short stretch', start: cruise, room: 1200 },
-    { label: 'from the hand-over speed of a short stretch', start: farHandoverSpeed(600, 150, cruise, profile), room: 600 },
+    { label: 'the shortest stretch', start: cruise, room: farStretchMinRoom(cruise, profile) },
+    { label: 'the shortest stretch, from the top speed', start: farHandoverSpeed(farStretchMinRoom(cruise, profile), 150, cruise, profile), room: farStretchMinRoom(cruise, profile) },
   ])('the ship follows it ($label): smooth, accelerating at about the far acceleration at most, with a bounded jerk, and at the cruise speed with no acceleration at its end', ({ start, room }) => {
     for (const dt of [1 / 60, 1 / 30]) {
       const params: ShipParams = { ...DEFAULT_SHIP_PARAMS, driftRate: 0 };

@@ -8,7 +8,7 @@ Each automated check is written as `file` — `test title`, using the title as i
 | --- | --- |
 | `src/**/*.test.ts` | `npm test` (Vitest), in CI |
 | `e2e/*.spec.ts` | `npm run test:e2e` (Playwright, Chromium with SwiftShader), in CI |
-| `e2e/soak/soak.spec.ts` | `npm run soak`: 3 minutes in CI, 30 minutes from the Soak workflow |
+| `e2e/soak/soak.spec.ts` | `npm run soak`: 5 minutes in CI, 30 minutes from the Soak workflow |
 | `scripts/check-base.mjs` | `npm run check:base` after `npm run build`, in CI and before every deploy |
 
 [`src/verification.test.ts`](../src/verification.test.ts) keeps this file honest, and runs in `npm test`. It checks that every section 10 item has a heading here with the same text, that each one lists at least one check or manual step, that every cited file exists, and that every cited test title appears in its file.
@@ -53,6 +53,8 @@ Each automated check is written as `file` — `test title`, using the title as i
 - `src/engine/Autopilot.test.ts` — `the drop out of warp and the return to it are smooth around $kind encounters: no step in the target speed or the speed at any frame (dt $dt)`
 - `src/engine/Autopilot.test.ts` — `the quick entry (after an object left the screen): the ship itself follows a smootherstep to the cruise speed, no steeper than its max rate, with no step and a bounded jerk`
 - `src/engine/encounter.test.ts` — `the ship follows it ($label): smooth, accelerating at about the far acceleration at most, with a bounded jerk, and at the cruise speed with no acceleration at its end`
+- `src/engine/encounter.test.ts` — `is at least the whole fall from the far speed long, at every level, or not there at all`
+- `src/engine/farStretch.test.ts` — `at level $level (dt $dt), from the spawn to 200 units past the end of every far stretch, short ones included, the ship’s jerk stays under 10 and the target speed never steps`
 - `src/engine/Autopilot.test.ts` — `the ship is out of warp when the $kind leaves its far stretch (a nebula: reaches opacity 0.1), and flies the profile for its encounter speed from there (dt $dt)`
 - `src/engine/EncounterView.test.ts` — `at speed level $level ($cruiseSpeed u/s) a median planet sweeps past no faster in angle than before #36, and is reached within 2× the time it was before #64`
 - `e2e/warp.spec.ts` — `at the top speed the ship stays in warp into a planet encounter, is out of it by the end of the far stretch, and returns to warp after it`
@@ -79,7 +81,7 @@ Each automated check is written as `file` — `test title`, using the title as i
 ## 6. Objects never appear or vanish abruptly.
 
 - `src/engine/Starfield.test.ts` — `is 0 on the cube boundary`
-- `src/engine/Starfield.test.ts` — `is 0 at the camera`
+- `src/engine/Starfield.test.ts` — `is 0 at the camera and at the near plane, so no mote is cut off by it while still visible`
 - `src/engine/Starfield.test.ts` — `stays within [0, 1] and is continuous: no big step across a fine sample grid`
 - `e2e/starfield.spec.ts` — `after the ship translates with no rotation, far-star pixels stay put while near stars move`
 - `src/engine/encounter.test.ts` — `starts at opacity 0 and at full size for a non-default D (no pop-in)`
@@ -161,7 +163,7 @@ Each automated check is written as `file` — `test title`, using the title as i
 ## 12. After 30 minutes, memory and FPS have not degraded noticeably.
 
 - `e2e/soak/soak.spec.ts` — `soak: ${SOAK_MINUTES} min, heap, frame time and GPU resources stay stable`
-- `.github/workflows/ci.yml` (the `soak` job runs the soak for 3 minutes on every pull request and on every push to `main`)
+- `.github/workflows/ci.yml` (the `soak` job runs the soak for 5 minutes on every pull request and on every push to `main`)
 - `.github/workflows/soak.yml` (the full run, started by hand, 30 minutes by default)
 - `e2e/acceleratedEncounters.spec.ts` — `ten encounters, accelerated with a fake clock, leave the GPU resources at their baseline every time`
 - `e2e/starfield.spec.ts` — `soak: GPU resources stay constant and the JS heap does not grow`
@@ -170,7 +172,7 @@ Each automated check is written as `file` — `test title`, using the title as i
 - `src/engine/longRun.test.ts` — `120 accelerated comet encounters each free the nucleus and the glow, with no growth over the run`
 - `e2e/asteroid.spec.ts` — `a forced asteroid encounter draws lit rocks, runs the full cycle, compiles nothing and frees its GPU resources`
 - `e2e/comet.spec.ts` — `a forced comet encounter draws its coma and tails, runs the full cycle, compiles nothing and frees its GPU resources`
-- Manual: CI runs only the 3-minute soak. For the full 30 minutes, start the Soak workflow from the Actions tab (`minutes` defaults to 30) and check the `soak-report` artifact. SwiftShader frame rates say nothing about a real GPU, so also leave the live site running for 30 minutes in desktop Chrome with DevTools' Performance monitor open. The JS heap and frame rate at the end should be close to their values just after start.
+- Manual: CI runs only the 5-minute soak. For the full 30 minutes, start the Soak workflow from the Actions tab (`minutes` defaults to 30) and check the `soak-report` artifact. SwiftShader frame rates say nothing about a real GPU, so also leave the live site running for 30 minutes in desktop Chrome with DevTools' Performance monitor open. The JS heap and frame rate at the end should be close to their values just after start.
 
 ## 13. Asset paths resolve at `https://zeikar.dev/elsewhere/`.
 

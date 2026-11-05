@@ -41,9 +41,11 @@
  * after which the speed profile is exactly what it was. Its length (`farStretchRoom`) and the ship's
  * speed at the spawn (`farStart`) are fixed when the encounter starts. Above the arrival speed the
  * cruise before it drops out of warp only to the speed the far stretch can fall from
- * (`farHandoverSpeed`), so it needs to know the next object before it is planned: the cruise chooses
- * it once (`chooseEncounter`, kept in `AutopilotState.next`), and the encounter starts with that
- * choice.
+ * (`farHandoverSpeed`): since every far stretch is at least the whole fall from the far speed long,
+ * that is the cruise speed itself (up to the far speed), so the ship stays in warp to the spawn,
+ * steady; before an encounter with no far stretch it drops out of warp to the arrival speed as
+ * before. So the cruise needs to know the next object before it is planned: it chooses it once
+ * (`chooseEncounter`, kept in `AutopilotState.next`), and the encounter starts with that choice.
  *
  * Heading: `planEncounter` assumes the ship holds the planned heading. Shrinking the drift
  * amplitudes would turn the heading back toward -Z and move the path sideways, eating into the
@@ -957,7 +959,8 @@ const curveScratch: [number, number] = [0, 0];
  *
  * `handover` is the speed the drop out of warp ends at: the arrival speed by default, or, before an
  * encounter with a far stretch, the speed that can fly on from (`farHandoverSpeed`, between the
- * arrival speed and the cruise speed). Everything said of the arrival speed above then holds for it:
+ * arrival speed and the cruise speed: the cruise speed up to the far speed, since every far stretch
+ * is long enough to fall from there). Everything said of the arrival speed above then holds for it:
  * at the top level the cruise before most planets, asteroids and comets does not drop out of warp at
  * all, and their far stretch slows the ship down instead.
  *
@@ -1104,10 +1107,14 @@ export function encounterChoicePlan(
   }
 }
 
-/** The far stretch's length for `choice` (`farStretchRoom` with its plan and its kind's profile). */
+/**
+ * The far stretch's length for `choice` (`farStretchRoom` with its plan, its kind's profile and the
+ * encounter speed). The same at every level: its distances are not scaled, and neither is its
+ * minimum (`farStretchMinRoom`).
+ */
 export function encounterChoiceRoom(choice: Readonly<EncounterChoice>, params: Readonly<AutopilotParams>): number {
   const { radius, distance, k, drawnRadius } = encounterChoicePlan(choice, params);
-  return farStretchRoom(distance, radius * k, drawnRadius, encounterProfile(params, choice.kind));
+  return farStretchRoom(distance, radius * k, drawnRadius, encounterProfile(params, choice.kind), encounterCruiseSpeed(params));
 }
 
 /**

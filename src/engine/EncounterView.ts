@@ -283,7 +283,7 @@ export class EncounterView {
     planetRenderPosition(encounter.plan, ship.position, current.object.position);
     // Hidden until its shaders are ready (the fade is still about 1e-4 by then).
     current.setFade(this.ready ? autopilot.fade : 0);
-    current.setScale(encounterScale(encounter.plan, autopilot.remaining, profile));
+    current.setScale(encounterScale(encounter.plan, autopilot.remaining, profile, autopilot.encounterTime));
     current.update(ship.time);
   }
 

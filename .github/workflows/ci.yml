@@ -62,7 +62,7 @@ jobs:
       # Type checks the e2e suite, builds in e2e mode and runs Playwright against `vite preview`.
       - run: npm run test:e2e
 
-  # A short long-run soak: 3 minutes of travel through planet and nebula encounters, checking heap,
+  # A short long-run soak: 5 minutes of travel through planet and nebula encounters, checking heap,
   # frame time and GPU resources late versus early (e2e/soak/soak.spec.ts). The full 30-minute run
   # is the Soak workflow (soak.yml). Runs beside the e2e job.
   soak:
@@ -82,7 +82,7 @@ jobs:
 
       - run: npm run soak
         env:
-          SOAK_MINUTES: 3
+          SOAK_MINUTES: 5
 
       # The soak report (every sample and the summary), and traces on failure.
       - uses: actions/upload-artifact@v7

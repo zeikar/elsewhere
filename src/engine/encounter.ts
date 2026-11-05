@@ -388,9 +388,10 @@ const FAR_LENGTH_FACTOR = 1.875 / 2;
 /**
  * A rise to the peak smaller than this share of the peak's height above the cruise speed is left
  * out (the stretch holds the start speed instead): a small rise is short, so its jerk, which grows
- * as the rise shrinks (about 1.6 × accel² / the rise), would be large. This keeps it under about
- * 18 units per second cubed at the default level; such starts come only from the lag of a partial
- * drop out of warp (`farHandoverSpeed`) or a speed change.
+ * as the rise shrinks (about 1.6 × accel² / the rise), would be large. Such starts come only from a
+ * speed change during the cruise before the spawn: otherwise the ship is at the cruise speed there,
+ * or at the cruise before's own speed, which at the top level is the far speed itself and so has no
+ * rise at all (`farStretchRoom`, `farHandoverSpeed`).
  */
 const FAR_MIN_RISE = 0.15;
 
@@ -419,25 +420,46 @@ export function farStretchEnd(closestDistance: number, drawnRadius: number, prof
 }
 
 /**
+ * The shortest far stretch: the length of the whole fall from `profile.farSpeed` to `cruiseSpeed`
+ * at about `profile.farAccel`. It is the same at every level (about 1,480 units by default): the
+ * speeds scale with the level and the acceleration with its square.
+ */
+export function farStretchMinRoom(cruiseSpeed: number, profile: Readonly<EncounterProfile>): number {
+  if (!(profile.farSpeed > cruiseSpeed) || !(profile.farAccel > 0)) return Number.POSITIVE_INFINITY;
+  return (FAR_LENGTH_FACTOR * (profile.farSpeed * profile.farSpeed - cruiseSpeed * cruiseSpeed)) / profile.farAccel;
+}
+
+/**
  * The far stretch's length, `room`, in world units travelled from the spawn at `spawnDistance`:
- * from the spawn to `farStretchEnd`, or 0 where the object is already past the threshold there, and
- * for a profile with no far stretch (`farSpeed` 0).
+ * from the spawn to `farStretchEnd`, for a stretch flown down to `cruiseSpeed` (the encounter's
+ * cruise speed). It is 0, so the encounter has no far stretch, where the object is already past the
+ * threshold at the spawn, for a profile with no far stretch (`farSpeed` at most the cruise speed),
+ * and where the stretch would be shorter than the whole fall from the far speed
+ * (`farStretchMinRoom`). Without that minimum the cruise before a short stretch would drop only
+ * partly out of warp (`farHandoverSpeed`), and its lag at the spawn would step the ship's
+ * acceleration there, and a short stretch from the cruise speed would rise and fall again within a
+ * second or so, with a large jerk; with it, the cruise before either stays in warp up to the far
+ * speed or drops out of it to the cruise speed as without a far stretch, and every stretch is long
+ * enough to be gentle.
  */
 export function farStretchRoom(
   spawnDistance: number,
   closestDistance: number,
   drawnRadius: number,
   profile: Readonly<EncounterProfile>,
+  cruiseSpeed: number,
 ): number {
-  if (!(profile.farSpeed > 0)) return 0;
-  return Math.max(0, spawnDistance - farStretchEnd(closestDistance, drawnRadius, profile));
+  const room = spawnDistance - farStretchEnd(closestDistance, drawnRadius, profile);
+  return room >= farStretchMinRoom(cruiseSpeed, profile) ? room : 0;
 }
 
 /**
  * The highest speed the far stretch can start at and still fall to `cruiseSpeed` (the encounter's
  * cruise speed) within `room` at about `profile.farAccel`, capped at `profile.farSpeed` and at
  * `shipCruiseSpeed` (the cruise before it), and never below `cruiseSpeed`: what the cruise before an
- * encounter with that room drops out of warp to (`cruiseTargetSpeed`'s hand-over speed).
+ * encounter with that room drops out of warp to (`cruiseTargetSpeed`'s hand-over speed). For any
+ * room `farStretchRoom` gives (0, or at least `farStretchMinRoom`) it is the cruise speed, or the
+ * lower of the cruise before's speed and the far speed.
  */
 export function farHandoverSpeed(room: number, shipCruiseSpeed: number, cruiseSpeed: number, profile: Readonly<EncounterProfile>): number {
   if (!(room > 0) || !(profile.farSpeed > cruiseSpeed) || !(profile.farAccel > 0)) return cruiseSpeed;
