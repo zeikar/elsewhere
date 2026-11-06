@@ -61,6 +61,18 @@ test('loads at /elsewhere/ without errors, fills the viewport and travels on its
   expect(errors).toEqual([]);
 });
 
+/**
+ * How long the resize polls below wait. Under headless SwiftShader the page's renderer stops dead
+ * for several seconds once, about a second after the page loads (issue #61): Chromium tears down the
+ * previous document's compositor then and waits on its main thread for the GPU process to finish
+ * everything queued, and SwiftShader is seconds behind the frames already sent. No task, timer,
+ * `requestAnimationFrame`, `resize` event or `page.evaluate` runs meanwhile. That took 3.5–4 s on
+ * an idle machine and up to about 6 s under CPU load, so a poll that met it timed out at the default
+ * 5 s. The resize is not lost: it is handled as soon as the renderer runs again. A lost resize, or
+ * one handled with a stale size, still fails these polls; they just wait out the stall.
+ */
+const RESIZE_POLL = { timeout: 20_000 };
+
 test.describe('at deviceScaleFactor 2', () => {
   test.use({ deviceScaleFactor: 2, viewport: { width: 1280, height: 720 } });
 
@@ -81,9 +93,9 @@ test.describe('at deviceScaleFactor 2', () => {
       .poll(async () => {
         const s = await canvasSize(page);
         return [s.innerWidth, s.innerHeight, s.width, s.height];
-      })
+      }, RESIZE_POLL)
       .toEqual([800, 600, 1600, 1200]);
-    await expect.poll(async () => (await snapshot(page)).cameraAspect).toBeCloseTo(800 / 600, 6);
+    await expect.poll(async () => (await snapshot(page)).cameraAspect, RESIZE_POLL).toBeCloseTo(800 / 600, 6);
 
     const resized = await canvasSize(page);
     expect(resized.cssWidth).toBe(800);
@@ -93,7 +105,7 @@ test.describe('at deviceScaleFactor 2', () => {
     // 32:9, wider than the widest supported 21:9: the vertical field of view narrows so the
     // horizontal one stays at the 21:9 one (config.ts, VIEW_WIDEST_ASPECT).
     await page.setViewportSize({ width: 1280, height: 360 });
-    await expect.poll(async () => (await snapshot(page)).cameraAspect).toBeCloseTo(32 / 9, 6);
+    await expect.poll(async () => (await snapshot(page)).cameraAspect, RESIZE_POLL).toBeCloseTo(32 / 9, 6);
     const wide = await snapshot(page);
     const tanHalf = (deg: number): number => Math.tan((deg * Math.PI) / 360);
     expect(wide.cameraFov).toBeLessThan(CAMERA_FOV_DEG);
