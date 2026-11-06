@@ -409,8 +409,8 @@ function rockyPlanetTrip(): number {
 
 /**
  * The fewest FLYBY frames the comet run of the perf test compares a p75 over: its FLYBY is
- * 40–42 frames under SwiftShader, so this leaves room for slower runs. The rocky planet run's p75 only
- * sets the limit (its FLYBY is 17–18 frames), so it is not guarded, as in e2e/asteroid.spec.ts.
+ * 40–43 frames under SwiftShader, so this leaves room for slower runs. The rocky planet run's p75
+ * only sets the limit (its FLYBY is 17–18 frames), so it is not guarded, as in e2e/asteroid.spec.ts.
  */
 const COMET_FLYBY_MIN_FRAMES = 20;
 
@@ -489,11 +489,12 @@ test('a comet encounter costs about what a rocky planet encounter does under Swi
   // tails stretch past the camera's side and while the planet fills more of the view.
   //
   // The work is compared as in e2e/asteroid.spec.ts and e2e/rings.spec.ts (issues #68 and #74), so
-  // that a frame or two the main thread loses to the machine cannot decide it: the p95 over the whole
-  // encounter (about 430–440 frames; measured 1.0–1.4 ms for the comet against limits of 4.0–4.6) and the p75 over
-  // FLYBY (measured 0.3–0.4 ms against limits of 2.8), each with the factor 2 and the 2 ms slack the
-  // FLYBY p95 had, whose nearest rank was the planet's slowest FLYBY frame. The interval p50s are
-  // medians already, which one slow frame cannot move.
+  // that a frame or two the main thread loses to the machine cannot decide it: the p95 over the
+  // whole encounter (about 430–450 frames; measured 0.8–1.4 ms for the comet against limits of
+  // 4.0–5.4) and the p75 over FLYBY (measured 0.3–0.4 ms against limits of 2.6–2.8), each with the
+  // factor 2 and the 2 ms slack of the FLYBY p95 this used to compare, whose nearest rank was the
+  // planet's slowest FLYBY frame. The interval p50s are medians already, which one slow frame cannot
+  // move.
   expect(comet.flybyWork!.n, 'comet: FLYBY frames sampled').toBeGreaterThanOrEqual(COMET_FLYBY_MIN_FRAMES);
   expect(comet.encounterWork!.p95, 'encounter work p95 (ms), comet vs planet × 2 + 2').toBeLessThan(planet.encounterWork!.p95 * 2 + 2);
   expect(comet.flybyWork!.p75, 'FLYBY work p75 (ms), comet vs planet × 2 + 2').toBeLessThan(planet.flybyWork!.p75 * 2 + 2);

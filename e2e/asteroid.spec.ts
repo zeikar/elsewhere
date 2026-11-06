@@ -332,9 +332,9 @@ function perfTrips(): { asteroid: number; planet: number } {
 
 /**
  * The fewest FLYBY frames the asteroid run of the perf test compares a p75 over: its FLYBY is
- * 39–40 frames under SwiftShader, so this leaves room for slower runs. The planet run's p75 only sets
- * the limit, and its FLYBY is shorter (17 frames): a short one can loosen the check by a frame or
- * two but not fail it, so it is not guarded.
+ * 39–45 frames under SwiftShader, so this leaves room for slower runs. The planet run's p75 only
+ * sets the limit, and its FLYBY is shorter (16–17 frames): a short one can loosen the check by a
+ * frame or two but not fail it, so it is not guarded.
  */
 const ASTEROID_FLYBY_MIN_FRAMES = 20;
 
@@ -414,15 +414,15 @@ test('an asteroid field costs about what a planet encounter does under SwiftShad
   // The work is compared as e2e/rings.spec.ts compares it (issue #68), so that a frame or two the
   // main thread loses to the machine cannot decide it (issue #74): up to about 1 frame in 50 of an
   // encounter takes 3 ms to over 100 ms instead of well under 1 ms, at random (measured there). The
-  // FLYBY p95 this used to compare is the nearest rank of 17 planet frames and 39–40 asteroid ones:
-  // the planet's slowest and the asteroid's third slowest. So one slow planet frame loosens it, and
-  // three slow asteroid frames can fail it. With 5 ms of work added to every asteroid FLYBY frame,
+  // FLYBY p95 this used to compare is the nearest rank of 16–17 planet frames and 39–45 asteroid
+  // ones: the planet's slowest and the asteroid's third slowest. So one slow planet frame loosens it,
+  // and three slow asteroid frames can fail it. With 5 ms of work added to every asteroid FLYBY frame,
   // one planet FLYBY frame of 3.7 ms set its limit at 9.4 ms, and the asteroid's 8.2 ms passed it
   // (the checks below failed it: encounter p95 5.4 ms against 3.4). So it is two checks, each with
   // the factor 2 and the 2 ms slack it had:
-  // - the p95 over the whole encounter, APPROACH and FLYBY (about 370–390 frames, the rocks drawn in
+  // - the p95 over the whole encounter, APPROACH and FLYBY (about 370–395 frames, the rocks drawn in
   //   nearly all of them), which catches a cost paid in more than about 1 frame in 20 of the
-  //   encounter; measured 1.9–2.1 ms for the asteroid against limits of 4.4–4.6;
+  //   encounter; measured 1.5–2.1 ms for the asteroid against limits of 4.4–4.6;
   // - the p75 over FLYBY, where the rocks are largest, which catches a cost paid only near the
   //   closest approach in more than about a quarter of those frames; measured 0.3–0.4 ms against
   //   limits of 2.6–2.8. It needs enough asteroid frames to mean that, so an asteroid run with fewer
