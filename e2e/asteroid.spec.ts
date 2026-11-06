@@ -22,7 +22,7 @@ import { planetParams } from '../src/engine/Planet';
 import { hash } from '../src/engine/seed';
 import { formatTripSeed } from '../src/tripSeed';
 import { appUrl } from './app';
-import { frameTimeStats, installFrameSampler, takeFrameWindow } from './frameSampler';
+import { frameTimeStats, installFrameSampler, pauseAfterFirstFrames, takeFrameWindow, waitOutLoadStall, watchLoadStall } from './frameSampler';
 import { FAST_ENCOUNTERS_ARRIVAL_SPEED, SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS, CRUISE_PROGRAMS } from './limits';
 
 /** A pixel counts as lit when its brightest channel is above this (0–255). */
@@ -331,21 +331,35 @@ function perfTrips(): { asteroid: number; planet: number } {
 }
 
 /**
+ * The fewest FLYBY frames the asteroid run of the perf test compares a p75 over: its FLYBY is
+ * 39–45 frames under SwiftShader, so this leaves room for slower runs. The planet run's p75 only
+ * sets the limit, and its FLYBY is shorter (16–17 frames): a short one can loosen the check by a
+ * frame or two but not fail it, so it is not guarded.
+ */
+const ASTEROID_FLYBY_MIN_FRAMES = 20;
+
+/**
  * Flies the first encounter of trip `tripSeed`, forced to `kind`, at the top speed (flown from it,
  * see FAST_ENCOUNTERS_ARRIVAL_SPEED), and returns its frame times over the whole encounter and over
  * FLYBY alone (where the object is largest), the work of the frames that created and first drew it,
  * and the program counts at cruise and during the encounter.
  */
 async function flyFirstEncounter(page: Page, tripSeed: number, kind: 'asteroid' | 'planet') {
+  await watchLoadStall(page);
   await page.setViewportSize({ width: 960, height: 540 });
   await page.goto(appUrl(`seed=${formatTripSeed(tripSeed)}&encounterInterval=1&encounterKind=${kind}&arrivalSpeed=${FAST_ENCOUNTERS_ARRIVAL_SPEED}`));
-  await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 5);
+  // Paused from the first frames and through the post-load renderer stall, so the frames sampled (the
+  // one that creates the encounter object in particular) do not meet it (frameSampler.ts,
+  // waitOutLoadStall).
+  await pauseAfterFirstFrames(page);
   await page.evaluate(() => window.__elsewhere!.setSpeed(99));
+  const loadStall = await waitOutLoadStall(page);
   // The encounter programs are compiled asynchronously at start-up: wait until they all are (one
   // more with any galaxy in the trip, see e2e/perf.spec.ts).
   const programs = generateGalaxies(tripSeed).length > 0 ? CRUISE_PROGRAMS.withGalaxies : CRUISE_PROGRAMS.withoutGalaxies;
   await expect.poll(async () => (await snapshot(page)).renderer.programs, { timeout: 60_000 }).toBe(programs);
   const cruisePrograms = (await snapshot(page)).renderer.programs;
+  await page.evaluate(() => window.__elsewhere!.resume());
   await installFrameSampler(page);
   await page.waitForFunction(() => window.__elsewhere!.probe().state === 'APPROACH', undefined, { timeout: 120_000, polling: 100 });
   const at = await snapshot(page);
@@ -356,6 +370,7 @@ async function flyFirstEncounter(page: Page, tripSeed: number, kind: 'asteroid' 
   const flyby = await takeFrameWindow(page);
   const marks = [...approach.marks, ...flyby.marks].find((m) => m.index === 0) ?? null;
   return {
+    loadStall,
     object: kind === 'asteroid' ? { family: at.asteroid?.family, rocks: at.asteroid?.rocks.length } : { family: at.planet?.family, radius: at.planet?.radius },
     cruisePrograms,
     encounterPrograms: during.renderer.programs,
@@ -380,18 +395,51 @@ test('an asteroid field costs about what a planet encounter does under SwiftShad
   console.log(`asteroid vs planet: ${JSON.stringify(report, null, 2)}`);
 
   expect(asteroid.object.rocks).toBe(7);
-  for (const run of [asteroid, planet]) {
+  for (const [name, run] of [['asteroid', asteroid], ['planet', planet]] as const) {
     // No program compiled for the encounter: the rocks share the rocky planet surface program.
-    expect(run.encounterPrograms).toBe(run.cruisePrograms);
+    expect(run.encounterPrograms, `${name}: programs during the encounter vs at cruise`).toBe(run.cruisePrograms);
     // No stall where the object is created or first drawn.
-    expect(run.marks?.createWork ?? 0).toBeLessThan(SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS);
-    expect(run.marks?.visibleWork ?? 0).toBeLessThan(SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS);
-    expect(run.flybyWork).not.toBeNull();
-    expect(run.flybyInterval).not.toBeNull();
+    // Both frames must have been sampled, or the two checks after would pass on nothing. They are
+    // sampled only if the engine's frame runs before the sampler's in each animation frame (resume,
+    // then install the sampler: frameSampler.ts, waitOutLoadStall).
+    expect(run.marks?.createWork ?? null, `${name}: frame that created the object sampled`).not.toBeNull();
+    expect(run.marks?.visibleWork ?? null, `${name}: frame that first drew the object sampled`).not.toBeNull();
+    expect(run.marks!.createWork!, `${name}: work of the frame that created the object (ms)`).toBeLessThan(
+      SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS,
+    );
+    expect(run.marks!.visibleWork!, `${name}: work of the frame that first drew the object (ms)`).toBeLessThan(
+      SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS,
+    );
+    expect(run.encounterWork, `${name}: encounter work sampled`).not.toBeNull();
+    expect(run.flybyWork, `${name}: FLYBY work sampled`).not.toBeNull();
+    expect(run.flybyInterval, `${name}: FLYBY interval sampled`).not.toBeNull();
   }
   // Seven small meshes of a few hundred triangles each: their main-thread cost stays small, and
   // the frame interval (fill-rate bound under SwiftShader) is within noise of the planet's or less.
-  expect(asteroid.flybyWork!.p95).toBeLessThan(planet.flybyWork!.p95 * 2 + 2);
-  expect(asteroid.flybyInterval!.p50).toBeLessThan(planet.flybyInterval!.p50 * 1.25 + 2);
+  //
+  // The work is compared as e2e/rings.spec.ts compares it (issue #68), so that a frame or two the
+  // main thread loses to the machine cannot decide it (issue #74): up to about 1 frame in 50 of an
+  // encounter takes 3 ms to over 100 ms instead of well under 1 ms, at random (measured there). The
+  // FLYBY p95 this used to compare is the nearest rank of 16–17 planet frames and 39–45 asteroid
+  // ones: the planet's slowest and the asteroid's third slowest. So one slow planet frame loosens it,
+  // and three slow asteroid frames can fail it. With 5 ms of work added to every asteroid FLYBY frame,
+  // one planet FLYBY frame of 3.7 ms set its limit at 9.4 ms, and the asteroid's 8.2 ms passed it
+  // (the checks below failed it: encounter p95 5.4 ms against 3.4). So it is two checks, each with
+  // the factor 2 and the 2 ms slack it had:
+  // - the p95 over the whole encounter, APPROACH and FLYBY (about 370–395 frames, the rocks drawn in
+  //   nearly all of them), which catches a cost paid in more than about 1 frame in 20 of the
+  //   encounter; measured 1.5–2.1 ms for the asteroid against limits of 4.4–4.6;
+  // - the p75 over FLYBY, where the rocks are largest, which catches a cost paid only near the
+  //   closest approach in more than about a quarter of those frames; measured 0.3–0.4 ms against
+  //   limits of 2.6–2.8. It needs enough asteroid frames to mean that, so an asteroid run with fewer
+  //   FLYBY frames than ASTEROID_FLYBY_MIN_FRAMES fails on the count rather than comparing a few.
+  // A cost of more than about 2–3 ms paid in fewer than a quarter of the FLYBY frames, and nowhere
+  // else, passes both. The interval's p50 is the median already, which one slow frame cannot move.
+  expect(asteroid.flybyWork!.n, 'asteroid: FLYBY frames sampled').toBeGreaterThanOrEqual(ASTEROID_FLYBY_MIN_FRAMES);
+  expect(asteroid.encounterWork!.p95, 'encounter work p95 (ms), asteroid vs planet × 2 + 2').toBeLessThan(planet.encounterWork!.p95 * 2 + 2);
+  expect(asteroid.flybyWork!.p75, 'FLYBY work p75 (ms), asteroid vs planet × 2 + 2').toBeLessThan(planet.flybyWork!.p75 * 2 + 2);
+  expect(asteroid.flybyInterval!.p50, 'FLYBY interval p50 (ms), asteroid vs planet × 1.25 + 2').toBeLessThan(
+    planet.flybyInterval!.p50 * 1.25 + 2,
+  );
   expect(errors).toEqual([]);
 });

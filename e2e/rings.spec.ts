@@ -22,7 +22,7 @@ import { planetParams, type PlanetParams } from '../src/engine/Planet';
 import { hash } from '../src/engine/seed';
 import { formatTripSeed } from '../src/tripSeed';
 import { appUrl } from './app';
-import { frameTimeStats, installFrameSampler, takeFrameWindow } from './frameSampler';
+import { frameTimeStats, installFrameSampler, pauseAfterFirstFrames, takeFrameWindow, waitOutLoadStall, watchLoadStall } from './frameSampler';
 import { FAST_ENCOUNTERS_ARRIVAL_SPEED, SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS } from './limits';
 
 test.describe.configure({ timeout: 300_000 });
@@ -141,11 +141,17 @@ const RINGED_FLYBY_MIN_FRAMES = 12;
  * (its surface bake done by then).
  */
 async function flyFirstEncounter(page: Page, tripSeed: number) {
+  await watchLoadStall(page);
   await page.setViewportSize({ width: 960, height: 540 });
   await page.goto(appUrl(`seed=${formatTripSeed(tripSeed)}&encounterInterval=1&encounterKind=planet&arrivalSpeed=${FAST_ENCOUNTERS_ARRIVAL_SPEED}`));
-  await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 5);
+  // Paused from the first frames and through the post-load renderer stall, so the frames sampled (the
+  // one that creates the encounter object in particular) do not meet it (frameSampler.ts,
+  // waitOutLoadStall).
+  await pauseAfterFirstFrames(page);
   await page.evaluate(() => window.__elsewhere!.setSpeed(99));
+  const loadStall = await waitOutLoadStall(page);
   const cruisePrograms = (await page.evaluate(() => window.__elsewhere!.snapshot())).renderer.programs;
+  await page.evaluate(() => window.__elsewhere!.resume());
   await installFrameSampler(page);
   await page.waitForFunction(() => window.__elsewhere!.probe().state === 'APPROACH', undefined, { timeout: 120_000, polling: 100 });
   const planet = (await page.evaluate(() => window.__elsewhere!.snapshot())).planet;
@@ -157,6 +163,7 @@ async function flyFirstEncounter(page: Page, tripSeed: number) {
   const flyby = await takeFrameWindow(page);
   const marks = [...approach.marks, ...flyby.marks].find((m) => m.index === 0) ?? null;
   return {
+    loadStall,
     planet,
     flybyBake: atFlyby.planet?.bake ?? null,
     cruiseInterval: frameTimeStats(approach.cruise.interval),
@@ -186,10 +193,15 @@ test('a ringed encounter costs about what a plain one does under SwiftShader, co
     // No program compiled for the encounter: the ring shares the atmosphere's (halo) program.
     expect(run.encounterPrograms, `${name}: programs during the encounter vs at cruise`).toBe(run.cruisePrograms);
     // No stall where the planet is created or first drawn.
-    expect(run.marks?.createWork ?? 0, `${name}: work of the frame that created the planet (ms)`).toBeLessThan(
+    // Both frames must have been sampled, or the two checks after would pass on nothing. They are
+    // sampled only if the engine's frame runs before the sampler's in each animation frame (resume,
+    // then install the sampler: frameSampler.ts, waitOutLoadStall).
+    expect(run.marks?.createWork ?? null, `${name}: frame that created the planet sampled`).not.toBeNull();
+    expect(run.marks?.visibleWork ?? null, `${name}: frame that first drew the planet sampled`).not.toBeNull();
+    expect(run.marks!.createWork!, `${name}: work of the frame that created the planet (ms)`).toBeLessThan(
       SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS,
     );
-    expect(run.marks?.visibleWork ?? 0, `${name}: work of the frame that first drew the planet (ms)`).toBeLessThan(
+    expect(run.marks!.visibleWork!, `${name}: work of the frame that first drew the planet (ms)`).toBeLessThan(
       SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS,
     );
     expect(run.encounterWork, `${name}: encounter work sampled`).not.toBeNull();
@@ -214,10 +226,7 @@ test('a ringed encounter costs about what a plain one does under SwiftShader, co
   //   about 30 slow frames to move it, so it catches a cost paid in more than about 1 frame in 20 of
   //   the encounter, but not one paid only in FLYBY, which has fewer frames than that. Measured
   //   0.8–2.0 ms for the ringed run, against limits of 3.2–6.2. The post-load renderer stall (issue
-  //   #61) has so far ended before APPROACH: the 1 s of cruise before the encounter is simulated
-  //   time, of which the stall adds one capped step (DT_CAP_SECONDS), and APPROACH was measured to
-  //   begin 0.1–1.6 s after it ends. Nothing prevents an overlap, but a few frames of the stall in
-  //   APPROACH, or of the GPU process catching up after it, are well within those 30;
+  //   #61) is waited out before the sampler starts (waitOutLoadStall, issue #74);
   // - the p75 over FLYBY, where the planet and its ring are largest, so it catches a cost paid only
   //   near the closest approach in more than about a quarter of those frames: 7 of 25 ringed frames
   //   must be slow to move it (against 2 for the old p95), and 4 of 13 plain ones to loosen it.

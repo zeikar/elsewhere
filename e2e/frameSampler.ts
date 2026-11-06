@@ -230,3 +230,129 @@ export async function installFrameSampler(page: Page, capacity = 16_384): Promis
 export function takeFrameWindow(page: Page): Promise<FrameWindow> {
   return page.evaluate(() => window.__frameSampler!.take());
 }
+
+/**
+ * The post-load renderer stall (issue #61): under headless SwiftShader the page's renderer stops
+ * for seconds once, about a second after each navigation, while Chromium tears down the previous
+ * document's compositor and waits for the GPU process to finish what it had queued (see
+ * e2e/engine.spec.ts, RESIZE_POLL). No frame runs meanwhile, and the frames right after it are slow
+ * while the GPU process catches up: the frame that creates an encounter object took 61–67 ms there
+ * against 8–26 ms otherwise, and once 148.7 ms against the 100 ms limit
+ * (SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS, issue #74). With `?encounterInterval=1` that object is
+ * created about one simulated second after the start, right after the stall.
+ */
+export interface LoadStall {
+  /** When the first animation frame ran, in ms since the navigation. */
+  firstFrameAt: number;
+  /** The first gaps between animation frames over LOAD_STALL_SMOOTH_MS: [start, length], in ms (start since the navigation). */
+  gaps: [number, number][];
+  /** When the wait ended, in ms since the navigation. */
+  resumedAt: number;
+}
+
+/**
+ * How long after the navigation to keep the engine paused, at least. With it paused from the first
+ * frames, the stall measured 1.0–1.9 s from about 1.0 s after the navigation on a new page. After
+ * another document, the first frame ran only 3.9–4.4 s after the navigation (the stall fell in the
+ * page load), and a gap of up to 1.4 s followed at about 5 s, over by 6.6 s. With the engine running
+ * the stall had taken 3.5–6 s. A wait that ended on a gap long enough to be the stall would miss the
+ * one in the page load, hence a fixed time. It costs a few seconds a load: the encounter perf tests
+ * took 2–16 s longer in a full run, and the full run as long as before (20.7 min).
+ */
+const LOAD_STALL_WAIT_MS = 8_000;
+/** Then animation frames must have run this long with no gap over LOAD_STALL_SMOOTH_MS. */
+const LOAD_STALL_SETTLE_MS = 1_000;
+const LOAD_STALL_SMOOTH_MS = 100;
+
+declare global {
+  interface Window {
+    __loadStall?: { first: number; last: number; smoothSince: number; gaps: [number, number][] };
+  }
+}
+
+const watchedPages = new WeakSet<Page>();
+
+/**
+ * Records the gaps between animation frames in every document `page` loads from now on (call before
+ * `page.goto`; once per page is enough), for `waitOutLoadStall`.
+ */
+export async function watchLoadStall(page: Page): Promise<void> {
+  if (watchedPages.has(page)) return;
+  watchedPages.add(page);
+  await page.addInitScript((smoothMs) => {
+    const w = { first: -1, last: -1, smoothSince: -1, gaps: [] as [number, number][] };
+    window.__loadStall = w;
+    const tick = () => {
+      requestAnimationFrame(tick);
+      const t = performance.now();
+      if (w.first < 0) {
+        w.first = w.last = w.smoothSince = t;
+        return;
+      }
+      const gap = t - w.last;
+      w.last = t;
+      if (gap > smoothMs) {
+        w.smoothSince = t;
+        if (w.gaps.length < 32) w.gaps.push([Math.round(t - gap), Math.round(gap)]);
+      }
+    };
+    requestAnimationFrame(tick);
+  }, LOAD_STALL_SMOOTH_MS);
+}
+
+/**
+ * Waits for the engine's first frames (more than 5) and pauses it in the same check, so that no frame
+ * runs between the two: with `encounterInterval=1`, one that met the post-load stall would step the
+ * simulation by a capped frame. Call before `waitOutLoadStall`.
+ */
+export async function pauseAfterFirstFrames(page: Page): Promise<void> {
+  await page.waitForFunction(() => {
+    const hook = window.__elsewhere;
+    if ((hook?.snapshot().frames ?? 0) <= 5) return false;
+    hook!.pause();
+    return true;
+  });
+}
+
+/**
+ * Pauses the engine (if `pauseAfterFirstFrames` has not) and keeps it paused through the post-load
+ * stall: until LOAD_STALL_WAIT_MS after the navigation, and then until animation frames have run
+ * smoothly for LOAD_STALL_SETTLE_MS. No simulated time passes meanwhile. The caller then resumes the
+ * engine (`window.__elsewhere.resume()`) and installs its sampler, in that order, so that in each
+ * animation frame the engine's frame runs before the sampler's (which reads the frame the engine has
+ * just run); the specs assert that the frames that created and first drew the object were sampled,
+ * so the other order fails. The frames it samples, the one that creates the first encounter's object in particular, then
+ * meet neither the stall nor the GPU process catching up after it. The page must have been loaded
+ * after `watchLoadStall`. A frame that stalls on its own (a shader compile, say) still fails the stall
+ * checks: this keeps out only the stall the page load causes.
+ */
+export async function waitOutLoadStall(page: Page): Promise<LoadStall> {
+  const encounterIndex = await page.evaluate(() => {
+    window.__elsewhere!.pause();
+    return window.__elsewhere!.probe().encounterIndex;
+  });
+  if (encounterIndex !== -1) throw new Error(`waitOutLoadStall: an encounter (${encounterIndex}) began before the pause`);
+  let handle;
+  try {
+    handle = await page.waitForFunction(
+      ({ wait, settle, smooth }) => {
+        const w = window.__loadStall;
+        if (w === undefined) throw new Error('waitOutLoadStall: the page was loaded before watchLoadStall');
+        const now = performance.now();
+        // A frame must have run just now: this check can run right after a stall, before the frame
+        // that ends it.
+        if (w.first < 0 || now < wait || now - w.last > smooth || now - w.smoothSince < settle) return false;
+        return { firstFrameAt: Math.round(w.first), gaps: w.gaps, resumedAt: Math.round(now) };
+      },
+      { wait: LOAD_STALL_WAIT_MS, settle: LOAD_STALL_SETTLE_MS, smooth: LOAD_STALL_SMOOTH_MS },
+      { timeout: 60_000, polling: 100 },
+    );
+  } catch (error) {
+    // The gaps recorded say why frames never ran smoothly for long enough.
+    const recorded = await page
+      .evaluate(() => JSON.stringify({ now: Math.round(performance.now()), ...window.__loadStall }))
+      .catch((e: unknown) => `unavailable (${e instanceof Error ? e.message : String(e)})`);
+    throw new Error(`${error instanceof Error ? error.message : String(error)}\nwaitOutLoadStall: window.__loadStall = ${recorded}`);
+  }
+  return (await handle.jsonValue()) as LoadStall;
+}

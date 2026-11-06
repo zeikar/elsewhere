@@ -8,7 +8,7 @@
  * level are checked in src/engine/Autopilot.test.ts. So is the quick return to warp once a planet
  * has left the screen, at the default level (docs/PLAN.md section 9, Phase 4).
  */
-import { expect, test, type Page } from '@playwright/test';
+import type { Page } from '@playwright/test';
 import {
   ENCOUNTER_ARRIVAL_SPEED,
   ENCOUNTER_WARP_ENTRY_SECONDS,
@@ -18,6 +18,8 @@ import {
   SHIP_SPEED_LEVELS,
 } from '../src/config';
 import { appUrl } from './app';
+// A browser per test, killed when it ends: see e2e/ownBrowser.ts (issue #74).
+import { expect, test } from './ownBrowser';
 
 const TOP_SPEED = SHIP_SPEED_LEVELS[SHIP_SPEED_LEVELS.length - 1]!;
 /**

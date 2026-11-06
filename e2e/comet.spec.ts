@@ -26,7 +26,7 @@ import { planetParams } from '../src/engine/Planet';
 import { hash } from '../src/engine/seed';
 import { formatTripSeed } from '../src/tripSeed';
 import { appUrl } from './app';
-import { frameTimeStats, installFrameSampler, takeFrameWindow } from './frameSampler';
+import { frameTimeStats, installFrameSampler, pauseAfterFirstFrames, takeFrameWindow, waitOutLoadStall, watchLoadStall } from './frameSampler';
 import { FAST_ENCOUNTERS_ARRIVAL_SPEED, SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS, CRUISE_PROGRAMS } from './limits';
 
 /** A pixel counts as lit when its brightest channel is above this (0–255). */
@@ -408,19 +408,33 @@ function rockyPlanetTrip(): number {
 }
 
 /**
+ * The fewest FLYBY frames the comet run of the perf test compares a p75 over: its FLYBY is
+ * 40–43 frames under SwiftShader, so this leaves room for slower runs. The rocky planet run's p75
+ * only sets the limit (its FLYBY is 17–18 frames), so it is not guarded, as in e2e/asteroid.spec.ts.
+ */
+const COMET_FLYBY_MIN_FRAMES = 20;
+
+/**
  * Flies the first encounter of trip `tripSeed`, forced to `kind`, at the top speed (flown from it,
  * see FAST_ENCOUNTERS_ARRIVAL_SPEED), and returns its frame times over APPROACH (where a comet's
- * tails stretch past the camera's side) and over FLYBY (where the object is largest), the work of the
- * frames that created and first drew it, and the program counts at cruise and during the encounter.
+ * tails stretch past the camera's side), over FLYBY (where the object is largest) and over the whole
+ * encounter, the work of the frames that created and first drew it, and the program counts at cruise
+ * and during the encounter.
  */
 async function flyFirstEncounter(page: Page, tripSeed: number, kind: 'comet' | 'planet') {
+  await watchLoadStall(page);
   await page.setViewportSize({ width: 960, height: 540 });
   await page.goto(appUrl(`seed=${formatTripSeed(tripSeed)}&encounterInterval=1&encounterKind=${kind}&arrivalSpeed=${FAST_ENCOUNTERS_ARRIVAL_SPEED}`));
-  await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 5);
+  // Paused from the first frames and through the post-load renderer stall, so the frames sampled (the
+  // one that creates the encounter object in particular) do not meet it (frameSampler.ts,
+  // waitOutLoadStall).
+  await pauseAfterFirstFrames(page);
   await page.evaluate(() => window.__elsewhere!.setSpeed(99));
+  const loadStall = await waitOutLoadStall(page);
   const programs = generateGalaxies(tripSeed).length > 0 ? CRUISE_PROGRAMS.withGalaxies : CRUISE_PROGRAMS.withoutGalaxies;
   await expect.poll(async () => (await snapshot(page)).renderer.programs, { timeout: 60_000 }).toBe(programs);
   const cruisePrograms = (await snapshot(page)).renderer.programs;
+  await page.evaluate(() => window.__elsewhere!.resume());
   await installFrameSampler(page);
   await page.waitForFunction(() => window.__elsewhere!.probe().state === 'APPROACH', undefined, { timeout: 120_000, polling: 100 });
   const at = await snapshot(page);
@@ -431,6 +445,7 @@ async function flyFirstEncounter(page: Page, tripSeed: number, kind: 'comet' | '
   const flyby = await takeFrameWindow(page);
   const marks = [...approach.marks, ...flyby.marks].find((m) => m.index === 0) ?? null;
   return {
+    loadStall,
     object: kind === 'comet' ? { family: at.comet?.family, radius: at.comet?.radius } : { family: at.planet?.family, radius: at.planet?.radius },
     cruisePrograms,
     encounterPrograms: during.renderer.programs,
@@ -438,6 +453,7 @@ async function flyFirstEncounter(page: Page, tripSeed: number, kind: 'comet' | '
     cruiseInterval: frameTimeStats(approach.cruise.interval),
     approachInterval: frameTimeStats(approach.encounter.interval),
     approachWork: frameTimeStats(approach.encounter.work),
+    encounterWork: frameTimeStats([...approach.encounter.work, ...flyby.encounter.work]),
     flybyWork: frameTimeStats(flyby.encounter.work),
     flybyInterval: frameTimeStats(flyby.encounter.interval),
     marks,
@@ -454,21 +470,43 @@ test('a comet encounter costs about what a rocky planet encounter does under Swi
   test.info().annotations.push({ type: 'comet vs rocky planet encounter (SwiftShader, 960×540)', description: JSON.stringify(report) });
   console.log(`comet vs planet: ${JSON.stringify(report, null, 2)}`);
 
-  for (const run of [comet, planet]) {
+  for (const [name, run] of [['comet', comet], ['planet', planet]] as const) {
     // No program compiled for the encounter: the comet shares the rocky surface and halo programs.
-    expect(run.encounterPrograms).toBe(run.cruisePrograms);
+    expect(run.encounterPrograms, `${name}: programs during the encounter vs at cruise`).toBe(run.cruisePrograms);
     // No stall where the object is created or first drawn.
-    expect(run.marks?.createWork ?? 0).toBeLessThan(SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS);
-    expect(run.marks?.visibleWork ?? 0).toBeLessThan(SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS);
-    expect(run.approachInterval).not.toBeNull();
-    expect(run.flybyWork).not.toBeNull();
-    expect(run.flybyInterval).not.toBeNull();
+    // Both frames must have been sampled, or the two checks after would pass on nothing. They are
+    // sampled only if the engine's frame runs before the sampler's in each animation frame (resume,
+    // then install the sampler: frameSampler.ts, waitOutLoadStall).
+    expect(run.marks?.createWork ?? null, `${name}: frame that created the object sampled`).not.toBeNull();
+    expect(run.marks?.visibleWork ?? null, `${name}: frame that first drew the object sampled`).not.toBeNull();
+    expect(run.marks!.createWork!, `${name}: work of the frame that created the object (ms)`).toBeLessThan(
+      SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS,
+    );
+    expect(run.marks!.visibleWork!, `${name}: work of the frame that first drew the object (ms)`).toBeLessThan(
+      SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS,
+    );
+    expect(run.approachInterval, `${name}: APPROACH interval sampled`).not.toBeNull();
+    expect(run.encounterWork, `${name}: encounter work sampled`).not.toBeNull();
+    expect(run.flybyWork, `${name}: FLYBY work sampled`).not.toBeNull();
+    expect(run.flybyInterval, `${name}: FLYBY interval sampled`).not.toBeNull();
   }
   // Two draw calls of a few thousand triangles: little main-thread work, and the frame interval
   // (fill-rate bound under SwiftShader) within noise of the rocky planet's or less, both while the
   // tails stretch past the camera's side and while the planet fills more of the view.
-  expect(comet.flybyWork!.p95).toBeLessThan(planet.flybyWork!.p95 * 2 + 2);
-  expect(comet.flybyInterval!.p50).toBeLessThan(planet.flybyInterval!.p50 * 1.25 + 2);
-  expect(comet.approachInterval!.p50).toBeLessThan(planet.approachInterval!.p50 * 1.25 + 2);
+  //
+  // The work is compared as in e2e/asteroid.spec.ts and e2e/rings.spec.ts (issues #68 and #74), so
+  // that a frame or two the main thread loses to the machine cannot decide it: the p95 over the
+  // whole encounter (about 430–450 frames; measured 0.8–1.4 ms for the comet against limits of
+  // 4.0–5.4) and the p75 over FLYBY (measured 0.3–0.4 ms against limits of 2.6–2.8), each with the
+  // factor 2 and the 2 ms slack of the FLYBY p95 this used to compare, whose nearest rank was the
+  // planet's slowest FLYBY frame. The interval p50s are medians already, which one slow frame cannot
+  // move.
+  expect(comet.flybyWork!.n, 'comet: FLYBY frames sampled').toBeGreaterThanOrEqual(COMET_FLYBY_MIN_FRAMES);
+  expect(comet.encounterWork!.p95, 'encounter work p95 (ms), comet vs planet × 2 + 2').toBeLessThan(planet.encounterWork!.p95 * 2 + 2);
+  expect(comet.flybyWork!.p75, 'FLYBY work p75 (ms), comet vs planet × 2 + 2').toBeLessThan(planet.flybyWork!.p75 * 2 + 2);
+  expect(comet.flybyInterval!.p50, 'FLYBY interval p50 (ms), comet vs planet × 1.25 + 2').toBeLessThan(planet.flybyInterval!.p50 * 1.25 + 2);
+  expect(comet.approachInterval!.p50, 'APPROACH interval p50 (ms), comet vs planet × 1.25 + 2').toBeLessThan(
+    planet.approachInterval!.p50 * 1.25 + 2,
+  );
   expect(errors).toEqual([]);
 });
