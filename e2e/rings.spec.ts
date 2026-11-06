@@ -12,7 +12,8 @@
  * - Performance under SwiftShader: a ringed encounter against a plain one of a similar planet, in
  *   the engine, with no program compiled during either (the ring draws with the atmosphere's
  *   program, which ProgramWarmup keeps compiled) and no stall in the frames that create the planet
- *   or first draw it.
+ *   or first draw it. The main-thread work is compared over enough frames that a frame or two lost
+ *   to the machine cannot decide it (issue #68; see the comparison in the test).
  */
 import { writeFileSync } from 'node:fs';
 import { expect, test, type Page } from '@playwright/test';
@@ -127,7 +128,8 @@ function perfTrips(): { ringed: number; plain: number } {
  * Flies the first encounter of trip `tripSeed` at the top speed (encounters flown from it, see
  * FAST_ENCOUNTERS_ARRIVAL_SPEED) and returns its frame work times over the whole encounter and over
  * FLYBY alone (where the planet is largest), the work of the frames that created and first drew the
- * planet, and the program counts at cruise and during the encounter.
+ * planet, the program counts at cruise and during the encounter, and the planet as FLYBY begins
+ * (its surface bake done by then).
  */
 async function flyFirstEncounter(page: Page, tripSeed: number) {
   await page.setViewportSize({ width: 960, height: 540 });
@@ -140,12 +142,14 @@ async function flyFirstEncounter(page: Page, tripSeed: number) {
   const planet = (await page.evaluate(() => window.__elsewhere!.snapshot())).planet;
   await page.waitForFunction(() => window.__elsewhere!.probe().state === 'FLYBY', undefined, { timeout: 240_000, polling: 100 });
   const approach = await takeFrameWindow(page);
-  const encounterPrograms = (await page.evaluate(() => window.__elsewhere!.snapshot())).renderer.programs;
+  const atFlyby = await page.evaluate(() => window.__elsewhere!.snapshot());
+  const encounterPrograms = atFlyby.renderer.programs;
   await page.waitForFunction(() => window.__elsewhere!.probe().state === 'CRUISE', undefined, { timeout: 240_000, polling: 100 });
   const flyby = await takeFrameWindow(page);
   const marks = [...approach.marks, ...flyby.marks].find((m) => m.index === 0) ?? null;
   return {
     planet,
+    flybyBake: atFlyby.planet?.bake ?? null,
     cruiseInterval: frameTimeStats(approach.cruise.interval),
     approachInterval: frameTimeStats(approach.encounter.interval),
     cruisePrograms,
@@ -175,9 +179,36 @@ test('a ringed encounter costs about what a plain one does under SwiftShader, co
     // No stall where the planet is created or first drawn.
     expect(run.marks?.createWork ?? 0).toBeLessThan(SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS);
     expect(run.marks?.visibleWork ?? 0).toBeLessThan(SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS);
+    expect(run.encounterWork).not.toBeNull();
     expect(run.flybyWork).not.toBeNull();
+    // Both gas giants are drawn from their baked surfaces through FLYBY (issue #65), and both baked
+    // the same 48 slices during APPROACH, so the frames compared differ by the ring alone.
+    expect(run.flybyBake?.baked).toBe(true);
   }
   // The ring is one more mesh of a few hundred triangles: its main-thread cost stays small.
-  expect(ringed.flybyWork!.p95).toBeLessThan(plain.flybyWork!.p95 * 2 + 2);
+  //
+  // Compared so that a frame or two the main thread loses to the machine cannot decide it (issue
+  // #68). With two workers, and more so under CPU load, up to about 1 frame in 50 of an encounter
+  // takes 3 ms to over 100 ms instead of 0.2–0.5 ms, at random, in the simulation step (plain
+  // JavaScript) about as often as in the render submission: the thread descheduled, or the GPU
+  // process behind. FLYBY alone is only 12–28 frames, so its nearest-rank p95 was the plain run's
+  // slowest frame and the ringed run's second slowest: two such frames in the ringed FLYBY failed the
+  // check (3.4 ms against a 3.2 ms limit, with a 47 ms frame), and one in the plain FLYBY loosened it
+  // to as much as 136 ms, past any regression. So it is now two checks, each with the factor 2 and
+  // the 2 ms slack (work is timed to 0.1 ms) it had:
+  // - the p95 over the whole encounter, APPROACH and FLYBY, about 530–650 frames, the ring drawn in
+  //   nearly all of them (its main-thread cost does not grow with its size on screen): it takes about
+  //   30 slow frames to move it. Measured 0.9–2.0 ms for the ringed run, against limits of 3.4–6.2.
+  //   The post-load renderer stall (issue #61) is over before APPROACH: the 1 s of cruise before the
+  //   encounter is simulated time, of which the stall adds one capped step (DT_CAP_SECONDS), so
+  //   APPROACH begins 0.2–1.6 s after it ends, two minutes before FLYBY. The few slow frames there,
+  //   as the GPU process catches up, are well within those 30;
+  // - the median over FLYBY, where the planet and its ring are largest, so a cost paid only near
+  //   the closest approach still shows: half its frames must be slow to move it. Measured
+  //   0.2–0.4 ms against limits of 2.4–2.8.
+  // A real cost paid every frame, or in more than about 1 frame in 20, still fails the first; one
+  // paid every frame of the close pass, the second.
+  expect(ringed.encounterWork!.p95).toBeLessThan(plain.encounterWork!.p95 * 2 + 2);
+  expect(ringed.flybyWork!.p50).toBeLessThan(plain.flybyWork!.p50 * 2 + 2);
   expect(errors).toEqual([]);
 });
