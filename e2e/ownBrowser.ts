@@ -30,21 +30,52 @@
  * set-up would only hide the wait, and could not cover the 408 s. Nothing a test checks changes:
  * the page gets the project's launch and context options as before (Playwright applies them to
  * every browser and context the worker creates).
+ *
+ * What the stock `context` fixture does and this one does not:
+ * - A passing test's context is never closed, only its browser killed. A failed one's is closed
+ *   first, waiting at most FAILED_CLOSE_TIMEOUT_MS, since Playwright takes the page snapshot in
+ *   error-context.md as the context closes: the close took 42 ms after a failed warp test, 56 ms
+ *   after the ten-encounter test and 4.8 s after a test that timed out while stepping the clock.
+ * - It makes the context with `browser.newContext()`, not Playwright's context factory, so the
+ *   `video` option records nothing.
+ * - It always launches a local browser: `connectOptions` (PW_TEST_CONNECT_WS_ENDPOINT) and the
+ *   reuse of a context between tests are ignored.
+ * Failure screenshots are still taken (before fixtures are torn down); traces are off in both specs.
+ *
+ * The fixture has a timeout of its own: without one, launching the browser and making the context
+ * run under the default 30 s test timeout (a `test.setTimeout` in the body applies only after
+ * fixtures are set up), the budget the wait above used to exceed. It takes about 1 s.
  */
 import { test as base } from '@playwright/test';
 
+const FAILED_CLOSE_TIMEOUT_MS = 10_000;
+
 export const test = base.extend({
-  context: async ({ playwright, browserName }, use) => {
-    const browserType = playwright[browserName];
-    const server = await browserType.launchServer();
-    try {
-      const browser = await browserType.connect(server.wsEndpoint());
-      await use(await browser.newContext());
-    } finally {
-      // Not a graceful close: that waits on the GPU process as above (up to Playwright's 30 s).
-      await server.kill();
-    }
-  },
+  context: [
+    async ({ playwright, browserName }, use, testInfo) => {
+      const browserType = playwright[browserName];
+      const server = await browserType.launchServer();
+      try {
+        const browser = await browserType.connect(server.wsEndpoint());
+        const context = await browser.newContext();
+        await use(context);
+        if (testInfo.status !== testInfo.expectedStatus) {
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          await Promise.race([
+            context.close().catch(() => undefined),
+            new Promise<void>((resolve) => {
+              timer = setTimeout(resolve, FAILED_CLOSE_TIMEOUT_MS);
+            }),
+          ]);
+          clearTimeout(timer);
+        }
+      } finally {
+        // Not a graceful close: that waits on the GPU process as above (up to Playwright's 30 s).
+        await server.kill();
+      }
+    },
+    { scope: 'test', timeout: 60_000 },
+  ],
 });
 
 export { expect } from '@playwright/test';

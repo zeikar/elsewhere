@@ -26,7 +26,7 @@ import { planetParams } from '../src/engine/Planet';
 import { hash } from '../src/engine/seed';
 import { formatTripSeed } from '../src/tripSeed';
 import { appUrl } from './app';
-import { frameTimeStats, installFrameSampler, takeFrameWindow, waitOutLoadStall, watchLoadStall } from './frameSampler';
+import { frameTimeStats, installFrameSampler, pauseAfterFirstFrames, takeFrameWindow, waitOutLoadStall, watchLoadStall } from './frameSampler';
 import { FAST_ENCOUNTERS_ARRIVAL_SPEED, SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS, CRUISE_PROGRAMS } from './limits';
 
 /** A pixel counts as lit when its brightest channel is above this (0–255). */
@@ -418,17 +418,18 @@ const COMET_FLYBY_MIN_FRAMES = 20;
  * Flies the first encounter of trip `tripSeed`, forced to `kind`, at the top speed (flown from it,
  * see FAST_ENCOUNTERS_ARRIVAL_SPEED), and returns its frame times over APPROACH (where a comet's
  * tails stretch past the camera's side), over FLYBY (where the object is largest) and over the whole
- * encounter, the work of the
- * frames that created and first drew it, and the program counts at cruise and during the encounter.
+ * encounter, the work of the frames that created and first drew it, and the program counts at cruise
+ * and during the encounter.
  */
 async function flyFirstEncounter(page: Page, tripSeed: number, kind: 'comet' | 'planet') {
   await watchLoadStall(page);
   await page.setViewportSize({ width: 960, height: 540 });
   await page.goto(appUrl(`seed=${formatTripSeed(tripSeed)}&encounterInterval=1&encounterKind=${kind}&arrivalSpeed=${FAST_ENCOUNTERS_ARRIVAL_SPEED}`));
-  await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 5);
+  // Paused from the first frames and through the post-load renderer stall, so the frames sampled (the
+  // one that creates the encounter object in particular) do not meet it (frameSampler.ts,
+  // waitOutLoadStall).
+  await pauseAfterFirstFrames(page);
   await page.evaluate(() => window.__elsewhere!.setSpeed(99));
-  // Paused through the post-load renderer stall, so the frames sampled (the one that creates the
-  // encounter object in particular) do not meet it (frameSampler.ts, waitOutLoadStall).
   const loadStall = await waitOutLoadStall(page);
   const programs = generateGalaxies(tripSeed).length > 0 ? CRUISE_PROGRAMS.withGalaxies : CRUISE_PROGRAMS.withoutGalaxies;
   await expect.poll(async () => (await snapshot(page)).renderer.programs, { timeout: 60_000 }).toBe(programs);
@@ -473,10 +474,15 @@ test('a comet encounter costs about what a rocky planet encounter does under Swi
     // No program compiled for the encounter: the comet shares the rocky surface and halo programs.
     expect(run.encounterPrograms, `${name}: programs during the encounter vs at cruise`).toBe(run.cruisePrograms);
     // No stall where the object is created or first drawn.
-    expect(run.marks?.createWork ?? 0, `${name}: work of the frame that created the object (ms)`).toBeLessThan(
+    // Both frames must have been sampled, or the two checks after would pass on nothing. They are
+    // sampled only if the engine's frame runs before the sampler's in each animation frame (resume,
+    // then install the sampler: frameSampler.ts, waitOutLoadStall).
+    expect(run.marks?.createWork ?? null, `${name}: frame that created the object sampled`).not.toBeNull();
+    expect(run.marks?.visibleWork ?? null, `${name}: frame that first drew the object sampled`).not.toBeNull();
+    expect(run.marks!.createWork!, `${name}: work of the frame that created the object (ms)`).toBeLessThan(
       SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS,
     );
-    expect(run.marks?.visibleWork ?? 0, `${name}: work of the frame that first drew the object (ms)`).toBeLessThan(
+    expect(run.marks!.visibleWork!, `${name}: work of the frame that first drew the object (ms)`).toBeLessThan(
       SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS,
     );
     expect(run.approachInterval, `${name}: APPROACH interval sampled`).not.toBeNull();

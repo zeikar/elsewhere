@@ -22,7 +22,7 @@ import { planetParams, type PlanetParams } from '../src/engine/Planet';
 import { hash } from '../src/engine/seed';
 import { formatTripSeed } from '../src/tripSeed';
 import { appUrl } from './app';
-import { frameTimeStats, installFrameSampler, takeFrameWindow, waitOutLoadStall, watchLoadStall } from './frameSampler';
+import { frameTimeStats, installFrameSampler, pauseAfterFirstFrames, takeFrameWindow, waitOutLoadStall, watchLoadStall } from './frameSampler';
 import { FAST_ENCOUNTERS_ARRIVAL_SPEED, SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS } from './limits';
 
 test.describe.configure({ timeout: 300_000 });
@@ -144,10 +144,11 @@ async function flyFirstEncounter(page: Page, tripSeed: number) {
   await watchLoadStall(page);
   await page.setViewportSize({ width: 960, height: 540 });
   await page.goto(appUrl(`seed=${formatTripSeed(tripSeed)}&encounterInterval=1&encounterKind=planet&arrivalSpeed=${FAST_ENCOUNTERS_ARRIVAL_SPEED}`));
-  await page.waitForFunction(() => (window.__elsewhere?.snapshot().frames ?? 0) > 5);
+  // Paused from the first frames and through the post-load renderer stall, so the frames sampled (the
+  // one that creates the encounter object in particular) do not meet it (frameSampler.ts,
+  // waitOutLoadStall).
+  await pauseAfterFirstFrames(page);
   await page.evaluate(() => window.__elsewhere!.setSpeed(99));
-  // Paused through the post-load renderer stall, so the frames sampled (the one that creates the
-  // encounter object in particular) do not meet it (frameSampler.ts, waitOutLoadStall).
   const loadStall = await waitOutLoadStall(page);
   const cruisePrograms = (await page.evaluate(() => window.__elsewhere!.snapshot())).renderer.programs;
   await page.evaluate(() => window.__elsewhere!.resume());
@@ -192,10 +193,15 @@ test('a ringed encounter costs about what a plain one does under SwiftShader, co
     // No program compiled for the encounter: the ring shares the atmosphere's (halo) program.
     expect(run.encounterPrograms, `${name}: programs during the encounter vs at cruise`).toBe(run.cruisePrograms);
     // No stall where the planet is created or first drawn.
-    expect(run.marks?.createWork ?? 0, `${name}: work of the frame that created the planet (ms)`).toBeLessThan(
+    // Both frames must have been sampled, or the two checks after would pass on nothing. They are
+    // sampled only if the engine's frame runs before the sampler's in each animation frame (resume,
+    // then install the sampler: frameSampler.ts, waitOutLoadStall).
+    expect(run.marks?.createWork ?? null, `${name}: frame that created the planet sampled`).not.toBeNull();
+    expect(run.marks?.visibleWork ?? null, `${name}: frame that first drew the planet sampled`).not.toBeNull();
+    expect(run.marks!.createWork!, `${name}: work of the frame that created the planet (ms)`).toBeLessThan(
       SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS,
     );
-    expect(run.marks?.visibleWork ?? 0, `${name}: work of the frame that first drew the planet (ms)`).toBeLessThan(
+    expect(run.marks!.visibleWork!, `${name}: work of the frame that first drew the planet (ms)`).toBeLessThan(
       SOAK_ENCOUNTER_FRAME_WORK_LIMIT_MS,
     );
     expect(run.encounterWork, `${name}: encounter work sampled`).not.toBeNull();

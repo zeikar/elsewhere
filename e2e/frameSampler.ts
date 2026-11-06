@@ -301,12 +301,27 @@ export async function watchLoadStall(page: Page): Promise<void> {
 }
 
 /**
- * Pauses the engine at once and keeps it paused through the post-load stall: until
- * LOAD_STALL_WAIT_MS after the navigation, and then until animation frames have run smoothly for
- * LOAD_STALL_SETTLE_MS. No simulated time passes meanwhile. The caller then resumes the engine
- * (`window.__elsewhere.resume()`) and installs its sampler, in that order, so that in each animation
- * frame the engine's frame runs before the sampler's (which reads the frame the engine has just
- * run). The frames it samples, the one that creates the first encounter's object in particular, then
+ * Waits for the engine's first frames (more than 5) and pauses it in the same check, so that no frame
+ * runs between the two: with `encounterInterval=1`, one that met the post-load stall would step the
+ * simulation by a capped frame. Call before `waitOutLoadStall`.
+ */
+export async function pauseAfterFirstFrames(page: Page): Promise<void> {
+  await page.waitForFunction(() => {
+    const hook = window.__elsewhere;
+    if ((hook?.snapshot().frames ?? 0) <= 5) return false;
+    hook!.pause();
+    return true;
+  });
+}
+
+/**
+ * Pauses the engine (if `pauseAfterFirstFrames` has not) and keeps it paused through the post-load
+ * stall: until LOAD_STALL_WAIT_MS after the navigation, and then until animation frames have run
+ * smoothly for LOAD_STALL_SETTLE_MS. No simulated time passes meanwhile. The caller then resumes the
+ * engine (`window.__elsewhere.resume()`) and installs its sampler, in that order, so that in each
+ * animation frame the engine's frame runs before the sampler's (which reads the frame the engine has
+ * just run); the specs assert that the frames that created and first drew the object were sampled,
+ * so the other order fails. The frames it samples, the one that creates the first encounter's object in particular, then
  * meet neither the stall nor the GPU process catching up after it. The page must have been loaded
  * after `watchLoadStall`. A frame that stalls on its own (a shader compile, say) still fails the stall
  * checks: this keeps out only the stall the page load causes.
@@ -317,18 +332,27 @@ export async function waitOutLoadStall(page: Page): Promise<LoadStall> {
     return window.__elsewhere!.probe().encounterIndex;
   });
   if (encounterIndex !== -1) throw new Error(`waitOutLoadStall: an encounter (${encounterIndex}) began before the pause`);
-  const handle = await page.waitForFunction(
-    ({ wait, settle, smooth }) => {
-      const w = window.__loadStall;
-      if (w === undefined) throw new Error('waitOutLoadStall: the page was loaded before watchLoadStall');
-      const now = performance.now();
-      // A frame must have run just now: this check can run right after a stall, before the frame
-      // that ends it.
-      if (w.first < 0 || now < wait || now - w.last > smooth || now - w.smoothSince < settle) return false;
-      return { firstFrameAt: Math.round(w.first), gaps: w.gaps, resumedAt: Math.round(now) };
-    },
-    { wait: LOAD_STALL_WAIT_MS, settle: LOAD_STALL_SETTLE_MS, smooth: LOAD_STALL_SMOOTH_MS },
-    { timeout: 60_000, polling: 100 },
-  );
+  let handle;
+  try {
+    handle = await page.waitForFunction(
+      ({ wait, settle, smooth }) => {
+        const w = window.__loadStall;
+        if (w === undefined) throw new Error('waitOutLoadStall: the page was loaded before watchLoadStall');
+        const now = performance.now();
+        // A frame must have run just now: this check can run right after a stall, before the frame
+        // that ends it.
+        if (w.first < 0 || now < wait || now - w.last > smooth || now - w.smoothSince < settle) return false;
+        return { firstFrameAt: Math.round(w.first), gaps: w.gaps, resumedAt: Math.round(now) };
+      },
+      { wait: LOAD_STALL_WAIT_MS, settle: LOAD_STALL_SETTLE_MS, smooth: LOAD_STALL_SMOOTH_MS },
+      { timeout: 60_000, polling: 100 },
+    );
+  } catch (error) {
+    // The gaps recorded say why frames never ran smoothly for long enough.
+    const recorded = await page
+      .evaluate(() => JSON.stringify({ now: Math.round(performance.now()), ...window.__loadStall }))
+      .catch((e: unknown) => `unavailable (${e instanceof Error ? e.message : String(e)})`);
+    throw new Error(`${error instanceof Error ? error.message : String(error)}\nwaitOutLoadStall: window.__loadStall = ${recorded}`);
+  }
   return (await handle.jsonValue()) as LoadStall;
 }
