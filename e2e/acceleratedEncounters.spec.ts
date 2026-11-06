@@ -3,10 +3,12 @@
  * renderer, stepped by a fake clock so simulated time runs as fast as SwiftShader can draw the
  * frames, must leave the GPU resources at their baseline after every encounter.
  */
-import { expect, test, type Page } from '@playwright/test';
+import type { Page } from '@playwright/test';
 import { SHIP_SPEED_LEVELS } from '../src/config';
 import { FAST_ENCOUNTERS_ARRIVAL_SPEED } from './limits';
 import { appUrl } from './app';
+// A browser per test, killed when it ends: see e2e/ownBrowser.ts (issue #74).
+import { expect, test } from './ownBrowser';
 
 // Thousands of clock steps would make a trace of thousands of actions, which takes minutes to write
 // when the test ends (even when it passes, with 'retain-on-failure'), so this file records none.
