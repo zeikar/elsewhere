@@ -20,6 +20,8 @@ export interface FrameTimeStats {
   n: number;
   mean: number;
   p50: number;
+  /** 75th percentile (nearest rank). */
+  p75: number;
   /** 95th percentile (nearest rank). */
   p95: number;
   max: number;
@@ -33,13 +35,13 @@ export interface FrameBucket {
   work: number[];
 }
 
-/** Mean, median, 95th percentile and maximum of `values` (nearest rank), or `null` when empty. */
+/** Mean, median, 75th and 95th percentiles and maximum of `values` (nearest rank), or `null` when empty. */
 export function frameTimeStats(values: readonly number[]): FrameTimeStats | null {
   const n = values.length;
   if (n === 0) return null;
   const sorted = [...values].sort((a, b) => a - b);
   const rank = (q: number) => sorted[Math.max(0, Math.ceil(q * n) - 1)]!;
-  return { n, mean: values.reduce((sum, v) => sum + v, 0) / n, p50: rank(0.5), p95: rank(0.95), max: sorted[n - 1]! };
+  return { n, mean: values.reduce((sum, v) => sum + v, 0) / n, p50: rank(0.5), p75: rank(0.75), p95: rank(0.95), max: sorted[n - 1]! };
 }
 
 /** Frame timings around one encounter's object, in milliseconds (`null` when not seen cleanly). */
